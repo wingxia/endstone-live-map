@@ -49,6 +49,13 @@ export function App() {
           players={live.players.filter((player) => player.dimension === selectedDimension)}
           markers={markers.filter((marker) => marker.dimension === selectedDimension)}
         />
+        <div className="map-hud" aria-label="地图状态">
+          <span>{selectedDimension}</span>
+          <strong>{live.players.filter((player) => player.dimension === selectedDimension).length}</strong>
+          <span>在线</span>
+          <strong>{markers.filter((marker) => marker.dimension === selectedDimension).length}</strong>
+          <span>标注</span>
+        </div>
       </section>
 
       <aside className="side-panel" aria-label="地图信息面板">

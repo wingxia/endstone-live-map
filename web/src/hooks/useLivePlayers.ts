@@ -21,6 +21,14 @@ export function useLivePlayers(): UseLivePlayersResult {
     let socket: WebSocket | null = null;
 
     const connect = () => {
+      if (import.meta.env.DEV) {
+        import("../mockData").then(({ mockPlayers }) => {
+          setPlayersById(new Map(mockPlayers.map((player) => [player.id, { ...player, updatedAt: Date.now() }])));
+          setConnected(true);
+        });
+        return;
+      }
+
       socket = new WebSocket(liveUrl());
       socket.addEventListener("open", () => setConnected(true));
       socket.addEventListener("close", () => {

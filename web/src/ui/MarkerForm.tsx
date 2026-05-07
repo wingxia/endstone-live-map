@@ -59,13 +59,15 @@ export function MarkerForm({ world, dimension, onCreate }: MarkerFormProps) {
           </label>
         ))}
       </div>
+      <div className="marker-form-row">
+        <label>
+          创建者
+          <input value={createdBy} maxLength={80} onChange={(event) => setCreatedBy(event.target.value)} />
+        </label>
+      </div>
       <label>
         说明
-        <textarea value={description} rows={3} onChange={(event) => setDescription(event.target.value)} />
-      </label>
-      <label>
-        创建者
-        <input value={createdBy} maxLength={80} onChange={(event) => setCreatedBy(event.target.value)} />
+        <textarea value={description} rows={2} onChange={(event) => setDescription(event.target.value)} />
       </label>
       {error ? <p className="form-error">{error}</p> : null}
       <button type="submit" disabled={busy}>

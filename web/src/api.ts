@@ -39,12 +39,20 @@ export function tileUrl(world: string, dimension: string): string {
 }
 
 export async function listMarkers(): Promise<Marker[]> {
-  const response = await fetch("/api/markers");
-  if (!response.ok) {
-    throw new Error(`Failed to load markers: ${response.status}`);
+  try {
+    const response = await fetch("/api/markers");
+    if (!response.ok) {
+      throw new Error(`Failed to load markers: ${response.status}`);
+    }
+    const data = (await response.json()) as { markers: Marker[] };
+    return data.markers;
+  } catch (error) {
+    if (import.meta.env.DEV) {
+      const { mockMarkers } = await import("./mockData");
+      return mockMarkers;
+    }
+    throw error;
   }
-  const data = (await response.json()) as { markers: Marker[] };
-  return data.markers;
 }
 
 export async function createMarker(marker: MarkerDraft): Promise<Marker> {

@@ -2,6 +2,9 @@ import { useEffect, useRef } from "react";
 
 import { tileUrl, type Marker, type PlayerState } from "../api";
 
+const ERROR_TILE =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256'%3E%3Crect width='256' height='256' fill='%231b242d'/%3E%3Cpath d='M0 0H256M0 64H256M0 128H256M0 192H256M0 256H256M0 0V256M64 0V256M128 0V256M192 0V256M256 0V256' stroke='%232a3540' stroke-width='1' fill='none'/%3E%3Cpath d='M0 256L256 0' stroke='%23212b35' stroke-width='2' fill='none'/%3E%3C/svg%3E";
+
 interface MapCanvasProps {
   world: string;
   dimension: string;
@@ -37,8 +40,7 @@ export function MapCanvas({ world, dimension, players, markers }: MapCanvasProps
         maxZoom: 0,
         noWrap: true,
         className: "world-tile",
-        errorTileUrl:
-          "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256'%3E%3Crect width='256' height='256' fill='%231f2933'/%3E%3Cpath d='M0 0H256V256' stroke='%23313d49'/%3E%3C/svg%3E",
+        errorTileUrl: ERROR_TILE,
       }).addTo(map);
 
       const layers = L.layerGroup().addTo(map);
@@ -63,7 +65,13 @@ export function MapCanvas({ world, dimension, players, markers }: MapCanvasProps
       state.layers.clearLayers();
 
       for (const marker of markers) {
-        L.marker([marker.z, marker.x], { title: marker.title })
+        L.circleMarker([marker.z, marker.x], {
+          radius: 9,
+          color: "#101820",
+          weight: 2,
+          fillColor: "#60a5fa",
+          fillOpacity: 0.95,
+        })
           .bindPopup(`<strong>${escapeHtml(marker.title)}</strong><br>${escapeHtml(marker.description)}`)
           .addTo(state.layers);
       }
