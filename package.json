@@ -1,0 +1,19 @@
+{
+  "name": "endstone-live-map",
+  "private": true,
+  "workspaces": [
+    "web",
+    "worker"
+  ],
+  "scripts": {
+    "build": "npm run build -w web && npm run build -w worker",
+    "test": "npm run test -w worker && npm run test -w web",
+    "test:e2e": "npm run test:e2e -w web",
+    "typecheck": "npm run typecheck -w web && npm run typecheck -w worker",
+    "deploy": "npm run build && npm run deploy -w worker",
+    "cf:whoami": "npm exec -w worker -- wrangler whoami"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

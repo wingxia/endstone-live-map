@@ -1,0 +1,12 @@
+{
+  "worker_url": "https://map.buhe.li",
+  "plugin_token": "replace-with-cloudflare-secret",
+  "server_id": "vvnas",
+  "dimensions": ["Overworld", "Nether", "TheEnd"],
+  "scan_radius_chunks": 8,
+  "tile_refresh_seconds": 60,
+  "player_push_seconds": 1,
+  "max_tiles_per_refresh": 1,
+  "upload_tiles": true,
+  "upload_players": true
+}

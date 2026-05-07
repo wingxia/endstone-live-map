@@ -1,0 +1,15 @@
+{
+  "name": "@endstone-live-map/worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node --check src/index.js",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "node --check src/index.js"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4",
+    "wrangler": "^4.86.0"
+  }
+}

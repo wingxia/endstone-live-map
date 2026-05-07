@@ -1,0 +1,24 @@
+.DS_Store
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+.wrangler/
+.env
+.env.*
+!.env.example
+
+# CMake
+build/
+cmake-build-*/
+plugin/build*/
+compile_commands.json
+
+# Endstone/server runtime
+bedrock_server/
+plugins/
+*.log
+*.sqlite
+*.sqlite-*
