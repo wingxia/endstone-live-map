@@ -31,12 +31,6 @@
       "new_sqlite_classes": ["LiveRoom"]
     }
   ],
-  "r2_buckets": [
-    {
-      "binding": "MAP_TILES",
-      "bucket_name": "endstone-live-map-tiles"
-    }
-  ],
   "d1_databases": [
     {
       "binding": "DB",

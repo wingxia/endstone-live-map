@@ -165,13 +165,18 @@ async function handleTileUpload(request, env) {
   const payload = await request.json();
   const tile = normalizeTilePayload(payload);
   const bytes = decodeBase64(payload.data);
+  const encoded = String(payload.data);
   const extension = TILE_CONTENT_TYPES.get(tile.contentType);
   const key = tileKey(tile.world, tile.dimension, tile.z, tile.x, tile.y, extension);
 
-  await env.MAP_TILES.put(key, bytes, {
-    httpMetadata: { contentType: tile.contentType },
-    customMetadata: { world: tile.world, dimension: tile.dimension },
-  });
+  if (env.MAP_TILES) {
+    await env.MAP_TILES.put(key, bytes, {
+      httpMetadata: { contentType: tile.contentType },
+      customMetadata: { world: tile.world, dimension: tile.dimension },
+    });
+  } else {
+    await putTileInD1(env, key, tile, encoded);
+  }
 
   await broadcastLive(env, JSON.stringify({ type: "tile_ready", ...tile, extension }));
   return json({ ok: true, key });
@@ -182,17 +187,41 @@ async function handleTileGet(url, env) {
   if (!parsed) {
     return json({ error: "bad_tile_path" }, 400);
   }
-  const object = await env.MAP_TILES.get(parsed.key);
-  if (!object) {
+  if (env.MAP_TILES) {
+    const object = await env.MAP_TILES.get(parsed.key);
+    if (!object) {
+      return new Response("tile not found", { status: 404, headers: CORS_HEADERS });
+    }
+    const headers = new Headers(CORS_HEADERS);
+    object.writeHttpMetadata?.(headers);
+    if (!headers.has("Content-Type")) {
+      headers.set("Content-Type", contentTypeForExtension(parsed.extension));
+    }
+    headers.set("Cache-Control", "public, max-age=60");
+    return new Response(object.body, { headers });
+  }
+
+  const tile = await getTileFromD1(env, parsed.key);
+  if (!tile) {
     return new Response("tile not found", { status: 404, headers: CORS_HEADERS });
   }
+
   const headers = new Headers(CORS_HEADERS);
-  object.writeHttpMetadata?.(headers);
-  if (!headers.has("Content-Type")) {
-    headers.set("Content-Type", contentTypeForExtension(parsed.extension));
-  }
+  headers.set("Content-Type", tile.contentType || contentTypeForExtension(parsed.extension));
   headers.set("Cache-Control", "public, max-age=60");
-  return new Response(object.body, { headers });
+  return new Response(decodeBase64(tile.bodyBase64), { headers });
+}
+
+async function putTileInD1(env, key, tile, bodyBase64) {
+  await env.DB.prepare(
+    "INSERT INTO tiles (key, content_type, body_base64, world, dimension, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET content_type = excluded.content_type, body_base64 = excluded.body_base64, world = excluded.world, dimension = excluded.dimension, updated_at = excluded.updated_at",
+  )
+    .bind(key, tile.contentType, bodyBase64, tile.world, tile.dimension, Date.now())
+    .run();
+}
+
+async function getTileFromD1(env, key) {
+  return env.DB.prepare("SELECT content_type AS contentType, body_base64 AS bodyBase64 FROM tiles WHERE key = ?").bind(key).first();
 }
 
 async function handleMarkers(request, env, url) {

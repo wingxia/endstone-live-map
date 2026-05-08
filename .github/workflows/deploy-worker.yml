@@ -24,6 +24,7 @@ jobs:
         run: |
           test -n "${{ secrets.CLOUDFLARE_API_TOKEN }}" || (echo "Missing CLOUDFLARE_API_TOKEN secret" && exit 1)
           test -n "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" || (echo "Missing CLOUDFLARE_ACCOUNT_ID secret" && exit 1)
+          test -n "${{ secrets.PLUGIN_TOKEN }}" || (echo "Missing PLUGIN_TOKEN secret" && exit 1)
           test -n "${{ vars.CLOUDFLARE_D1_DATABASE_ID }}" || (echo "Missing CLOUDFLARE_D1_DATABASE_ID repository variable" && exit 1)
       - name: Inject D1 database id
         working-directory: worker
@@ -50,3 +51,15 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler deploy
+      - name: Set Worker secrets
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PLUGIN_TOKEN: ${{ secrets.PLUGIN_TOKEN }}
+          MARKER_WRITE_TOKEN: ${{ secrets.MARKER_WRITE_TOKEN }}
+        run: |
+          printf '%s' "$PLUGIN_TOKEN" | npx wrangler secret put PLUGIN_TOKEN
+          if [ -n "$MARKER_WRITE_TOKEN" ]; then
+            printf '%s' "$MARKER_WRITE_TOKEN" | npx wrangler secret put MARKER_WRITE_TOKEN
+          fi

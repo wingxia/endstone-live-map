@@ -30,6 +30,7 @@ class MockR2Bucket {
 class MockD1 {
   constructor() {
     this.markers = new Map();
+    this.tiles = new Map();
   }
 
   prepare(sql) {
@@ -53,10 +54,20 @@ class MockStatement {
     return { results: [...this.db.markers.values()].sort((a, b) => b.updatedAt - a.updatedAt) };
   }
 
+  async first() {
+    if (this.sql.startsWith("SELECT content_type")) {
+      return this.db.tiles.get(this.values[0]) || null;
+    }
+    return null;
+  }
+
   async run() {
-    if (this.sql.startsWith("INSERT")) {
+    if (this.sql.startsWith("INSERT INTO markers")) {
       const [id, world, dimension, x, y, z, title, description, createdBy, createdAt, updatedAt] = this.values;
       this.db.markers.set(id, { id, world, dimension, x, y, z, title, description, createdBy, createdAt, updatedAt });
+    } else if (this.sql.startsWith("INSERT INTO tiles")) {
+      const [key, contentType, bodyBase64, world, dimension, updatedAt] = this.values;
+      this.db.tiles.set(key, { contentType, bodyBase64, world, dimension, updatedAt });
     } else if (this.sql.startsWith("UPDATE")) {
       const [world, dimension, x, y, z, title, description, createdBy, updatedAt, id] = this.values;
       const existing = this.db.markers.get(id) || { id, createdAt: updatedAt };
@@ -139,6 +150,35 @@ describe("worker routes", () => {
     );
     expect(upload.status).toBe(200);
     expect(env.live.messages.at(-1)).toContain("tile_ready");
+
+    const tile = await worker.fetch(new Request("https://map.buhe.li/tiles/world/Overworld/0/0/0.bmp"), env, {});
+    expect(tile.status).toBe(200);
+    expect(tile.headers.get("Content-Type")).toBe("image/bmp");
+  });
+
+  it("falls back to D1 tile storage when R2 is not bound", async () => {
+    const env = createEnv();
+    delete env.MAP_TILES;
+    const upload = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/tiles", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          world: "world",
+          dimension: "Overworld",
+          z: 0,
+          x: 0,
+          y: 0,
+          contentType: "image/bmp",
+          data: "Qk0=",
+        }),
+      }),
+      env,
+      {},
+    );
+
+    expect(upload.status).toBe(200);
+    expect(env.DB.tiles.size).toBe(1);
 
     const tile = await worker.fetch(new Request("https://map.buhe.li/tiles/world/Overworld/0/0/0.bmp"), env, {});
     expect(tile.status).toBe(200);

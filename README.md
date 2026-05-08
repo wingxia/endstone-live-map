@@ -5,7 +5,7 @@ Realtime 2D web map for an Endstone Bedrock server.
 The project is a monorepo:
 
 - `plugin/`: C++20 Endstone plugin. It samples the highest visible block for map tiles, tracks dirty tiles from block events, and publishes player snapshots.
-- `worker/`: Cloudflare Worker API, R2 tile storage, D1 marker API, and Durable Object live room.
+- `worker/`: Cloudflare Worker API, tile storage, D1 marker API, and Durable Object live room.
 - `web/`: React/Leaflet frontend served by the Worker static assets binding.
 
 ## Current scope
@@ -14,6 +14,7 @@ The project is a monorepo:
 - Player positions update independently from terrain tiles.
 - Terrain changes mark dirty tiles and are re-rendered on a timer.
 - Markers support title, description, coordinates, dimension, creator, and timestamps.
+- Tile storage prefers R2 when the `MAP_TILES` binding exists. The current deploy configuration also supports D1 tile storage so the map can run before R2 is enabled on the Cloudflare account.
 
 ## Required secrets
 
@@ -24,6 +25,7 @@ Do not commit these values.
 - GitHub secrets for deployment workflow:
   - `CLOUDFLARE_API_TOKEN`
   - `CLOUDFLARE_ACCOUNT_ID`
+  - `PLUGIN_TOKEN`
 
 ## Local checks
 
