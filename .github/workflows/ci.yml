@@ -26,9 +26,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install C++ dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libcurl4-openssl-dev
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build clang libcurl4-openssl-dev
       - name: Configure
-        run: cmake -S plugin -B plugin/build-endstone -GNinja -DLIVE_MAP_WITH_ENDSTONE=ON -DENDSTONE_API_VERSION=0.11.3
+        run: cmake -S plugin -B plugin/build-endstone -GNinja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DLIVE_MAP_WITH_ENDSTONE=ON -DENDSTONE_API_VERSION=0.11.3
       - name: Build
         run: cmake --build plugin/build-endstone --target endstone_live_map
       - name: Upload plugin artifact
