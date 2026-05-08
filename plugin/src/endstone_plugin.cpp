@@ -66,7 +66,6 @@ public:
         tile_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { renderDirtyTiles(); }, tile_ticks,
                                                              tile_ticks);
 
-        seedLoadedChunks();
         getLogger().info("Endstone Live Map enabled for {}", settings_.worker_url);
     }
 
@@ -157,6 +156,9 @@ private:
                 location.getPitch(),
                 nowMs(),
             });
+        }
+        if (players.empty()) {
+            return;
         }
 
         const auto json = livemap::serializePlayerSnapshot(players);
