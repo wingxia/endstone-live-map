@@ -246,7 +246,7 @@ void LiveMapListener::onBlockExplode(endstone::BlockExplodeEvent &event)
 
 }  // namespace
 
-ENDSTONE_PLUGIN("endstone_live_map", "0.1.0", LiveMapPlugin)
+ENDSTONE_PLUGIN("live_map", "0.1.0", LiveMapPlugin)
 {
     prefix = "LiveMap";
     description = "Realtime 2D web map publisher for Endstone servers";

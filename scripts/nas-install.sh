@@ -10,7 +10,7 @@ PLUGIN_SO="$1"
 PLUGIN_TOKEN="$2"
 SERVER_ROOT="/vol1/1000"
 PLUGIN_DIR="$SERVER_ROOT/bedrock_server/plugins"
-DATA_DIR="$SERVER_ROOT/bedrock_server/plugins/endstone_live_map"
+DATA_DIR="$SERVER_ROOT/bedrock_server/plugins/live_map"
 
 install -m 755 "$PLUGIN_SO" "$PLUGIN_DIR/endstone_live_map.so"
 mkdir -p "$DATA_DIR"
@@ -29,5 +29,9 @@ cat > "$DATA_DIR/live_map.json" <<JSON
 }
 JSON
 
-systemctl --user status mc.service >/dev/null 2>&1 || true
-sudo systemctl restart mc.service
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "installed plugin files; restart mc.service as root to load the plugin" >&2
+  exit 0
+fi
+
+systemctl restart mc.service
