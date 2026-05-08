@@ -1,7 +1,7 @@
 #include "livemap/base64.hpp"
 #include "livemap/bmp_writer.hpp"
+#include "livemap/chunk.hpp"
 #include "livemap/color_map.hpp"
-#include "livemap/dirty_tile_tracker.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/tile_renderer.hpp"
 
@@ -29,10 +29,10 @@ void testTileMath()
 
 void testDirtyTracker()
 {
-    livemap::DirtyTileTracker tracker;
+    livemap::DirtyChunkTracker tracker;
     assert(tracker.markBlock("world", "Overworld", 0, 0));
     assert(!tracker.markBlock("world", "Overworld", 1, 1));
-    assert(tracker.markBlock("world", "Overworld", 256, 0));
+    assert(tracker.markBlock("world", "Overworld", 16, 0));
     assert(tracker.size() == 2);
 
     const auto drained = tracker.drain(1);
@@ -40,6 +40,19 @@ void testDirtyTracker()
     assert(tracker.size() == 1);
     tracker.clear();
     assert(tracker.empty());
+}
+
+void testChunkMath()
+{
+    const auto origin = livemap::chunkForBlock("world", "Overworld", 0, 0);
+    assert(origin.x == 0);
+    assert(origin.z == 0);
+    assert(origin.path() == "world/Overworld/0/0.json");
+
+    const auto negative = livemap::chunkForBlock("world", "Overworld", -1, -17);
+    assert(negative.x == -1);
+    assert(negative.z == -2);
+    assert(livemap::localChunkCoord(-1, -1) == 15);
 }
 
 void testProtocol()
@@ -63,6 +76,22 @@ void testProtocol()
 
     const auto heartbeat = livemap::serializeHeartbeat("vvnas", 7);
     assert(heartbeat == "{\"type\":\"heartbeat\",\"serverId\":\"vvnas\",\"updatedAt\":7}");
+
+    livemap::ChunkSnapshot snapshot;
+    snapshot.world = "world";
+    snapshot.dimension = "Overworld";
+    snapshot.chunk_x = -1;
+    snapshot.chunk_z = 2;
+    snapshot.palette = {"minecraft:grass_block", "minecraft:water"};
+    snapshot.blocks.fill(0);
+    snapshot.blocks[3] = 1;
+    snapshot.heights.fill(64);
+    snapshot.heights[3] = 62;
+    snapshot.updated_at_ms = 99;
+    const auto chunk_json = livemap::serializeChunkSnapshot(snapshot);
+    assert(chunk_json.find("\"chunkX\":-1") != std::string::npos);
+    assert(chunk_json.find("\"palette\":[\"minecraft:grass_block\",\"minecraft:water\"]") != std::string::npos);
+    assert(chunk_json.find("\"updatedAt\":99") != std::string::npos);
 }
 
 void testBmpAndRenderer()
@@ -92,6 +121,7 @@ void testBase64()
 int main()
 {
     testTileMath();
+    testChunkMath();
     testDirtyTracker();
     testProtocol();
     testBmpAndRenderer();

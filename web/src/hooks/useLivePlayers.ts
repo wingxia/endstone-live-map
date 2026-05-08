@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { liveUrl, type LiveMessage, type Marker, type PlayerState } from "../api";
+import { liveUrl, type BlockUpdatesMessage, type ChunkReadyMessage, type LiveMessage, type Marker, type PlayerState } from "../api";
 
 interface UseLivePlayersResult {
   players: PlayerState[];
   upsertedMarker: Marker | null;
   deletedMarkerId: string | null;
+  chunkReady: ChunkReadyMessage | null;
+  blockUpdates: BlockUpdatesMessage | null;
   connected: boolean;
 }
 
@@ -13,6 +15,8 @@ export function useLivePlayers(): UseLivePlayersResult {
   const [playersById, setPlayersById] = useState<Map<string, PlayerState>>(new Map());
   const [upsertedMarker, setUpsertedMarker] = useState<Marker | null>(null);
   const [deletedMarkerId, setDeletedMarkerId] = useState<string | null>(null);
+  const [chunkReady, setChunkReady] = useState<ChunkReadyMessage | null>(null);
+  const [blockUpdates, setBlockUpdates] = useState<BlockUpdatesMessage | null>(null);
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
@@ -42,6 +46,12 @@ export function useLivePlayers(): UseLivePlayersResult {
         if (message.type === "player_snapshot" && message.players) {
           setPlayersById(new Map(message.players.map((player) => [player.id, player])));
         }
+        if (message.type === "chunk_ready" && typeof message.chunkX === "number" && typeof message.chunkZ === "number") {
+          setChunkReady(message as ChunkReadyMessage);
+        }
+        if (message.type === "block_updates" && Array.isArray(message.updates)) {
+          setBlockUpdates(message as BlockUpdatesMessage);
+        }
         if ((message.type === "marker_created" || message.type === "marker_updated") && message.marker) {
           setUpsertedMarker(message.marker);
         }
@@ -60,5 +70,5 @@ export function useLivePlayers(): UseLivePlayersResult {
   }, []);
 
   const players = useMemo(() => [...playersById.values()].sort((a, b) => a.name.localeCompare(b.name)), [playersById]);
-  return { players, upsertedMarker, deletedMarkerId, connected };
+  return { players, upsertedMarker, deletedMarkerId, chunkReady, blockUpdates, connected };
 }

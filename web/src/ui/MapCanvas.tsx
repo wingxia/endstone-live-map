@@ -1,20 +1,24 @@
 import { useEffect, useRef } from "react";
 
-import { tileUrl, type Marker, type PlayerState } from "../api";
-
-const ERROR_TILE =
-  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256'%3E%3Crect width='256' height='256' fill='%231b242d'/%3E%3Cpath d='M0 0H256M0 64H256M0 128H256M0 192H256M0 256H256M0 0V256M64 0V256M128 0V256M192 0V256M256 0V256' stroke='%232a3540' stroke-width='1' fill='none'/%3E%3Cpath d='M0 256L256 0' stroke='%23212b35' stroke-width='2' fill='none'/%3E%3C/svg%3E";
+import type { BlockUpdatesMessage, ChunkReadyMessage, Marker, PlayerState } from "../api";
+import { createChunkGridLayer, type ChunkLayerHandle } from "./chunkLayer";
 
 interface MapCanvasProps {
   world: string;
   dimension: string;
   players: PlayerState[];
   markers: Marker[];
+  chunkReady: ChunkReadyMessage | null;
+  blockUpdates: BlockUpdatesMessage | null;
 }
 
-export function MapCanvas({ world, dimension, players, markers }: MapCanvasProps) {
+export function MapCanvas({ world, dimension, players, markers, chunkReady, blockUpdates }: MapCanvasProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
-  const stateRef = useRef<{ map: import("leaflet").Map; layers: import("leaflet").LayerGroup } | null>(null);
+  const stateRef = useRef<{
+    map: import("leaflet").Map;
+    layers: import("leaflet").LayerGroup;
+    chunkLayer: ChunkLayerHandle;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -29,22 +33,15 @@ export function MapCanvas({ world, dimension, players, markers }: MapCanvasProps
         crs: L.CRS.Simple,
         zoomControl: false,
         attributionControl: false,
-        minZoom: -2,
-        maxZoom: 2,
+        minZoom: 0,
+        maxZoom: 0,
       }).setView([0, 0], 0);
 
       L.control.zoom({ position: "bottomright" }).addTo(map);
-      L.tileLayer(tileUrl(world, dimension), {
-        tileSize: 256,
-        minZoom: 0,
-        maxZoom: 0,
-        noWrap: true,
-        className: "world-tile",
-        errorTileUrl: ERROR_TILE,
-      }).addTo(map);
+      const chunkLayer = createChunkGridLayer(L, world, dimension).addTo(map);
 
       const layers = L.layerGroup().addTo(map);
-      stateRef.current = { map, layers };
+      stateRef.current = { map, layers, chunkLayer };
     }
 
     mount();
@@ -52,6 +49,22 @@ export function MapCanvas({ world, dimension, players, markers }: MapCanvasProps
       cancelled = true;
     };
   }, [dimension, world]);
+
+  useEffect(() => {
+    stateRef.current?.chunkLayer.setWorldDimension(world, dimension);
+  }, [dimension, world]);
+
+  useEffect(() => {
+    if (chunkReady) {
+      stateRef.current?.chunkLayer.refreshChunk(chunkReady);
+    }
+  }, [chunkReady]);
+
+  useEffect(() => {
+    if (blockUpdates) {
+      stateRef.current?.chunkLayer.applyBlockUpdates(blockUpdates);
+    }
+  }, [blockUpdates]);
 
   useEffect(() => {
     let cancelled = false;

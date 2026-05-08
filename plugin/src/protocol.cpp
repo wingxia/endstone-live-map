@@ -64,6 +64,43 @@ std::string serializePlayerSnapshot(const std::vector<PlayerState> &players)
     return out.str();
 }
 
+std::string serializeChunkSnapshot(const ChunkSnapshot &snapshot)
+{
+    std::ostringstream out;
+    out << "{\"world\":\"" << jsonEscape(snapshot.world) << "\",\"dimension\":\"" << jsonEscape(snapshot.dimension)
+        << "\",\"chunkX\":" << snapshot.chunk_x << ",\"chunkZ\":" << snapshot.chunk_z << ",\"palette\":[";
+    for (std::size_t i = 0; i < snapshot.palette.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << '"' << jsonEscape(snapshot.palette[i]) << '"';
+    }
+    out << "],\"blocks\":[";
+    for (std::size_t i = 0; i < snapshot.blocks.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << snapshot.blocks[i];
+    }
+    out << "],\"heights\":[";
+    for (std::size_t i = 0; i < snapshot.heights.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << snapshot.heights[i];
+    }
+    out << "],\"updatedAt\":" << snapshot.updated_at_ms << '}';
+    return out.str();
+}
+
+std::string serializeChunkReady(const ChunkCoord &coord)
+{
+    std::ostringstream out;
+    out << "{\"type\":\"chunk_ready\",\"world\":\"" << jsonEscape(coord.world) << "\",\"dimension\":\""
+        << jsonEscape(coord.dimension) << "\",\"chunkX\":" << coord.x << ",\"chunkZ\":" << coord.z << '}';
+    return out.str();
+}
+
 std::string serializeTileReady(const TileCoord &coord, std::string content_type)
 {
     std::ostringstream out;

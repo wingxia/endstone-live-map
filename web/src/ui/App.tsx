@@ -48,6 +48,8 @@ export function App() {
           dimension={selectedDimension}
           players={live.players.filter((player) => player.dimension === selectedDimension)}
           markers={markers.filter((marker) => marker.dimension === selectedDimension)}
+          chunkReady={live.chunkReady}
+          blockUpdates={live.blockUpdates}
         />
         <div className="map-hud" aria-label="地图状态">
           <span>{selectedDimension}</span>

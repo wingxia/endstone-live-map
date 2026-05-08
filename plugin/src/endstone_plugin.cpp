@@ -1,22 +1,25 @@
-#include "livemap/dirty_tile_tracker.hpp"
+#include "livemap/chunk.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
-#include "livemap/tile_renderer.hpp"
+#include "livemap/tile_math.hpp"
 
 #include <endstone/endstone.hpp>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace livemap {
 bool postLiveJson(const LiveMapSettings &settings, std::string_view json);
-bool uploadTileBmp(const LiveMapSettings &settings, const TileCoord &coord, std::span<const std::uint8_t> bytes);
+bool uploadChunkSnapshot(const LiveMapSettings &settings, const ChunkSnapshot &snapshot);
 }  // namespace livemap
 
 namespace {
@@ -60,11 +63,11 @@ public:
         registerEvent(&LiveMapListener::onBlockExplode, *listener_, endstone::EventPriority::Monitor, true);
 
         const auto player_ticks = static_cast<std::uint64_t>(std::max(1, settings_.player_push_seconds) * 20);
-        const auto tile_ticks = static_cast<std::uint64_t>(std::max(5, settings_.tile_refresh_seconds) * 20);
+        const auto chunk_ticks = static_cast<std::uint64_t>(std::max(5, settings_.chunk_refresh_seconds) * 20);
         player_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { publishPlayers(); }, player_ticks,
                                                                player_ticks);
-        tile_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { renderDirtyTiles(); }, tile_ticks,
-                                                             tile_ticks);
+        chunk_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { publishDirtyChunks(); }, chunk_ticks,
+                                                              chunk_ticks);
 
         getLogger().info("Endstone Live Map enabled for {}", settings_.worker_url);
     }
@@ -74,8 +77,8 @@ public:
         if (player_task_ != nullptr) {
             player_task_->cancel();
         }
-        if (tile_task_ != nullptr) {
-            tile_task_->cancel();
+        if (chunk_task_ != nullptr) {
+            chunk_task_->cancel();
         }
         getLogger().info("Endstone Live Map disabled");
     }
@@ -87,19 +90,32 @@ public:
             return false;
         }
 
-        if (!args.empty() && args[0] == "render") {
-            seedLoadedChunks();
-            sender.sendMessage("Queued loaded chunks for live map rendering.");
+        if (!args.empty() && (args[0] == "render-near" || args[0] == "render")) {
+            int radius = settings_.scan_radius_chunks;
+            if (args.size() >= 2) {
+                try {
+                    radius = std::clamp(std::stoi(args[1]), 0, 64);
+                }
+                catch (...) {
+                    sender.sendMessage("Usage: /livemap render-near <radius>");
+                    return true;
+                }
+            }
+            const auto queued = seedChunksNearPlayers(radius);
+            sender.sendMessage("Queued " + std::to_string(queued) + " chunks for live map sampling.");
             return true;
         }
 
-        sender.sendMessage("Live map dirty tiles: " + std::to_string(dirtyCount()));
+        sender.sendMessage("Live map dirty chunks: " + std::to_string(dirtyCount()));
         return true;
     }
 
     void markBlock(const endstone::Block &block)
     {
         auto &dimension = block.getDimension();
+        if (!dimensionEnabled(dimension.getName())) {
+            return;
+        }
         std::scoped_lock lock(dirty_mutex_);
         dirty_.markBlock(dimension.getLevel().getName(), dimension.getName(), block.getX(), block.getZ());
     }
@@ -111,24 +127,59 @@ public:
     }
 
 private:
-    void seedLoadedChunks()
+    [[nodiscard]] bool dimensionEnabled(const std::string &dimension) const
+    {
+        return std::find(settings_.dimensions.begin(), settings_.dimensions.end(), dimension) !=
+               settings_.dimensions.end();
+    }
+
+    std::size_t markChunkSquare(const std::string &world, const std::string &dimension, int center_x, int center_z,
+                                int radius)
+    {
+        std::size_t queued = 0;
+        for (int dz = -radius; dz <= radius; ++dz) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                if (dirty_.markChunk({world, dimension, center_x + dx, center_z + dz})) {
+                    ++queued;
+                }
+            }
+        }
+        return queued;
+    }
+
+    std::size_t seedChunksNearPlayers(int radius)
     {
         auto *level = getServer().getLevel();
         if (level == nullptr) {
-            return;
+            return 0;
         }
 
+        std::size_t queued = 0;
         std::scoped_lock lock(dirty_mutex_);
-        for (auto *dimension : level->getDimensions()) {
-            if (dimension == nullptr) {
+        for (auto *player : getServer().getOnlinePlayers()) {
+            if (player == nullptr) {
                 continue;
             }
-            for (auto &chunk : dimension->getLoadedChunks()) {
-                const int block_x = chunk->getX() * 16;
-                const int block_z = chunk->getZ() * 16;
-                dirty_.markBlock(level->getName(), dimension->getName(), block_x, block_z);
+            const auto location = player->getLocation();
+            auto &dimension = location.getDimension();
+            if (!dimensionEnabled(dimension.getName())) {
+                continue;
+            }
+            const int chunk_x = livemap::floorDiv(static_cast<int>(std::floor(location.getX())), livemap::kChunkSize);
+            const int chunk_z = livemap::floorDiv(static_cast<int>(std::floor(location.getZ())), livemap::kChunkSize);
+            queued += markChunkSquare(dimension.getLevel().getName(), dimension.getName(), chunk_x, chunk_z, radius);
+        }
+
+        if (queued != 0) {
+            return queued;
+        }
+
+        for (auto *dimension : level->getDimensions()) {
+            if (dimension != nullptr && dimensionEnabled(dimension->getName())) {
+                queued += markChunkSquare(level->getName(), dimension->getName(), 0, 0, radius);
             }
         }
+        return queued;
     }
 
     void publishPlayers()
@@ -166,18 +217,18 @@ private:
         getServer().getScheduler().runTaskAsync(*this, [settings, json] { livemap::postLiveJson(settings, json); });
     }
 
-    void renderDirtyTiles()
+    void publishDirtyChunks()
     {
-        if (!settings_.upload_tiles || settings_.plugin_token.empty()) {
+        if (!settings_.upload_chunks || settings_.plugin_token.empty()) {
             return;
         }
 
-        std::vector<livemap::TileCoord> tiles;
+        std::vector<livemap::ChunkCoord> chunks;
         {
             std::scoped_lock lock(dirty_mutex_);
-            tiles = dirty_.drain(static_cast<std::size_t>(std::max(1, settings_.max_tiles_per_refresh)));
+            chunks = dirty_.drain(static_cast<std::size_t>(std::max(1, settings_.max_chunks_per_refresh)));
         }
-        if (tiles.empty()) {
+        if (chunks.empty()) {
             return;
         }
 
@@ -186,25 +237,50 @@ private:
             return;
         }
 
-        for (const auto &coord : tiles) {
+        for (const auto &coord : chunks) {
             auto *dimension = level->getDimension(coord.dimension);
             if (dimension == nullptr) {
                 continue;
             }
 
-            auto bmp = livemap::renderTileBmp(livemap::kTileSize, livemap::kTileSize, [&](int local_x, int local_z) {
-                const int block_x = coord.x * livemap::kTileSize + local_x;
-                const int block_z = coord.y * livemap::kTileSize + local_z;
-                const auto block = dimension->getHighestBlockAt(block_x, block_z);
-                if (block == nullptr) {
-                    return livemap::BlockSample{};
+            livemap::ChunkSnapshot snapshot;
+            snapshot.world = coord.world;
+            snapshot.dimension = coord.dimension;
+            snapshot.chunk_x = coord.x;
+            snapshot.chunk_z = coord.z;
+            snapshot.updated_at_ms = nowMs();
+            std::unordered_map<std::string, std::uint16_t> palette_indexes;
+
+            const auto palette_index = [&snapshot, &palette_indexes](const std::string &block_type) {
+                const auto found = palette_indexes.find(block_type);
+                if (found != palette_indexes.end()) {
+                    return found->second;
                 }
-                return livemap::BlockSample{block->getType(), block->getY()};
-            });
+                const auto index = static_cast<std::uint16_t>(snapshot.palette.size());
+                snapshot.palette.push_back(block_type);
+                palette_indexes.emplace(block_type, index);
+                return index;
+            };
+
+            for (int local_z = 0; local_z < livemap::kChunkSize; ++local_z) {
+                for (int local_x = 0; local_x < livemap::kChunkSize; ++local_x) {
+                    const int block_x = coord.x * livemap::kChunkSize + local_x;
+                    const int block_z = coord.z * livemap::kChunkSize + local_z;
+                    const int index = local_z * livemap::kChunkSize + local_x;
+                    const auto block = dimension->getHighestBlockAt(block_x, block_z);
+                    if (block == nullptr) {
+                        snapshot.blocks[index] = palette_index("minecraft:air");
+                        snapshot.heights[index] = -64;
+                        continue;
+                    }
+                    snapshot.blocks[index] = palette_index(block->getType());
+                    snapshot.heights[index] = block->getY();
+                }
+            }
 
             const auto settings = settings_;
-            getServer().getScheduler().runTaskAsync(*this, [settings, coord, bmp = std::move(bmp)] {
-                livemap::uploadTileBmp(settings, coord, std::span<const std::uint8_t>(bmp.data(), bmp.size()));
+            getServer().getScheduler().runTaskAsync(*this, [settings, snapshot = std::move(snapshot)] {
+                livemap::uploadChunkSnapshot(settings, snapshot);
             });
         }
     }
@@ -212,9 +288,9 @@ private:
     livemap::LiveMapSettings settings_;
     std::unique_ptr<LiveMapListener> listener_;
     std::shared_ptr<endstone::Task> player_task_;
-    std::shared_ptr<endstone::Task> tile_task_;
+    std::shared_ptr<endstone::Task> chunk_task_;
     mutable std::mutex dirty_mutex_;
-    livemap::DirtyTileTracker dirty_;
+    livemap::DirtyChunkTracker dirty_;
 };
 
 void LiveMapListener::onBlockPlace(endstone::BlockPlaceEvent &event)
@@ -256,8 +332,8 @@ ENDSTONE_PLUGIN("live_map", "0.1.0", LiveMapPlugin)
     authors = {"Wing Xia"};
 
     command("livemap")
-        .description("Inspect or queue live map rendering")
-        .usages("/livemap", "/livemap render")
+        .description("Inspect or queue live map sampling")
+        .usages("/livemap", "/livemap render-near <radius>")
         .permissions("livemap.command");
 
     permission("livemap.command")

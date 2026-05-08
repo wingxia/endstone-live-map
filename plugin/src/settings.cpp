@@ -72,10 +72,13 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.server_id = stringValue(source, "server_id", settings.server_id);
     settings.dimensions = dimensionsValue(source, settings.dimensions);
     settings.scan_radius_chunks = intValue(source, "scan_radius_chunks", settings.scan_radius_chunks);
-    settings.tile_refresh_seconds = intValue(source, "tile_refresh_seconds", settings.tile_refresh_seconds);
+    settings.chunk_refresh_seconds = intValue(source, "chunk_refresh_seconds", settings.chunk_refresh_seconds);
+    settings.chunk_refresh_seconds = intValue(source, "tile_refresh_seconds", settings.chunk_refresh_seconds);
     settings.player_push_seconds = intValue(source, "player_push_seconds", settings.player_push_seconds);
-    settings.max_tiles_per_refresh = intValue(source, "max_tiles_per_refresh", settings.max_tiles_per_refresh);
-    settings.upload_tiles = boolValue(source, "upload_tiles", settings.upload_tiles);
+    settings.max_chunks_per_refresh = intValue(source, "max_chunks_per_refresh", settings.max_chunks_per_refresh);
+    settings.max_chunks_per_refresh = intValue(source, "max_tiles_per_refresh", settings.max_chunks_per_refresh);
+    settings.upload_chunks = boolValue(source, "upload_chunks", settings.upload_chunks);
+    settings.upload_chunks = boolValue(source, "upload_tiles", settings.upload_chunks);
     settings.upload_players = boolValue(source, "upload_players", settings.upload_players);
     return settings;
 }
@@ -90,10 +93,10 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"server_id\": \"vvnas\",\n"
         << "  \"dimensions\": [\"Overworld\", \"Nether\", \"TheEnd\"],\n"
         << "  \"scan_radius_chunks\": 8,\n"
-        << "  \"tile_refresh_seconds\": 60,\n"
+        << "  \"chunk_refresh_seconds\": 60,\n"
         << "  \"player_push_seconds\": 1,\n"
-        << "  \"max_tiles_per_refresh\": 1,\n"
-        << "  \"upload_tiles\": true,\n"
+        << "  \"max_chunks_per_refresh\": 1,\n"
+        << "  \"upload_chunks\": true,\n"
         << "  \"upload_players\": true\n"
         << "}\n";
 }

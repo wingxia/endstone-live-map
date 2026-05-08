@@ -3,6 +3,7 @@
   "name": "endstone-live-map",
   "main": "src/index.js",
   "compatibility_date": "2026-04-29",
+  "compatibility_flags": ["nodejs_compat"],
   "observability": {
     "enabled": true
   },
@@ -33,15 +34,14 @@
   ],
   "r2_buckets": [
     {
-      "binding": "MAP_TILES",
+      "binding": "MAP_DATA",
       "bucket_name": "endstone-live-map-tiles"
     }
   ],
-  "d1_databases": [
+  "hyperdrive": [
     {
-      "binding": "DB",
-      "database_name": "endstone_live_map",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID"
+      "binding": "HYPERDRIVE",
+      "id": "REPLACE_WITH_HYPERDRIVE_ID"
     }
   ]
 }

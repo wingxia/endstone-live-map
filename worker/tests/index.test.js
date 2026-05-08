@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import worker, { normalizeMarkerPayload, normalizeTilePayload, tileKey } from "../src/index.js";
+import worker, {
+  chunkKey,
+  diffChunkSnapshots,
+  normalizeChunkSnapshot,
+  normalizeMarkerPayload,
+  normalizeTilePayload,
+  tileKey,
+} from "../src/index.js";
 
 class MockR2Object {
   constructor(body, contentType) {
@@ -11,6 +18,17 @@ class MockR2Object {
   writeHttpMetadata(headers) {
     headers.set("Content-Type", this.contentType);
   }
+
+  async text() {
+    if (typeof this.body === "string") {
+      return this.body;
+    }
+    return new TextDecoder().decode(this.body);
+  }
+
+  async json() {
+    return JSON.parse(await this.text());
+  }
 }
 
 class MockR2Bucket {
@@ -18,8 +36,8 @@ class MockR2Bucket {
     this.objects = new Map();
   }
 
-  async put(key, body, options) {
-    this.objects.set(key, new MockR2Object(body, options.httpMetadata.contentType));
+  async put(key, body, options = {}) {
+    this.objects.set(key, new MockR2Object(body, options.httpMetadata?.contentType || "application/octet-stream"));
   }
 
   async get(key) {
@@ -27,61 +45,38 @@ class MockR2Bucket {
   }
 }
 
-class MockD1 {
+class MockMarkerDb {
   constructor() {
     this.markers = new Map();
-    this.tiles = new Map();
   }
 
-  prepare(sql) {
-    return new MockStatement(this, sql);
-  }
-}
-
-class MockStatement {
-  constructor(db, sql) {
-    this.db = db;
-    this.sql = sql;
-    this.values = [];
-  }
-
-  bind(...values) {
-    this.values = values;
-    return this;
-  }
-
-  async all() {
-    return { results: [...this.db.markers.values()].sort((a, b) => b.updatedAt - a.updatedAt) };
-  }
-
-  async first() {
-    if (this.sql.startsWith("SELECT content_type")) {
-      return this.db.tiles.get(this.values[0]) || null;
+  async execute(sql, values = []) {
+    if (sql.startsWith("SELECT")) {
+      return [[...this.markers.values()].sort((a, b) => b.updatedAt - a.updatedAt)];
     }
-    return null;
-  }
-
-  async run() {
-    if (this.sql.startsWith("INSERT INTO markers")) {
-      const [id, world, dimension, x, y, z, title, description, createdBy, createdAt, updatedAt] = this.values;
-      this.db.markers.set(id, { id, world, dimension, x, y, z, title, description, createdBy, createdAt, updatedAt });
-    } else if (this.sql.startsWith("INSERT INTO tiles")) {
-      const [key, contentType, bodyBase64, world, dimension, updatedAt] = this.values;
-      this.db.tiles.set(key, { contentType, bodyBase64, world, dimension, updatedAt });
-    } else if (this.sql.startsWith("UPDATE")) {
-      const [world, dimension, x, y, z, title, description, createdBy, updatedAt, id] = this.values;
-      const existing = this.db.markers.get(id) || { id, createdAt: updatedAt };
-      this.db.markers.set(id, { ...existing, world, dimension, x, y, z, title, description, createdBy, updatedAt });
-    } else if (this.sql.startsWith("DELETE")) {
-      this.db.markers.delete(this.values[0]);
+    if (sql.startsWith("INSERT INTO markers")) {
+      const [id, world, dimension, x, y, z, title, description, createdBy, createdAt, updatedAt] = values;
+      this.markers.set(id, { id, world, dimension, x, y, z, title, description, createdBy, createdAt, updatedAt });
+      return [{ affectedRows: 1 }];
     }
-    return { success: true };
+    if (sql.startsWith("UPDATE markers")) {
+      const [world, dimension, x, y, z, title, description, createdBy, updatedAt, id] = values;
+      const existing = this.markers.get(id) || { id, createdAt: updatedAt };
+      this.markers.set(id, { ...existing, world, dimension, x, y, z, title, description, createdBy, updatedAt });
+      return [{ affectedRows: 1 }];
+    }
+    if (sql.startsWith("DELETE FROM markers")) {
+      this.markers.delete(values[0]);
+      return [{ affectedRows: 1 }];
+    }
+    throw new Error(`Unexpected SQL: ${sql}`);
   }
 }
 
 class MockLiveRoomBinding {
   constructor() {
     this.messages = [];
+    this.sessions = 0;
   }
 
   idFromName(name) {
@@ -90,9 +85,12 @@ class MockLiveRoomBinding {
 
   get() {
     return {
-      fetch: async (_url, init = {}) => {
+      fetch: async (url, init = {}) => {
+        if (String(url).endsWith("/stats")) {
+          return Response.json({ ok: true, sessions: this.sessions });
+        }
         this.messages.push(init.body || "");
-        return new Response(JSON.stringify({ ok: true }));
+        return Response.json({ ok: true, sessions: this.sessions });
       },
     };
   }
@@ -102,15 +100,43 @@ function createEnv() {
   const live = new MockLiveRoomBinding();
   return {
     PLUGIN_TOKEN: "secret",
-    MAP_TILES: new MockR2Bucket(),
-    DB: new MockD1(),
+    MAP_DATA: new MockR2Bucket(),
+    MARKER_DB: new MockMarkerDb(),
     LIVE_ROOM: live,
     live,
   };
 }
 
+function createChunk(overrides = {}) {
+  return {
+    world: "world",
+    dimension: "Overworld",
+    chunkX: 0,
+    chunkZ: 0,
+    palette: ["minecraft:grass_block", "minecraft:water"],
+    blocks: Array.from({ length: 256 }, () => 0),
+    heights: Array.from({ length: 256 }, () => 64),
+    updatedAt: 10,
+    ...overrides,
+  };
+}
+
 describe("worker helpers", () => {
-  it("normalizes tile payloads and keys", () => {
+  it("normalizes chunk payloads and keys", () => {
+    const chunk = normalizeChunkSnapshot(createChunk({ world: "my world", chunkX: -1 }));
+    expect(chunk).toMatchObject({ world: "my_world", chunkX: -1, blocks: expect.any(Array) });
+    expect(chunkKey("world", "Overworld", -1, 2)).toBe("chunks/v1/world/Overworld/-1/2.json");
+  });
+
+  it("detects block updates between chunk snapshots", () => {
+    const previous = createChunk();
+    const next = createChunk({ blocks: [...previous.blocks], heights: [...previous.heights] });
+    next.blocks[17] = 1;
+    next.heights[17] = 63;
+    expect(diffChunkSnapshots(previous, next)).toEqual([{ localX: 1, localZ: 1, block: "minecraft:water", height: 63 }]);
+  });
+
+  it("normalizes legacy tile payloads and keys", () => {
     expect(normalizeTilePayload({ world: "my world", dimension: "Overworld", z: 0, x: -1, y: 2, contentType: "image/bmp" })).toMatchObject({
       world: "my_world",
       x: -1,
@@ -129,36 +155,73 @@ describe("worker helpers", () => {
 });
 
 describe("worker routes", () => {
-  it("accepts authenticated tile uploads and serves stored tiles", async () => {
+  it("accepts authenticated chunk uploads, stores R2 snapshots, and serves chunk ranges", async () => {
     const env = createEnv();
     const upload = await worker.fetch(
-      new Request("https://map.buhe.li/api/plugin/tiles", {
+      new Request("https://map.buhe.li/api/plugin/chunks", {
         method: "POST",
         headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-        body: JSON.stringify({
-          world: "world",
-          dimension: "Overworld",
-          z: 0,
-          x: 0,
-          y: 0,
-          contentType: "image/bmp",
-          data: "Qk0=",
-        }),
+        body: JSON.stringify(createChunk()),
       }),
       env,
       {},
     );
     expect(upload.status).toBe(200);
-    expect(env.live.messages.at(-1)).toContain("tile_ready");
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(true);
+    expect(env.live.messages.at(-1)).toContain("chunk_ready");
 
-    const tile = await worker.fetch(new Request("https://map.buhe.li/tiles/world/Overworld/0/0/0.bmp"), env, {});
-    expect(tile.status).toBe(200);
-    expect(tile.headers.get("Content-Type")).toBe("image/bmp");
+    const chunks = await worker.fetch(
+      new Request("https://map.buhe.li/api/chunks?world=world&dimension=Overworld&minChunkX=0&maxChunkX=0&minChunkZ=0&maxChunkZ=0"),
+      env,
+      {},
+    );
+    const body = await chunks.json();
+    expect(body.chunks).toHaveLength(1);
+    expect(body.missing).toHaveLength(0);
   });
 
-  it("falls back to D1 tile storage when R2 is not bound", async () => {
+  it("broadcasts block updates when viewers are connected", async () => {
     const env = createEnv();
-    delete env.MAP_TILES;
+    env.live.sessions = 1;
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk()), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    const next = createChunk({ blocks: Array.from({ length: 256 }, () => 0), heights: Array.from({ length: 256 }, () => 64), updatedAt: 11 });
+    next.blocks[0] = 1;
+
+    const upload = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(next),
+      }),
+      env,
+      {},
+    );
+    expect(upload.status).toBe(200);
+    expect(env.live.messages.some((message) => String(message).includes("block_updates"))).toBe(true);
+  });
+
+  it("serves texture manifest and atlas from R2", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("textures/v1/manifest.json", JSON.stringify({ version: 1, tileSize: 16, blocks: {} }), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put("textures/v1/atlas.png", new Uint8Array([1, 2, 3]), {
+      httpMetadata: { contentType: "image/png" },
+    });
+
+    const manifest = await worker.fetch(new Request("https://map.buhe.li/api/textures/manifest"), env, {});
+    expect(manifest.status).toBe(200);
+    expect(await manifest.json()).toMatchObject({ version: 1 });
+
+    const atlas = await worker.fetch(new Request("https://map.buhe.li/textures/atlas.png"), env, {});
+    expect(atlas.status).toBe(200);
+    expect(atlas.headers.get("Content-Type")).toBe("image/png");
+  });
+
+  it("keeps legacy tile reads R2-only without D1", async () => {
+    const env = createEnv();
     const upload = await worker.fetch(
       new Request("https://map.buhe.li/api/plugin/tiles", {
         method: "POST",
@@ -176,9 +239,8 @@ describe("worker routes", () => {
       env,
       {},
     );
-
     expect(upload.status).toBe(200);
-    expect(env.DB.tiles.size).toBe(1);
+    expect(env.DB).toBeUndefined();
 
     const tile = await worker.fetch(new Request("https://map.buhe.li/tiles/world/Overworld/0/0/0.bmp"), env, {});
     expect(tile.status).toBe(200);
@@ -191,7 +253,7 @@ describe("worker routes", () => {
     expect(response.status).toBe(401);
   });
 
-  it("creates, lists, updates, and deletes markers", async () => {
+  it("creates, lists, updates, and deletes markers through the MySQL adapter", async () => {
     const env = createEnv();
     const create = await worker.fetch(
       new Request("https://map.buhe.li/api/markers", {
@@ -222,6 +284,6 @@ describe("worker routes", () => {
 
     const remove = await worker.fetch(new Request(`https://map.buhe.li/api/markers/${created.marker.id}`, { method: "DELETE" }), env, {});
     expect(remove.status).toBe(200);
-    expect(env.DB.markers.size).toBe(0);
+    expect(env.MARKER_DB.markers.size).toBe(0);
   });
 });

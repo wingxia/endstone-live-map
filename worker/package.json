@@ -11,5 +11,8 @@
   "devDependencies": {
     "vitest": "^3.2.4",
     "wrangler": "^4.86.0"
+  },
+  "dependencies": {
+    "mysql2": "^3.22.3"
   }
 }

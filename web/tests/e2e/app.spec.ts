@@ -24,8 +24,28 @@ test("loads the map application shell", async ({ page }) => {
     });
   });
   await page.route("**/api/live", async (route) => route.abort());
-  await page.route("**/tiles/**", async (route) => {
-    await route.fulfill({ status: 404, body: "tile not found" });
+  await page.route("**/api/chunks?**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        chunks: [
+          {
+            world: "world",
+            dimension: "Overworld",
+            chunkX: 0,
+            chunkZ: 0,
+            palette: ["minecraft:grass_block", "minecraft:water"],
+            blocks: Array.from({ length: 256 }, (_, index) => (index % 7 === 0 ? 1 : 0)),
+            heights: Array.from({ length: 256 }, () => 64),
+            updatedAt: 1,
+          },
+        ],
+        missing: [],
+      }),
+    });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({ status: 404, body: "texture manifest not found" });
   });
 
   await page.goto("/");

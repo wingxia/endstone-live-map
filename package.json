@@ -11,9 +11,13 @@
     "test:e2e": "npm run test:e2e -w web",
     "typecheck": "npm run typecheck -w web && npm run typecheck -w worker",
     "deploy": "npm run build && npm run deploy -w worker",
-    "cf:whoami": "npm exec -w worker -- wrangler whoami"
+    "cf:whoami": "npm exec -w worker -- wrangler whoami",
+    "textures:atlas": "node scripts/build-texture-atlas.mjs"
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "pngjs": "^7.0.0"
   }
 }

@@ -67,7 +67,8 @@ textarea {
   font-size: 14px;
 }
 
-.world-tile {
+.chunk-tile,
+.chunk-grid-layer {
   image-rendering: pixelated;
 }
 

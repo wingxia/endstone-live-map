@@ -1,3 +1,5 @@
+import { createConnection } from "mysql2/promise";
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
@@ -9,6 +11,11 @@ const TILE_CONTENT_TYPES = new Map([
   ["image/png", "png"],
   ["image/webp", "webp"],
 ]);
+
+const CHUNK_BLOCK_COUNT = 256;
+const MAX_CHUNKS_PER_REQUEST = 256;
+const TEXTURE_MANIFEST_KEY = "textures/v1/manifest.json";
+const TEXTURE_ATLAS_KEY = "textures/v1/atlas.png";
 
 export class LiveRoom {
   constructor(state, env) {
@@ -32,6 +39,10 @@ export class LiveRoom {
         }
       });
       return new Response(null, { status: 101, webSocket: client });
+    }
+
+    if (request.method === "GET" && url.pathname === "/stats") {
+      return json({ ok: true, sessions: this.sessions.size });
     }
 
     if (request.method === "POST" && url.pathname === "/broadcast") {
@@ -88,12 +99,32 @@ export default {
         return json({ ok: true });
       }
 
+      if (url.pathname === "/api/plugin/chunks") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleChunkUpload(request, env);
+      }
+
       if (url.pathname === "/api/plugin/tiles") {
         const auth = requirePluginAuth(request, env);
         if (auth) {
           return auth;
         }
         return handleTileUpload(request, env);
+      }
+
+      if (url.pathname === "/api/chunks") {
+        return handleChunksGet(url, env);
+      }
+
+      if (url.pathname === "/api/textures/manifest") {
+        return handleTextureManifestGet(env);
+      }
+
+      if (url.pathname === "/textures/atlas.png") {
+        return handleTextureAtlasGet(env);
       }
 
       if (url.pathname.startsWith("/tiles/")) {
@@ -155,83 +186,187 @@ function fetchLiveRoom(request, env) {
   return env.LIVE_ROOM.get(id).fetch(request);
 }
 
+async function getLiveStats(env) {
+  const id = env.LIVE_ROOM.idFromName("global");
+  const response = await env.LIVE_ROOM.get(id).fetch("https://live-room/stats");
+  return response.json();
+}
+
 async function broadcastLive(env, message) {
   const id = env.LIVE_ROOM.idFromName("global");
-  const stub = env.LIVE_ROOM.get(id);
-  await stub.fetch("https://live-room/broadcast", { method: "POST", body: message });
+  const response = await env.LIVE_ROOM.get(id).fetch("https://live-room/broadcast", { method: "POST", body: message });
+  return response.json();
+}
+
+function mapBucket(env) {
+  return env.MAP_DATA || env.MAP_TILES || null;
+}
+
+async function handleChunkUpload(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
+  const snapshot = normalizeChunkSnapshot(await request.json());
+  const key = chunkKey(snapshot.world, snapshot.dimension, snapshot.chunkX, snapshot.chunkZ);
+  const stats = await getLiveStats(env).catch(() => ({ sessions: 0 }));
+  let updates = [];
+
+  if (stats.sessions > 0) {
+    const previous = await readR2Json(await bucket.get(key));
+    updates = previous ? diffChunkSnapshots(previous, snapshot) : [];
+  }
+
+  await bucket.put(key, JSON.stringify(snapshot), {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+    customMetadata: { world: snapshot.world, dimension: snapshot.dimension },
+  });
+
+  await broadcastLive(
+    env,
+    JSON.stringify({
+      type: "chunk_ready",
+      world: snapshot.world,
+      dimension: snapshot.dimension,
+      chunkX: snapshot.chunkX,
+      chunkZ: snapshot.chunkZ,
+      updatedAt: snapshot.updatedAt,
+    }),
+  );
+
+  if (updates.length > 0) {
+    await broadcastLive(
+      env,
+      JSON.stringify({
+        type: "block_updates",
+        world: snapshot.world,
+        dimension: snapshot.dimension,
+        chunkX: snapshot.chunkX,
+        chunkZ: snapshot.chunkZ,
+        updates,
+        updatedAt: snapshot.updatedAt,
+      }),
+    );
+  }
+
+  return json({ ok: true, key, updates: updates.length });
+}
+
+async function handleChunksGet(url, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
+  const query = normalizeChunkQuery(url.searchParams);
+  const chunkCount = (query.maxChunkX - query.minChunkX + 1) * (query.maxChunkZ - query.minChunkZ + 1);
+  if (chunkCount > MAX_CHUNKS_PER_REQUEST) {
+    return json({ error: "too_many_chunks", max: MAX_CHUNKS_PER_REQUEST }, 400);
+  }
+
+  const chunks = [];
+  const missing = [];
+  const reads = [];
+  for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
+    for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
+      reads.push(
+        (async () => {
+          const key = chunkKey(query.world, query.dimension, chunkX, chunkZ);
+          const object = await bucket.get(key);
+          if (!object) {
+            missing.push({ chunkX, chunkZ });
+            return;
+          }
+          chunks.push(await readR2Json(object));
+        })(),
+      );
+    }
+  }
+  await Promise.all(reads);
+  chunks.sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
+  missing.sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
+  return json({ chunks, missing }, 200, { "Cache-Control": "public, max-age=15" });
+}
+
+async function handleTextureManifestGet(env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  const object = await bucket.get(TEXTURE_MANIFEST_KEY);
+  if (!object) {
+    return json({ error: "texture_manifest_not_found" }, 404);
+  }
+  return json(await readR2Json(object), 200, { "Cache-Control": "public, max-age=3600" });
+}
+
+async function handleTextureAtlasGet(env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  const object = await bucket.get(TEXTURE_ATLAS_KEY);
+  if (!object) {
+    return new Response("texture atlas not found", { status: 404, headers: CORS_HEADERS });
+  }
+  const headers = new Headers(CORS_HEADERS);
+  object.writeHttpMetadata?.(headers);
+  headers.set("Content-Type", headers.get("Content-Type") || "image/png");
+  headers.set("Cache-Control", "public, max-age=3600");
+  return new Response(object.body, { headers });
 }
 
 async function handleTileUpload(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
   const payload = await request.json();
   const tile = normalizeTilePayload(payload);
   const bytes = decodeBase64(payload.data);
-  const encoded = String(payload.data);
   const extension = TILE_CONTENT_TYPES.get(tile.contentType);
   const key = tileKey(tile.world, tile.dimension, tile.z, tile.x, tile.y, extension);
 
-  if (env.MAP_TILES) {
-    await env.MAP_TILES.put(key, bytes, {
-      httpMetadata: { contentType: tile.contentType },
-      customMetadata: { world: tile.world, dimension: tile.dimension },
-    });
-  } else {
-    await putTileInD1(env, key, tile, encoded);
-  }
+  await bucket.put(key, bytes, {
+    httpMetadata: { contentType: tile.contentType },
+    customMetadata: { world: tile.world, dimension: tile.dimension },
+  });
 
   await broadcastLive(env, JSON.stringify({ type: "tile_ready", ...tile, extension }));
   return json({ ok: true, key });
 }
 
 async function handleTileGet(url, env) {
+  const bucket = mapBucket(env);
   const parsed = parseTilePath(url.pathname);
   if (!parsed) {
     return json({ error: "bad_tile_path" }, 400);
   }
-  if (env.MAP_TILES) {
-    const object = await env.MAP_TILES.get(parsed.key);
-    if (!object) {
-      return new Response("tile not found", { status: 404, headers: CORS_HEADERS });
-    }
-    const headers = new Headers(CORS_HEADERS);
-    object.writeHttpMetadata?.(headers);
-    if (!headers.has("Content-Type")) {
-      headers.set("Content-Type", contentTypeForExtension(parsed.extension));
-    }
-    headers.set("Cache-Control", "public, max-age=60");
-    return new Response(object.body, { headers });
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
   }
 
-  const tile = await getTileFromD1(env, parsed.key);
-  if (!tile) {
+  const object = await bucket.get(parsed.key);
+  if (!object) {
     return new Response("tile not found", { status: 404, headers: CORS_HEADERS });
   }
-
   const headers = new Headers(CORS_HEADERS);
-  headers.set("Content-Type", tile.contentType || contentTypeForExtension(parsed.extension));
+  object.writeHttpMetadata?.(headers);
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", contentTypeForExtension(parsed.extension));
+  }
   headers.set("Cache-Control", "public, max-age=60");
-  return new Response(decodeBase64(tile.bodyBase64), { headers });
-}
-
-async function putTileInD1(env, key, tile, bodyBase64) {
-  await env.DB.prepare(
-    "INSERT INTO tiles (key, content_type, body_base64, world, dimension, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET content_type = excluded.content_type, body_base64 = excluded.body_base64, world = excluded.world, dimension = excluded.dimension, updated_at = excluded.updated_at",
-  )
-    .bind(key, tile.contentType, bodyBase64, tile.world, tile.dimension, Date.now())
-    .run();
-}
-
-async function getTileFromD1(env, key) {
-  return env.DB.prepare("SELECT content_type AS contentType, body_base64 AS bodyBase64 FROM tiles WHERE key = ?").bind(key).first();
+  return new Response(object.body, { headers });
 }
 
 async function handleMarkers(request, env, url) {
   const id = url.pathname.startsWith("/api/markers/") ? decodeURIComponent(url.pathname.slice("/api/markers/".length)) : "";
 
   if (request.method === "GET" && !id) {
-    const rows = await env.DB.prepare(
-      "SELECT id, world, dimension, x, y, z, title, description, created_by AS createdBy, created_at AS createdAt, updated_at AS updatedAt FROM markers ORDER BY updated_at DESC LIMIT 500",
-    ).all();
-    return json({ markers: rows.results || [] });
+    const markers = await listMarkers(env);
+    return json({ markers });
   }
 
   if (request.method === "POST" && !id) {
@@ -256,22 +391,7 @@ async function handleMarkers(request, env, url) {
     const marker = normalizeMarkerPayload(await request.json());
     marker.id = id;
     marker.updatedAt = Date.now();
-    await env.DB.prepare(
-      "UPDATE markers SET world = ?, dimension = ?, x = ?, y = ?, z = ?, title = ?, description = ?, created_by = ?, updated_at = ? WHERE id = ?",
-    )
-      .bind(
-        marker.world,
-        marker.dimension,
-        marker.x,
-        marker.y,
-        marker.z,
-        marker.title,
-        marker.description,
-        marker.createdBy,
-        marker.updatedAt,
-        marker.id,
-      )
-      .run();
+    await updateMarker(env, marker);
     await broadcastLive(env, JSON.stringify({ type: "marker_updated", marker }));
     return json({ marker });
   }
@@ -281,7 +401,7 @@ async function handleMarkers(request, env, url) {
     if (auth) {
       return auth;
     }
-    await env.DB.prepare("DELETE FROM markers WHERE id = ?").bind(id).run();
+    await deleteMarker(env, id);
     await broadcastLive(env, JSON.stringify({ type: "marker_deleted", id }));
     return json({ ok: true });
   }
@@ -289,24 +409,113 @@ async function handleMarkers(request, env, url) {
   return json({ error: "not_found" }, 404);
 }
 
+async function withMarkerConnection(env, fn) {
+  if (env.MARKER_DB) {
+    return fn(env.MARKER_DB);
+  }
+  if (!env.HYPERDRIVE) {
+    throw new Error("hyperdrive_not_configured");
+  }
+
+  const connection = await createConnection({
+    host: env.HYPERDRIVE.host,
+    user: env.HYPERDRIVE.user,
+    password: env.HYPERDRIVE.password,
+    database: env.HYPERDRIVE.database,
+    port: env.HYPERDRIVE.port,
+    disableEval: true,
+  });
+  try {
+    return await fn(connection);
+  } finally {
+    await connection.end();
+  }
+}
+
+async function listMarkers(env) {
+  return withMarkerConnection(env, async (connection) => {
+    const [rows] = await connection.execute(
+      "SELECT id, world, dimension, x, y, z, title, description, created_by AS createdBy, created_at AS createdAt, updated_at AS updatedAt FROM markers ORDER BY updated_at DESC LIMIT 500",
+    );
+    return rows;
+  });
+}
+
 async function insertMarker(env, marker) {
-  await env.DB.prepare(
-    "INSERT INTO markers (id, world, dimension, x, y, z, title, description, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  )
-    .bind(
-      marker.id,
-      marker.world,
-      marker.dimension,
-      marker.x,
-      marker.y,
-      marker.z,
-      marker.title,
-      marker.description,
-      marker.createdBy,
-      marker.createdAt,
-      marker.updatedAt,
-    )
-    .run();
+  await withMarkerConnection(env, (connection) =>
+    connection.execute(
+      "INSERT INTO markers (id, world, dimension, x, y, z, title, description, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [
+        marker.id,
+        marker.world,
+        marker.dimension,
+        marker.x,
+        marker.y,
+        marker.z,
+        marker.title,
+        marker.description,
+        marker.createdBy,
+        marker.createdAt,
+        marker.updatedAt,
+      ],
+    ),
+  );
+}
+
+async function updateMarker(env, marker) {
+  await withMarkerConnection(env, (connection) =>
+    connection.execute(
+      "UPDATE markers SET world = ?, dimension = ?, x = ?, y = ?, z = ?, title = ?, description = ?, created_by = ?, updated_at = ? WHERE id = ?",
+      [marker.world, marker.dimension, marker.x, marker.y, marker.z, marker.title, marker.description, marker.createdBy, marker.updatedAt, marker.id],
+    ),
+  );
+}
+
+async function deleteMarker(env, id) {
+  await withMarkerConnection(env, (connection) => connection.execute("DELETE FROM markers WHERE id = ?", [id]));
+}
+
+export function normalizeChunkSnapshot(payload) {
+  const palette = Array.isArray(payload.palette) ? payload.palette.map((value) => cleanBlockId(value)) : [];
+  if (palette.length < 1 || palette.length > CHUNK_BLOCK_COUNT) {
+    throw new Error("palette must contain 1-256 block ids");
+  }
+  const blocks = normalizeFixedNumberArray(payload.blocks, "blocks", CHUNK_BLOCK_COUNT).map((value) => {
+    if (value < 0 || value >= palette.length) {
+      throw new Error("block palette index out of range");
+    }
+    return value;
+  });
+  const heights = normalizeFixedNumberArray(payload.heights, "heights", CHUNK_BLOCK_COUNT);
+
+  return {
+    world: cleanSegment(payload.world || "world"),
+    dimension: cleanSegment(payload.dimension || "Overworld"),
+    chunkX: numberOrThrow(payload.chunkX, "chunkX"),
+    chunkZ: numberOrThrow(payload.chunkZ, "chunkZ"),
+    palette,
+    blocks,
+    heights,
+    updatedAt: numberOrThrow(payload.updatedAt ?? Date.now(), "updatedAt"),
+  };
+}
+
+export function normalizeChunkQuery(params) {
+  const minChunkX = numberOrThrow(params.get("minChunkX"), "minChunkX");
+  const maxChunkX = numberOrThrow(params.get("maxChunkX"), "maxChunkX");
+  const minChunkZ = numberOrThrow(params.get("minChunkZ"), "minChunkZ");
+  const maxChunkZ = numberOrThrow(params.get("maxChunkZ"), "maxChunkZ");
+  if (maxChunkX < minChunkX || maxChunkZ < minChunkZ) {
+    throw new Error("invalid chunk range");
+  }
+  return {
+    world: cleanSegment(params.get("world") || "world"),
+    dimension: cleanSegment(params.get("dimension") || "Overworld"),
+    minChunkX,
+    maxChunkX,
+    minChunkZ,
+    maxChunkZ,
+  };
 }
 
 export function normalizeTilePayload(payload) {
@@ -341,8 +550,51 @@ export function normalizeMarkerPayload(payload) {
   };
 }
 
+export function chunkKey(world, dimension, chunkX, chunkZ) {
+  return `chunks/v1/${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(chunkX, "chunkX")}/${numberOrThrow(chunkZ, "chunkZ")}.json`;
+}
+
 export function tileKey(world, dimension, z, x, y, extension) {
   return `${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(z, "z")}/${numberOrThrow(x, "x")}/${numberOrThrow(y, "y")}.${extension}`;
+}
+
+export function diffChunkSnapshots(previous, next) {
+  if (!previous || !Array.isArray(previous.blocks) || !Array.isArray(previous.heights)) {
+    return [];
+  }
+  const updates = [];
+  for (let index = 0; index < CHUNK_BLOCK_COUNT; index += 1) {
+    if (previous.blocks[index] === next.blocks[index] && previous.heights[index] === next.heights[index]) {
+      continue;
+    }
+    updates.push({
+      localX: index % 16,
+      localZ: Math.floor(index / 16),
+      block: next.palette[next.blocks[index]] || "minecraft:air",
+      height: next.heights[index],
+    });
+  }
+  return updates;
+}
+
+async function readR2Json(object) {
+  if (!object) {
+    return null;
+  }
+  if (typeof object.json === "function") {
+    return object.json();
+  }
+  if (typeof object.text === "function") {
+    return JSON.parse(await object.text());
+  }
+  return new Response(object.body).json();
+}
+
+function normalizeFixedNumberArray(value, field, length) {
+  if (!Array.isArray(value) || value.length !== length) {
+    throw new Error(`${field} must contain ${length} entries`);
+  }
+  return value.map((item, index) => numberOrThrow(item, `${field}[${index}]`));
 }
 
 function parseTilePath(pathname) {
@@ -366,6 +618,14 @@ function cleanSegment(value) {
     throw new Error("invalid path segment");
   }
   return cleaned.slice(0, 80);
+}
+
+function cleanBlockId(value) {
+  const cleaned = String(value || "").trim().replace(/[^A-Za-z0-9_.:-]/g, "_");
+  if (!cleaned || cleaned.length > 120) {
+    throw new Error("invalid block id");
+  }
+  return cleaned;
 }
 
 function numberOrThrow(value, field) {

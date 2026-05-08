@@ -4,22 +4,28 @@ Run these commands after `npx wrangler login` or with `CLOUDFLARE_API_TOKEN` set
 
 ```bash
 cd /Users/winxia/codex/endstone-live-map/worker
-
-npx wrangler d1 create endstone_live_map
-```
-
-R2 is the tile backend. Keep tile refresh settings conservative so the first version stays inside Cloudflare's free allowance:
-
-```bash
 npx wrangler r2 bucket create endstone-live-map-tiles
 ```
 
-Without the `MAP_TILES` binding, the Worker stores tiles in D1 as a fallback.
+R2 stores chunk snapshots and the generated texture atlas:
 
-Copy the returned D1 `database_id` into the GitHub repository variable:
+```text
+chunks/v1/{world}/{dimension}/{chunkX}/{chunkZ}.json
+textures/v1/atlas.png
+textures/v1/manifest.json
+```
+
+Create a Hyperdrive config that points at the NAS MySQL TCP hostname exposed through Cloudflare Tunnel:
 
 ```bash
-gh variable set CLOUDFLARE_D1_DATABASE_ID --repo wingxia/endstone-live-map --body '<database_id>'
+npx wrangler hyperdrive create endstone-live-map-mysql \
+  --connection-string="mysql://<user>:<password>@mysql-map.buhe.li:3306/endstone_live_map"
+```
+
+Copy the returned Hyperdrive id into the GitHub repository variable:
+
+```bash
+gh variable set CLOUDFLARE_HYPERDRIVE_ID --repo wingxia/endstone-live-map --body '<hyperdrive_id>'
 ```
 
 Set GitHub deployment secrets:

@@ -12,6 +12,7 @@ set(ENDSTONE_API_VERSION "0.11.3" CACHE STRING "Endstone API version")
 add_library(livemap_core
     src/base64.cpp
     src/bmp_writer.cpp
+    src/chunk.cpp
     src/color_map.cpp
     src/dirty_tile_tracker.cpp
     src/protocol.cpp

@@ -12,10 +12,10 @@ struct LiveMapSettings {
     std::string server_id = "default";
     std::vector<std::string> dimensions = {"Overworld"};
     int scan_radius_chunks = 8;
-    int tile_refresh_seconds = 60;
+    int chunk_refresh_seconds = 60;
     int player_push_seconds = 1;
-    int max_tiles_per_refresh = 1;
-    bool upload_tiles = true;
+    int max_chunks_per_refresh = 1;
+    bool upload_chunks = true;
     bool upload_players = true;
 };
 

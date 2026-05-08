@@ -1,4 +1,5 @@
 #include "livemap/base64.hpp"
+#include "livemap/chunk.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
 #include "livemap/tile_math.hpp"
@@ -67,6 +68,11 @@ bool postLiveJson(const LiveMapSettings &settings, std::string_view json)
 bool uploadTileBmp(const LiveMapSettings &settings, const TileCoord &coord, std::span<const std::uint8_t> bytes)
 {
     return CurlTransport(settings).uploadTile(coord, bytes, "image/bmp");
+}
+
+bool uploadChunkSnapshot(const LiveMapSettings &settings, const ChunkSnapshot &snapshot)
+{
+    return CurlTransport(settings).postJson("/api/plugin/chunks", serializeChunkSnapshot(snapshot));
 }
 
 }  // namespace livemap

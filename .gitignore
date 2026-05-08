@@ -22,3 +22,7 @@ plugins/
 *.log
 *.sqlite
 *.sqlite-*
+
+# Generated texture deployment artifacts
+texture-atlas/
+livemap-textures/
