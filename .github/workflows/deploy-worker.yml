@@ -20,6 +20,24 @@ jobs:
         run: npm test
       - name: Build frontend
         run: npm run build -w web
+      - name: Validate Cloudflare configuration
+        run: |
+          test -n "${{ secrets.CLOUDFLARE_API_TOKEN }}" || (echo "Missing CLOUDFLARE_API_TOKEN secret" && exit 1)
+          test -n "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" || (echo "Missing CLOUDFLARE_ACCOUNT_ID secret" && exit 1)
+          test -n "${{ vars.CLOUDFLARE_D1_DATABASE_ID }}" || (echo "Missing CLOUDFLARE_D1_DATABASE_ID repository variable" && exit 1)
+      - name: Inject D1 database id
+        working-directory: worker
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          config = Path("wrangler.jsonc")
+          text = config.read_text()
+          text = text.replace("REPLACE_WITH_D1_DATABASE_ID", os.environ["CLOUDFLARE_D1_DATABASE_ID"])
+          config.write_text(text)
+          PY
+        env:
+          CLOUDFLARE_D1_DATABASE_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
       - name: Apply D1 migrations
         working-directory: worker
         env:
