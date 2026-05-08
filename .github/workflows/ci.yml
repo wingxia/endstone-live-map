@@ -22,7 +22,7 @@ jobs:
 
   endstone-plugin:
     name: Endstone plugin build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
       - name: Install C++ dependencies
