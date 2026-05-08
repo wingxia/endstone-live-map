@@ -202,7 +202,7 @@ private:
 
             const auto settings = settings_;
             getServer().getScheduler().runTaskAsync(*this, [settings, coord, bmp = std::move(bmp)] {
-                livemap::uploadTileBmp(settings, coord, bmp);
+                livemap::uploadTileBmp(settings, coord, std::span<const std::uint8_t>(bmp.data(), bmp.size()));
             });
         }
     }

@@ -1,5 +1,6 @@
 #include "livemap/tile_renderer.hpp"
 
+#include <span>
 #include <vector>
 
 #include "livemap/bmp_writer.hpp"
@@ -16,7 +17,7 @@ std::vector<std::uint8_t> renderTileBmp(int width, int height, const std::functi
             pixels[static_cast<std::size_t>(z * width + x)] = colorForBlock(sample.type, sample.y);
         }
     }
-    return encodeBmp24(width, height, pixels);
+    return encodeBmp24(width, height, std::span<const Color>(pixels.data(), pixels.size()));
 }
 
 }  // namespace livemap
