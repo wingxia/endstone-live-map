@@ -14,7 +14,7 @@ The project is a monorepo:
 - Player positions update independently from terrain tiles.
 - Terrain changes mark dirty tiles and are re-rendered on a timer.
 - Markers support title, description, coordinates, dimension, creator, and timestamps.
-- Tile storage prefers R2 when the `MAP_TILES` binding exists. The current deploy configuration also supports D1 tile storage so the map can run before R2 is enabled on the Cloudflare account.
+- Tile storage uses the R2 `MAP_TILES` binding. D1 tile storage remains as a fallback for local or emergency deployments without R2.
 
 ## Required secrets
 

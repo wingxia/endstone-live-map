@@ -8,13 +8,13 @@ cd /Users/winxia/codex/endstone-live-map/worker
 npx wrangler d1 create endstone_live_map
 ```
 
-R2 is the preferred long-term tile backend. If the account has R2 enabled, create the bucket and add the `MAP_TILES` binding in `worker/wrangler.jsonc`:
+R2 is the tile backend. Keep tile refresh settings conservative so the first version stays inside Cloudflare's free allowance:
 
 ```bash
 npx wrangler r2 bucket create endstone-live-map-tiles
 ```
 
-Without that binding, the Worker stores first-version tiles in D1.
+Without the `MAP_TILES` binding, the Worker stores tiles in D1 as a fallback.
 
 Copy the returned D1 `database_id` into the GitHub repository variable:
 
