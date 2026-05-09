@@ -37,20 +37,22 @@ const tunnelId = process.env.NAS_TUNNEL_ID;
 const hostname = process.env.MYSQL_HOSTNAME;
 const tunnelTarget = `${tunnelId}.cfargotunnel.com`;
 
-const tunnelConfig = await cf(`/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`);
-const config = tunnelConfig.config;
-const fallback = config.ingress.find((rule) => typeof rule.service === "string" && rule.service.startsWith("http_status:"));
-config.ingress = config.ingress.filter(
-  (rule) => rule.hostname !== hostname && !(typeof rule.service === "string" && rule.service.startsWith("http_status:")),
-);
-config.ingress.push({ hostname, service: "tcp://127.0.0.1:3306", originRequest: {} });
-if (fallback) {
-  config.ingress.push(fallback);
+if (process.env.SKIP_TUNNEL_INGRESS !== "true") {
+  const tunnelConfig = await cf(`/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`);
+  const config = tunnelConfig.config;
+  const fallback = config.ingress.find((rule) => typeof rule.service === "string" && rule.service.startsWith("http_status:"));
+  config.ingress = config.ingress.filter(
+    (rule) => rule.hostname !== hostname && !(typeof rule.service === "string" && rule.service.startsWith("http_status:")),
+  );
+  config.ingress.push({ hostname, service: "tcp://127.0.0.1:3306", originRequest: {} });
+  if (fallback) {
+    config.ingress.push(fallback);
+  }
+  await cf(`/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, {
+    method: "PUT",
+    body: JSON.stringify({ config }),
+  });
 }
-await cf(`/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, {
-  method: "PUT",
-  body: JSON.stringify({ config }),
-});
 
 const dnsRecords = await cf(`/zones/${zoneId}/dns_records?type=CNAME&name=${encodeURIComponent(hostname)}`);
 const dnsBody = {

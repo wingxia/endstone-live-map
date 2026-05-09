@@ -22,6 +22,7 @@ jobs:
       MYSQL_DATABASE: endstone_live_map
       MYSQL_USER: endstone_map_worker
       HYPERDRIVE_NAME: endstone-live-map-mysql
+      SKIP_TUNNEL_INGRESS: "true"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
