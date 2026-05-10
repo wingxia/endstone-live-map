@@ -50,7 +50,11 @@ class MockMarkerDb {
     this.markers = new Map();
   }
 
-  async execute(sql, values = []) {
+  async execute() {
+    throw new Error("MockMarkerDb.execute should not be used; Hyperdrive MySQL requires query()");
+  }
+
+  async query(sql, values = []) {
     if (sql.startsWith("SELECT")) {
       return [[...this.markers.values()].sort((a, b) => b.updatedAt - a.updatedAt)];
     }

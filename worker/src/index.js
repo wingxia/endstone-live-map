@@ -434,7 +434,7 @@ async function withMarkerConnection(env, fn) {
 
 async function listMarkers(env) {
   return withMarkerConnection(env, async (connection) => {
-    const [rows] = await connection.execute(
+    const [rows] = await connection.query(
       "SELECT id, world, dimension, x, y, z, title, description, created_by AS createdBy, created_at AS createdAt, updated_at AS updatedAt FROM markers ORDER BY updated_at DESC LIMIT 500",
     );
     return rows;
@@ -443,7 +443,7 @@ async function listMarkers(env) {
 
 async function insertMarker(env, marker) {
   await withMarkerConnection(env, (connection) =>
-    connection.execute(
+    connection.query(
       "INSERT INTO markers (id, world, dimension, x, y, z, title, description, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         marker.id,
@@ -464,7 +464,7 @@ async function insertMarker(env, marker) {
 
 async function updateMarker(env, marker) {
   await withMarkerConnection(env, (connection) =>
-    connection.execute(
+    connection.query(
       "UPDATE markers SET world = ?, dimension = ?, x = ?, y = ?, z = ?, title = ?, description = ?, created_by = ?, updated_at = ? WHERE id = ?",
       [marker.world, marker.dimension, marker.x, marker.y, marker.z, marker.title, marker.description, marker.createdBy, marker.updatedAt, marker.id],
     ),
@@ -472,7 +472,7 @@ async function updateMarker(env, marker) {
 }
 
 async function deleteMarker(env, id) {
-  await withMarkerConnection(env, (connection) => connection.execute("DELETE FROM markers WHERE id = ?", [id]));
+  await withMarkerConnection(env, (connection) => connection.query("DELETE FROM markers WHERE id = ?", [id]));
 }
 
 export function normalizeChunkSnapshot(payload) {
