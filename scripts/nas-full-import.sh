@@ -7,6 +7,7 @@ IMPORT_ROOT="${IMPORT_ROOT:-/vol1/1000/live-map-import}"
 WORKER_URL="${WORKER_URL:-https://map.buhe.li}"
 BDS_SAMPLES_VERSION="${BDS_SAMPLES_VERSION:-v1.26.20.4}"
 BDS_SAMPLES_URL="${BDS_SAMPLES_URL:-https://gh.buhe.li/Mojang/bedrock-samples/releases/download/${BDS_SAMPLES_VERSION}/bedrock-samples-${BDS_SAMPLES_VERSION}-min.zip}"
+REPO_URL="${REPO_URL:-https://gh.buhe.li/wingxia/endstone-live-map.git}"
 ROOT_SYSTEMCTL="${ROOT_SYSTEMCTL:-systemctl}"
 NODE_IMAGE="${NODE_IMAGE:-docker.buhe.li/library/node:24-bookworm}"
 
@@ -42,8 +43,9 @@ echo "Snapshot created at $snapshot_dir/$WORLD_NAME"
 
 repo_dir="$IMPORT_ROOT/repo"
 if [[ ! -d "$repo_dir/.git" ]]; then
-  git clone https://github.com/wingxia/endstone-live-map.git "$repo_dir"
+  git clone "$REPO_URL" "$repo_dir"
 else
+  git -C "$repo_dir" remote set-url origin "$REPO_URL"
   git -C "$repo_dir" pull --ff-only
 fi
 git -C "$repo_dir" reset --hard origin/main

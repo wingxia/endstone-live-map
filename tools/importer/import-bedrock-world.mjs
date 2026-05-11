@@ -57,7 +57,6 @@ export async function main(argv = process.argv.slice(2)) {
   try {
     const resume = options.resumeFile ? await readResume(options.resumeFile) : { uploaded: [] };
     const uploaded = new Set(resume.uploaded || []);
-    const chunks = await readSubchunkGroups(db, levelUtils, options);
     const metas = new Map();
     let batch = [];
     let processed = 0;
@@ -65,7 +64,7 @@ export async function main(argv = process.argv.slice(2)) {
     let skipped = 0;
     const startedAt = Date.now();
 
-    for (const group of chunks.values()) {
+    for await (const group of iterateSubchunkGroups(db, levelUtils, options)) {
       if (options.limit && processed >= options.limit) {
         break;
       }
@@ -129,8 +128,18 @@ export async function main(argv = process.argv.slice(2)) {
 
 export async function readSubchunkGroups(db, levelUtils, options = {}) {
   const groups = new Map();
+  for await (const group of iterateSubchunkGroups(db, levelUtils, options)) {
+    groups.set(`${group.dimension}/${group.chunkX}/${group.chunkZ}`, group);
+  }
+  return groups;
+}
+
+export async function* iterateSubchunkGroups(db, levelUtils, options = {}) {
   const { getContentTypeFromDBKey, getChunkKeyIndices, entryContentTypeToFormatMap } = levelUtils;
   const iterator = db.getIterator({ keys: true, values: true, keyAsBuffer: true, valueAsBuffer: true });
+  const seen = new Set();
+  let currentKey = "";
+  let currentGroup = null;
   try {
     let next;
     while ((next = await iterator.next())) {
@@ -147,18 +156,28 @@ export async function readSubchunkGroups(db, levelUtils, options = {}) {
       const parsed = await entryContentTypeToFormatMap.SubChunkPrefix.parse(rawValue);
       const subchunkIndex = "subChunkIndex" in indices ? indices.subChunkIndex : parsed.value.subChunkIndex?.value ?? 0;
       const key = `${dimension}/${indices.x}/${indices.z}`;
-      let group = groups.get(key);
-      if (!group) {
-        group = { dimension, chunkX: indices.x, chunkZ: indices.z, subchunks: [] };
-        groups.set(key, group);
+      if (currentKey && key !== currentKey) {
+        yield currentGroup;
+        seen.add(currentKey);
+        currentKey = "";
+        currentGroup = null;
+      }
+      if (seen.has(key)) {
+        throw new Error(`LevelDB iterator returned non-contiguous subchunks for ${key}; rerun with a map-based importer`);
+      }
+      if (!currentGroup) {
+        currentKey = key;
+        currentGroup = { dimension, chunkX: indices.x, chunkZ: indices.z, subchunks: [] };
       }
       const layers = parsed.value.layers?.value?.value || [];
-      group.subchunks.push({ y: subchunkIndex, layers });
+      currentGroup.subchunks.push({ y: subchunkIndex, layers });
+    }
+    if (currentGroup) {
+      yield currentGroup;
     }
   } finally {
     await iterator.end?.();
   }
-  return groups;
 }
 
 async function flushBatch(batch, options, uploaded) {
