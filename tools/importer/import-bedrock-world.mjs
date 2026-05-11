@@ -16,7 +16,7 @@ import {
 
 const SUBCHUNK_TYPE = "SubChunkPrefix";
 const DEFAULT_BATCH_SIZE = 64;
-const MAX_POST_ATTEMPTS = 5;
+const MAX_POST_ATTEMPTS = 20;
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
@@ -220,6 +220,7 @@ async function postJson(url, payload, token) {
       if (attempt === MAX_POST_ATTEMPTS) {
         throw error;
       }
+      console.warn(`POST ${url} failed on attempt ${attempt}: ${error instanceof Error ? error.message : String(error)}; retrying`);
       await delay(backoffMs(attempt));
       continue;
     }
@@ -232,6 +233,7 @@ async function postJson(url, payload, token) {
     if (attempt === MAX_POST_ATTEMPTS || response.status < 500) {
       throw new Error(`POST ${url} failed with ${response.status}: ${text}`);
     }
+    console.warn(`POST ${url} failed with ${response.status} on attempt ${attempt}: ${text.slice(0, 200)}; retrying`);
     await delay(backoffMs(attempt));
   }
   throw new Error(`POST ${url} failed after ${MAX_POST_ATTEMPTS} attempts`);
@@ -323,5 +325,5 @@ function isValidSubchunkKey(value, getContentTypeFromDBKey, getChunkKeyIndices) 
 }
 
 function backoffMs(attempt) {
-  return Math.min(30_000, 500 * 2 ** (attempt - 1));
+  return Math.min(120_000, 1000 * 2 ** (attempt - 1));
 }
