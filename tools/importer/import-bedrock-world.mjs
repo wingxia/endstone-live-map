@@ -137,13 +137,12 @@ export async function readSubchunkGroups(db, levelUtils, options = {}) {
 export async function* iterateSubchunkGroups(db, levelUtils, options = {}) {
   const { getContentTypeFromDBKey, getChunkKeyIndices, entryContentTypeToFormatMap } = levelUtils;
   const iterator = db.getIterator({ keys: true, values: true, keyAsBuffer: true, valueAsBuffer: true });
-  const seen = new Set();
-  let currentKey = "";
-  let currentGroup = null;
+  const groups = new Map();
+  let skippedSubchunks = 0;
   try {
     let next;
     while ((next = await iterator.next())) {
-      const entry = coerceIteratorEntry(next, getContentTypeFromDBKey);
+      const entry = coerceIteratorEntry(next, getContentTypeFromDBKey, getChunkKeyIndices);
       if (!entry) {
         continue;
       }
@@ -153,27 +152,31 @@ export async function* iterateSubchunkGroups(db, levelUtils, options = {}) {
       if (options.dimension && dimension !== options.dimension) {
         continue;
       }
-      const parsed = await entryContentTypeToFormatMap.SubChunkPrefix.parse(rawValue);
+      let parsed;
+      try {
+        parsed = await entryContentTypeToFormatMap.SubChunkPrefix.parse(rawValue);
+      } catch (error) {
+        skippedSubchunks += 1;
+        if (skippedSubchunks <= 10) {
+          console.warn(`Skipping unparsable subchunk ${dimension}/${indices.x}/${indices.z}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        continue;
+      }
       const subchunkIndex = "subChunkIndex" in indices ? indices.subChunkIndex : parsed.value.subChunkIndex?.value ?? 0;
       const key = `${dimension}/${indices.x}/${indices.z}`;
-      if (currentKey && key !== currentKey) {
-        yield currentGroup;
-        seen.add(currentKey);
-        currentKey = "";
-        currentGroup = null;
-      }
-      if (seen.has(key)) {
-        throw new Error(`LevelDB iterator returned non-contiguous subchunks for ${key}; rerun with a map-based importer`);
-      }
-      if (!currentGroup) {
-        currentKey = key;
-        currentGroup = { dimension, chunkX: indices.x, chunkZ: indices.z, subchunks: [] };
+      let group = groups.get(key);
+      if (!group) {
+        group = { dimension, chunkX: indices.x, chunkZ: indices.z, subchunks: [] };
+        groups.set(key, group);
       }
       const layers = parsed.value.layers?.value?.value || [];
-      currentGroup.subchunks.push({ y: subchunkIndex, layers });
+      group.subchunks.push({ y: subchunkIndex, layers });
     }
-    if (currentGroup) {
-      yield currentGroup;
+    if (skippedSubchunks > 10) {
+      console.warn(`Skipped ${skippedSubchunks} unparsable subchunks total.`);
+    }
+    for (const group of groups.values()) {
+      yield group;
     }
   } finally {
     await iterator.end?.();
@@ -285,26 +288,30 @@ function stripTrailingSlash(value) {
   return String(value).replace(/\/+$/, "");
 }
 
-function coerceIteratorEntry(next, getContentTypeFromDBKey) {
+function coerceIteratorEntry(next, getContentTypeFromDBKey, getChunkKeyIndices) {
   if (!Array.isArray(next) || next.length < 2) {
     return null;
   }
   const [first, second] = next;
-  if (isSubchunkKey(first, getContentTypeFromDBKey)) {
-    return { rawKey: first, rawValue: second };
-  }
-  if (isSubchunkKey(second, getContentTypeFromDBKey)) {
+  if (isValidSubchunkKey(second, getContentTypeFromDBKey, getChunkKeyIndices)) {
     return { rawKey: second, rawValue: first };
+  }
+  if (isValidSubchunkKey(first, getContentTypeFromDBKey, getChunkKeyIndices)) {
+    return { rawKey: first, rawValue: second };
   }
   return null;
 }
 
-function isSubchunkKey(value, getContentTypeFromDBKey) {
+function isValidSubchunkKey(value, getContentTypeFromDBKey, getChunkKeyIndices) {
   if (!Buffer.isBuffer(value)) {
     return false;
   }
   try {
-    return getContentTypeFromDBKey(value) === SUBCHUNK_TYPE;
+    if (getContentTypeFromDBKey(value) !== SUBCHUNK_TYPE) {
+      return false;
+    }
+    const indices = getChunkKeyIndices(value);
+    return Number.isFinite(Number(indices.x)) && Number.isFinite(Number(indices.z));
   } catch {
     return false;
   }
