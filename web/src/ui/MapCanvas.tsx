@@ -3,6 +3,8 @@ import { useEffect, useRef } from "react";
 import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type Marker, type PlayerState, type WorldMeta } from "../api";
 import { createChunkGridLayer, INITIAL_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
+const MAX_INITIAL_CHUNKS = 96;
+
 interface MapCanvasProps {
   world: string;
   dimension: string;
@@ -61,6 +63,25 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
       return;
     }
     const bounds = worldMeta.bounds;
+    const widthChunks = bounds.maxChunkX - bounds.minChunkX + 1;
+    const heightChunks = bounds.maxChunkZ - bounds.minChunkZ + 1;
+    if (widthChunks > MAX_INITIAL_CHUNKS || heightChunks > MAX_INITIAL_CHUNKS) {
+      const centerChunkX = clampChunk(0, bounds.minChunkX, bounds.maxChunkX);
+      const centerChunkZ = clampChunk(0, bounds.minChunkZ, bounds.maxChunkZ);
+      const half = Math.floor(MAX_INITIAL_CHUNKS / 2);
+      const minChunkX = clampChunk(centerChunkX - half, bounds.minChunkX, bounds.maxChunkX);
+      const maxChunkX = clampChunk(centerChunkX + half, bounds.minChunkX, bounds.maxChunkX);
+      const minChunkZ = clampChunk(centerChunkZ - half, bounds.minChunkZ, bounds.maxChunkZ);
+      const maxChunkZ = clampChunk(centerChunkZ + half, bounds.minChunkZ, bounds.maxChunkZ);
+      state.map.fitBounds(
+        [
+          [minChunkZ * 16, minChunkX * 16],
+          [maxChunkZ * 16 + 15, maxChunkX * 16 + 15],
+        ],
+        { animate: false, padding: [24, 24] },
+      );
+      return;
+    }
     state.map.fitBounds(
       [
         [bounds.minBlockZ, bounds.minBlockX],
@@ -127,6 +148,10 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
   }, [players, markers]);
 
   return <div ref={mapRef} className="map-canvas" data-testid="map-canvas" />;
+}
+
+function clampChunk(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function escapeHtml(value: string) {
