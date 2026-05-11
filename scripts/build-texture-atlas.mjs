@@ -7,14 +7,25 @@ import { PNG } from "pngjs";
 const COMMON_ALIASES = {
   grass: "minecraft:grass_block",
   grass_side: "minecraft:grass_block",
+  grass_top: "minecraft:grass_block",
   dirt: "minecraft:dirt",
   stone: "minecraft:stone",
+  stone_andesite: "minecraft:andesite",
+  stone_andesite_smooth: "minecraft:polished_andesite",
+  stone_diorite: "minecraft:diorite",
+  stone_diorite_smooth: "minecraft:polished_diorite",
+  stone_granite: "minecraft:granite",
+  stone_granite_smooth: "minecraft:polished_granite",
   water: "minecraft:water",
   sand: "minecraft:sand",
   gravel: "minecraft:gravel",
+  red_nether_brick: "minecraft:red_nether_bricks",
+  nether_brick: "minecraft:nether_bricks",
   log_oak: "minecraft:oak_log",
   planks_oak: "minecraft:oak_planks",
   leaves_oak: "minecraft:oak_leaves",
+  blue_ice: "minecraft:blue_ice",
+  packed_ice: "minecraft:packed_ice",
 };
 
 const args = parseArgs(process.argv.slice(2));
