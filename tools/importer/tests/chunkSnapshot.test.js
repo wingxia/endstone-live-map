@@ -118,4 +118,51 @@ describe("chunk snapshot importer helpers", () => {
       expect(groups.get("Overworld/-2/3")).toMatchObject({ chunkX: -2, chunkZ: 3, dimension: "Overworld" });
     }
   });
+
+  it("filters LevelDB iterator groups by chunk bounds before parsing", async () => {
+    const entries = [
+      { key: Buffer.from("subchunk-a"), x: -2, z: 3 },
+      { key: Buffer.from("subchunk-b"), x: 5, z: 3 },
+      { key: Buffer.from("subchunk-c"), x: 6, z: 4 },
+    ];
+    const value = Buffer.from("subchunk-value");
+    let parseCount = 0;
+    const levelUtils = {
+      getContentTypeFromDBKey: (rawKey) => (entries.some((entry) => entry.key === rawKey) ? "SubChunkPrefix" : "Other"),
+      getChunkKeyIndices: (rawKey) => {
+        const entry = entries.find((item) => item.key === rawKey);
+        return { x: entry.x, z: entry.z, dimension: 0, subChunkIndex: 0 };
+      },
+      entryContentTypeToFormatMap: {
+        SubChunkPrefix: {
+          parse: async () => {
+            parseCount += 1;
+            return {
+              value: {
+                subChunkIndex: { value: 0 },
+                layers: { value: { value: [layerWithBlocks([{ x: 0, y: 0, z: 0, paletteIndex: 1 }])] } },
+              },
+            };
+          },
+        },
+      },
+    };
+    const db = {
+      getIterator: () => {
+        let index = 0;
+        return {
+          next: async () => {
+            const entry = entries[index];
+            index += 1;
+            return entry ? [entry.key, value] : undefined;
+          },
+          end: async () => {},
+        };
+      },
+    };
+
+    const groups = await readSubchunkGroups(db, levelUtils, { minChunkX: 0, maxChunkX: 5, minChunkZ: 3, maxChunkZ: 3 });
+    expect([...groups.keys()]).toEqual(["Overworld/5/3"]);
+    expect(parseCount).toBe(1);
+  });
 });

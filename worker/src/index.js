@@ -14,12 +14,14 @@ const TILE_CONTENT_TYPES = new Map([
 
 const CHUNK_BLOCK_COUNT = 256;
 const MAX_CHUNKS_PER_REQUEST = 256;
-const MAX_CHUNKS_PER_BATCH = 64;
-const BATCH_WRITE_CONCURRENCY = 16;
+const MAX_CHUNKS_PER_BATCH = 384;
+const REGION_SIZE_CHUNKS = 16;
+const BATCH_WRITE_CONCURRENCY = 32;
 const TEXTURE_MANIFEST_KEY = "textures/v1/manifest.json";
 const TEXTURE_ATLAS_KEY = "textures/v1/atlas.png";
 const TEXTURE_REPORT_KEY = "textures/v1/report.json";
 const WORLD_META_PREFIX = "meta/v1/";
+const CHUNK_REGION_PREFIX = "chunk-regions/v1/";
 
 export class LiveRoom {
   constructor(state, env) {
@@ -267,10 +269,24 @@ async function handleChunkBatchUpload(request, env) {
 
   const snapshots = rawChunks.map((chunk) => normalizeChunkSnapshot(chunk));
   const broadcast = payload.broadcast === true;
+  const storage = payload.storage === "region" || payload.storage === "regions" ? "region" : "chunk";
+
+  if (storage === "region" && !broadcast) {
+    const results = await putChunkRegionSnapshots(bucket, snapshots);
+    return json({
+      ok: true,
+      storage,
+      chunks: snapshots.length,
+      regions: results.length,
+      keys: results.map((result) => result.key),
+    });
+  }
+
   const results = await mapWithConcurrency(snapshots, BATCH_WRITE_CONCURRENCY, (snapshot) => putChunkSnapshot(bucket, snapshot, { env, broadcast, diffForViewers: broadcast }));
 
   return json({
     ok: true,
+    storage,
     chunks: results.length,
     keys: results.map((result) => result.key),
     updates: results.reduce((sum, result) => sum + result.updates, 0),
@@ -338,8 +354,10 @@ async function handleChunksGet(url, env) {
 
   const chunks = [];
   const missing = [];
-  const presentKeys = new Set();
+  const chunksByCoord = new Map();
   const readKeys = [];
+
+  await readChunkRegions(bucket, query, chunksByCoord);
 
   const objectLists = await Promise.all(
     range(query.minChunkX, query.maxChunkX).map((chunkX) => listR2Objects(bucket, chunkPrefix(query.world, query.dimension, chunkX))),
@@ -351,7 +369,6 @@ async function handleChunksGet(url, env) {
       if (!parsed || parsed.chunkX < query.minChunkX || parsed.chunkX > query.maxChunkX || parsed.chunkZ < query.minChunkZ || parsed.chunkZ > query.maxChunkZ) {
         continue;
       }
-      presentKeys.add(`${parsed.chunkX}/${parsed.chunkZ}`);
       readKeys.push(object.key);
     }
   }
@@ -360,15 +377,20 @@ async function handleChunksGet(url, env) {
     readKeys.map(async (key) => {
       const object = await bucket.get(key);
       if (object) {
-        chunks.push(await readR2Json(object));
+        const chunk = await readR2Json(object);
+        chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
       }
     }),
   );
 
   for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
     for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
-      if (!presentKeys.has(`${chunkX}/${chunkZ}`)) {
+      const key = coordKey(chunkX, chunkZ);
+      const chunk = chunksByCoord.get(key);
+      if (!chunk) {
         missing.push({ chunkX, chunkZ });
+      } else {
+        chunks.push(chunk);
       }
     }
   }
@@ -679,7 +701,8 @@ export function normalizeChunkBatchPayload(payload) {
   if (chunks.length < 1 || chunks.length > MAX_CHUNKS_PER_BATCH) {
     throw new Error(`chunks must contain 1-${MAX_CHUNKS_PER_BATCH} entries`);
   }
-  return { chunks, broadcast: payload.broadcast === true };
+  const storage = payload.storage === "region" || payload.storage === "regions" ? "region" : "chunk";
+  return { chunks, broadcast: payload.broadcast === true, storage };
 }
 
 export function normalizeWorldMeta(payload) {
@@ -766,12 +789,81 @@ export function chunkKey(world, dimension, chunkX, chunkZ) {
   return `chunks/v1/${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(chunkX, "chunkX")}/${numberOrThrow(chunkZ, "chunkZ")}.json`;
 }
 
+export function chunkRegionKey(world, dimension, regionX, regionZ) {
+  return `${CHUNK_REGION_PREFIX}${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(regionX, "regionX")}/${numberOrThrow(regionZ, "regionZ")}.json`;
+}
+
 export function worldMetaKey(world, dimension) {
   return `${WORLD_META_PREFIX}${cleanSegment(world)}/${cleanSegment(dimension)}.json`;
 }
 
 function chunkPrefix(world, dimension, chunkX) {
   return `chunks/v1/${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(chunkX, "chunkX")}/`;
+}
+
+async function putChunkRegionSnapshots(bucket, snapshots) {
+  const groups = new Map();
+  for (const snapshot of snapshots) {
+    const regionX = floorDiv(snapshot.chunkX, REGION_SIZE_CHUNKS);
+    const regionZ = floorDiv(snapshot.chunkZ, REGION_SIZE_CHUNKS);
+    const key = chunkRegionKey(snapshot.world, snapshot.dimension, regionX, regionZ);
+    if (!groups.has(key)) {
+      groups.set(key, { key, world: snapshot.world, dimension: snapshot.dimension, regionX, regionZ, chunks: [] });
+    }
+    groups.get(key).chunks.push(snapshot);
+  }
+
+  return mapWithConcurrency([...groups.values()], BATCH_WRITE_CONCURRENCY, async (group) => {
+    const existing = await readR2Json(await bucket.get(group.key));
+    const chunks = new Map();
+    for (const chunk of Array.isArray(existing?.chunks) ? existing.chunks : []) {
+      chunks.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
+    }
+    for (const chunk of group.chunks) {
+      chunks.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
+    }
+
+    const region = {
+      version: 1,
+      world: group.world,
+      dimension: group.dimension,
+      regionSize: REGION_SIZE_CHUNKS,
+      regionX: group.regionX,
+      regionZ: group.regionZ,
+      updatedAt: Math.max(...[...chunks.values()].map((chunk) => chunk.updatedAt || 0)),
+      chunks: [...chunks.values()].sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX),
+    };
+    await bucket.put(group.key, JSON.stringify(region), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: { world: group.world, dimension: group.dimension },
+    });
+    return { key: group.key, chunks: region.chunks.length };
+  });
+}
+
+async function readChunkRegions(bucket, query, chunksByCoord) {
+  const minRegionX = floorDiv(query.minChunkX, REGION_SIZE_CHUNKS);
+  const maxRegionX = floorDiv(query.maxChunkX, REGION_SIZE_CHUNKS);
+  const minRegionZ = floorDiv(query.minChunkZ, REGION_SIZE_CHUNKS);
+  const maxRegionZ = floorDiv(query.maxChunkZ, REGION_SIZE_CHUNKS);
+  const keys = [];
+  for (const regionX of range(minRegionX, maxRegionX)) {
+    for (const regionZ of range(minRegionZ, maxRegionZ)) {
+      keys.push(chunkRegionKey(query.world, query.dimension, regionX, regionZ));
+    }
+  }
+
+  await Promise.all(
+    keys.map(async (key) => {
+      const region = await readR2Json(await bucket.get(key));
+      for (const chunk of Array.isArray(region?.chunks) ? region.chunks : []) {
+        if (chunk.chunkX < query.minChunkX || chunk.chunkX > query.maxChunkX || chunk.chunkZ < query.minChunkZ || chunk.chunkZ > query.maxChunkZ) {
+          continue;
+        }
+        chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
+      }
+    }),
+  );
 }
 
 async function listR2Objects(bucket, prefix) {
@@ -804,6 +896,14 @@ function parseChunkKey(key) {
 
 function range(min, max) {
   return Array.from({ length: max - min + 1 }, (_, index) => min + index);
+}
+
+function coordKey(chunkX, chunkZ) {
+  return `${chunkX}/${chunkZ}`;
+}
+
+function floorDiv(value, divisor) {
+  return Math.floor(value / divisor);
 }
 
 async function mapWithConcurrency(items, concurrency, fn) {

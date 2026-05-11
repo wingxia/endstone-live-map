@@ -15,7 +15,7 @@ import {
 } from "./chunkSnapshot.js";
 
 const SUBCHUNK_TYPE = "SubChunkPrefix";
-const DEFAULT_BATCH_SIZE = 64;
+const DEFAULT_BATCH_SIZE = 384;
 const MAX_POST_ATTEMPTS = 20;
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -42,13 +42,19 @@ export async function main(argv = process.argv.slice(2)) {
     batchSize: Math.min(DEFAULT_BATCH_SIZE, optionalNumber(args["batch-size"]) || DEFAULT_BATCH_SIZE),
     rps: optionalNumber(args.rps) || 1,
     dimension: args.dimension || "",
+    minChunkX: optionalMaybeNumber(args["min-chunk-x"]),
+    maxChunkX: optionalMaybeNumber(args["max-chunk-x"]),
+    minChunkZ: optionalMaybeNumber(args["min-chunk-z"]),
+    maxChunkZ: optionalMaybeNumber(args["max-chunk-z"]),
     resumeFile: args["resume-file"] ? path.resolve(args["resume-file"]) : "",
+    storage: args.storage === "chunk" ? "chunk" : "region",
     includeLiquids: args["include-liquids"] !== "false",
   };
 
   if (!options.dryRun && !options.token) {
     throw new Error("PLUGIN_TOKEN is required unless --dry-run is set");
   }
+  validateBounds(options);
 
   const { LevelDB } = await import("@8crafter/leveldb-zlib");
   const levelUtils = await import("mcbe-leveldb");
@@ -153,6 +159,9 @@ export async function* iterateSubchunkGroups(db, levelUtils, options = {}) {
       if (options.dimension && dimension !== options.dimension) {
         continue;
       }
+      if (!isChunkInBounds(indices.x, indices.z, options)) {
+        continue;
+      }
       let parsed;
       try {
         parsed = await entryContentTypeToFormatMap.SubChunkPrefix.parse(rawValue);
@@ -195,7 +204,7 @@ async function flushBatch(batch, options, uploaded) {
     }
     return 0;
   }
-  const response = await postJson(`${options.workerUrl}/api/plugin/chunks/batch`, { chunks: batch, broadcast: false }, options.token);
+  const response = await postJson(`${options.workerUrl}/api/plugin/chunks/batch`, { chunks: batch, broadcast: false, storage: options.storage }, options.token);
   for (const snapshot of batch) {
     uploaded.add(chunkKey(snapshot));
   }
@@ -291,8 +300,46 @@ function optionalNumber(value) {
   return Math.trunc(number);
 }
 
+function optionalMaybeNumber(value) {
+  if (value === undefined || value === true || value === "") {
+    return undefined;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    throw new Error(`Invalid number: ${value}`);
+  }
+  return Math.trunc(number);
+}
+
+function validateBounds(options) {
+  for (const [minField, maxField] of [
+    ["minChunkX", "maxChunkX"],
+    ["minChunkZ", "maxChunkZ"],
+  ]) {
+    if (options[minField] !== undefined && options[maxField] !== undefined && options[maxField] < options[minField]) {
+      throw new Error(`${maxField} must be greater than or equal to ${minField}`);
+    }
+  }
+}
+
 function stripTrailingSlash(value) {
   return String(value).replace(/\/+$/, "");
+}
+
+function isChunkInBounds(chunkX, chunkZ, options) {
+  if (options.minChunkX !== undefined && chunkX < options.minChunkX) {
+    return false;
+  }
+  if (options.maxChunkX !== undefined && chunkX > options.maxChunkX) {
+    return false;
+  }
+  if (options.minChunkZ !== undefined && chunkZ < options.minChunkZ) {
+    return false;
+  }
+  if (options.maxChunkZ !== undefined && chunkZ > options.maxChunkZ) {
+    return false;
+  }
+  return true;
 }
 
 function coerceIteratorEntry(next, getContentTypeFromDBKey, getChunkKeyIndices) {
