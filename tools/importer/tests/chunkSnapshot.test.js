@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildChunkSnapshot, mergeWorldMeta, normalizeDimension, offsetToSubchunkIndex, summarizeSnapshots } from "../chunkSnapshot.js";
+import { buildChunkSnapshot, chunkColumnIndex, mergeWorldMeta, normalizeDimension, offsetToSubchunkIndex, summarizeSnapshots } from "../chunkSnapshot.js";
 import { readSubchunkGroups } from "../import-bedrock-world.mjs";
 
 function layerWithBlocks(entries) {
@@ -27,6 +27,38 @@ function block(name) {
 describe("chunk snapshot importer helpers", () => {
   it("uses Bedrock subchunk x/y/z index ordering", () => {
     expect(offsetToSubchunkIndex(1, 2, 3)).toBe(0x132);
+  });
+
+  it("matches mcbe-leveldb Bedrock subchunk index helpers for every local block", async () => {
+    const { offsetToChunkBlockIndex } = await import("mcbe-leveldb");
+    for (let localX = 0; localX < 16; localX += 1) {
+      for (let localY = 0; localY < 16; localY += 1) {
+        for (let localZ = 0; localZ < 16; localZ += 1) {
+          expect(offsetToSubchunkIndex(localX, localY, localZ)).toBe(offsetToChunkBlockIndex({ x: localX, y: localY, z: localZ }));
+        }
+      }
+    }
+  });
+
+  it("stores chunk snapshot columns as localZ * 16 + localX", () => {
+    const entries = [
+      { x: 0, y: 1, z: 0, paletteIndex: 1 },
+      { x: 15, y: 2, z: 0, paletteIndex: 2 },
+      { x: 0, y: 3, z: 15, paletteIndex: 3 },
+    ];
+    const snapshot = buildChunkSnapshot({
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkX: 0,
+      chunkZ: 0,
+      subchunks: [{ y: 0, layers: [layerWithBlocks(entries)] }],
+      updatedAt: 100,
+    });
+
+    expect(snapshot.palette[snapshot.blocks[chunkColumnIndex(0, 0)]]).toBe("minecraft:stone");
+    expect(snapshot.palette[snapshot.blocks[chunkColumnIndex(15, 0)]]).toBe("minecraft:grass_block");
+    expect(snapshot.palette[snapshot.blocks[chunkColumnIndex(0, 15)]]).toBe("minecraft:water");
+    expect(snapshot.heights[chunkColumnIndex(0, 15)]).toBe(3);
   });
 
   it("treats missing Bedrock dimension fields as Overworld", () => {

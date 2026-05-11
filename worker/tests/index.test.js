@@ -4,12 +4,11 @@ import worker, {
   chunkRegionKey,
   chunkKey,
   diffChunkSnapshots,
+  normalizeCleanupPayload,
   normalizeChunkBatchPayload,
   normalizeChunkSnapshot,
   normalizeMarkerPayload,
-  normalizeTilePayload,
   normalizeWorldMeta,
-  tileKey,
   worldMetaKey,
 } from "../src/index.js";
 
@@ -42,6 +41,10 @@ class MockR2Bucket {
 
   async put(key, body, options = {}) {
     this.objects.set(key, new MockR2Object(body, options.httpMetadata?.contentType || "application/octet-stream"));
+  }
+
+  async delete(key) {
+    this.objects.delete(key);
   }
 
   async get(key) {
@@ -156,12 +159,13 @@ describe("worker helpers", () => {
     expect(diffChunkSnapshots(previous, next)).toEqual([{ localX: 1, localZ: 1, block: "minecraft:water", height: 63 }]);
   });
 
-  it("normalizes legacy tile payloads and keys", () => {
-    expect(normalizeTilePayload({ world: "my world", dimension: "Overworld", z: 0, x: -1, y: 2, contentType: "image/bmp" })).toMatchObject({
-      world: "my_world",
-      x: -1,
+  it("normalizes map data cleanup payloads", () => {
+    expect(normalizeCleanupPayload({ prefix: "chunks/v1/", limit: 999, dryRun: false, confirm: "delete-map-data-v1" })).toMatchObject({
+      prefix: "chunks/v1/",
+      limit: 500,
+      dryRun: false,
     });
-    expect(tileKey("world", "Overworld", 0, -1, 2, "bmp")).toBe("world/Overworld/0/-1/2.bmp");
+    expect(() => normalizeCleanupPayload({ prefix: "textures/v1/" })).toThrow(/cleanup prefix/);
   });
 
   it("validates marker payloads", () => {
@@ -403,31 +407,37 @@ describe("worker routes", () => {
     expect(await env.MAP_DATA.objects.get("textures/v1/report.json").json()).toMatchObject({ entries: 1 });
   });
 
-  it("keeps legacy tile reads R2-only without D1", async () => {
+  it("cleans bad imported map data without touching texture artifacts", async () => {
     const env = createEnv();
-    const upload = await worker.fetch(
-      new Request("https://map.buhe.li/api/plugin/tiles", {
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", "{}");
+    await env.MAP_DATA.put("chunk-regions/v1/world/Overworld/0/0.json", "{}");
+    await env.MAP_DATA.put("textures/v1/manifest.json", "{}");
+
+    const dryRun = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-data/cleanup", {
         method: "POST",
         headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-        body: JSON.stringify({
-          world: "world",
-          dimension: "Overworld",
-          z: 0,
-          x: 0,
-          y: 0,
-          contentType: "image/bmp",
-          data: "Qk0=",
-        }),
+        body: JSON.stringify({ prefix: "chunks/v1/", dryRun: true }),
       }),
       env,
       {},
     );
-    expect(upload.status).toBe(200);
-    expect(env.DB).toBeUndefined();
+    expect(await dryRun.json()).toMatchObject({ dryRun: true, matched: 1, deleted: 0 });
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(true);
 
-    const tile = await worker.fetch(new Request("https://map.buhe.li/tiles/world/Overworld/0/0/0.bmp"), env, {});
-    expect(tile.status).toBe(200);
-    expect(tile.headers.get("Content-Type")).toBe("image/bmp");
+    const remove = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-data/cleanup", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ prefix: "chunks/v1/", dryRun: false, confirm: "delete-map-data-v1" }),
+      }),
+      env,
+      {},
+    );
+    expect(await remove.json()).toMatchObject({ dryRun: false, matched: 1, deleted: 1 });
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(false);
+    expect(env.MAP_DATA.objects.has("chunk-regions/v1/world/Overworld/0/0.json")).toBe(true);
+    expect(env.MAP_DATA.objects.has("textures/v1/manifest.json")).toBe(true);
   });
 
   it("rejects unauthenticated plugin writes", async () => {

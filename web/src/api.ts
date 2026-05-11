@@ -116,7 +116,6 @@ export interface BlockUpdatesMessage {
 export interface LiveMessage {
   type:
     | "player_snapshot"
-    | "tile_ready"
     | "chunk_ready"
     | "block_updates"
     | "marker_created"

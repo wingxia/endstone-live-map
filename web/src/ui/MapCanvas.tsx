@@ -1,9 +1,22 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type Marker, type PlayerState, type WorldMeta } from "../api";
+import { blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "./coords";
 import { createChunkGridLayer, INITIAL_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
 const MAX_INITIAL_CHUNKS = 96;
+
+interface CoordinateState {
+  x: number;
+  z: number;
+  chunkX: number;
+  chunkZ: number;
+  localX: number;
+  localZ: number;
+  height: number;
+  block: string;
+  locked: boolean;
+}
 
 interface MapCanvasProps {
   world: string;
@@ -22,6 +35,8 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
     layers: import("leaflet").LayerGroup;
     chunkLayer: ChunkLayerHandle;
   } | null>(null);
+  const [coordinate, setCoordinate] = useState<CoordinateState>(() => buildCoordinateState(0, 0, null, false));
+  const lockedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,6 +60,25 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
 
       const layers = L.layerGroup().addTo(map);
       stateRef.current = { map, layers, chunkLayer };
+
+      const updateCoordinate = (event: import("leaflet").LeafletMouseEvent, locked: boolean) => {
+        const point = leafletToMinecraft(event.latlng.lat, event.latlng.lng);
+        const block = chunkLayer.getBlockInfo(point.x, point.z);
+        lockedRef.current = locked;
+        setCoordinate(buildCoordinateState(point.x, point.z, block, locked));
+      };
+
+      map.on("mousemove", (event) => {
+        if (!lockedRef.current) {
+          updateCoordinate(event, false);
+        }
+      });
+      map.on("click", (event) => updateCoordinate(event, true));
+      map.on("mouseout", () => {
+        if (!lockedRef.current) {
+          setCoordinate((current) => ({ ...current, block: "移出地图", height: Number.NaN }));
+        }
+      });
     }
 
     mount();
@@ -75,8 +109,8 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
       const maxChunkZ = clampChunk(centerChunkZ + half, bounds.minChunkZ, bounds.maxChunkZ);
       state.map.fitBounds(
         [
-          [minChunkZ * 16, minChunkX * 16],
-          [maxChunkZ * 16 + 15, maxChunkX * 16 + 15],
+          minecraftToLeaflet(minChunkX * 16, maxChunkZ * 16 + 15),
+          minecraftToLeaflet(maxChunkX * 16 + 15, minChunkZ * 16),
         ],
         { animate: false, padding: [24, 24] },
       );
@@ -84,8 +118,8 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
     }
     state.map.fitBounds(
       [
-        [bounds.minBlockZ, bounds.minBlockX],
-        [bounds.maxBlockZ, bounds.maxBlockX],
+        minecraftToLeaflet(bounds.minBlockX, bounds.maxBlockZ),
+        minecraftToLeaflet(bounds.maxBlockX, bounds.minBlockZ),
       ],
       { animate: false, padding: [24, 24] },
     );
@@ -115,7 +149,7 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
       state.layers.clearLayers();
 
       for (const marker of markers) {
-        L.circleMarker([marker.z, marker.x], {
+        L.circleMarker(minecraftToLeaflet(marker.x, marker.z), {
           radius: 9,
           color: "#101820",
           weight: 2,
@@ -127,7 +161,7 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
       }
 
       for (const player of players) {
-        L.circleMarker([player.z, player.x], {
+        L.circleMarker(minecraftToLeaflet(player.x, player.z), {
           radius: 7,
           color: "#111827",
           weight: 2,
@@ -147,7 +181,54 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
     };
   }, [players, markers]);
 
-  return <div ref={mapRef} className="map-canvas" data-testid="map-canvas" />;
+  return (
+    <>
+      <div ref={mapRef} className="map-canvas" data-testid="map-canvas" />
+      <div className="coordinate-hud" data-testid="coordinate-hud" aria-label="当前地图坐标">
+        <div>
+          <span>{coordinate.locked ? "已锁定" : "指针"}</span>
+          <strong>
+            X {coordinate.x}, Z {coordinate.z}
+          </strong>
+        </div>
+        <div>
+          <span>Y</span>
+          <strong>{Number.isFinite(coordinate.height) ? coordinate.height : "--"}</strong>
+        </div>
+        <div>
+          <span>区块</span>
+          <strong>
+            {coordinate.chunkX}, {coordinate.chunkZ}
+          </strong>
+        </div>
+        <div>
+          <span>局部</span>
+          <strong>
+            {coordinate.localX}, {coordinate.localZ}
+          </strong>
+        </div>
+        <div className="coordinate-block">
+          <span>方块</span>
+          <strong>{coordinate.block}</strong>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function buildCoordinateState(x: number, z: number, block: ReturnType<ChunkLayerHandle["getBlockInfo"]>, locked: boolean): CoordinateState {
+  const position = block || blockToChunk(x, z);
+  return {
+    x,
+    z,
+    chunkX: position.chunkX,
+    chunkZ: position.chunkZ,
+    localX: position.localX,
+    localZ: position.localZ,
+    height: block?.height ?? Number.NaN,
+    block: block?.block || "未加载",
+    locked,
+  };
 }
 
 function clampChunk(value: number, min: number, max: number) {

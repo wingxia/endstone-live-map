@@ -73,12 +73,9 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.dimensions = dimensionsValue(source, settings.dimensions);
     settings.scan_radius_chunks = intValue(source, "scan_radius_chunks", settings.scan_radius_chunks);
     settings.chunk_refresh_seconds = intValue(source, "chunk_refresh_seconds", settings.chunk_refresh_seconds);
-    settings.chunk_refresh_seconds = intValue(source, "tile_refresh_seconds", settings.chunk_refresh_seconds);
     settings.player_push_seconds = intValue(source, "player_push_seconds", settings.player_push_seconds);
     settings.max_chunks_per_refresh = intValue(source, "max_chunks_per_refresh", settings.max_chunks_per_refresh);
-    settings.max_chunks_per_refresh = intValue(source, "max_tiles_per_refresh", settings.max_chunks_per_refresh);
     settings.upload_chunks = boolValue(source, "upload_chunks", settings.upload_chunks);
-    settings.upload_chunks = boolValue(source, "upload_tiles", settings.upload_chunks);
     settings.upload_players = boolValue(source, "upload_players", settings.upload_players);
     return settings;
 }

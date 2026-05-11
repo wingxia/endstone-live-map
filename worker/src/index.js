@@ -6,17 +6,15 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Plugin-Token",
 };
 
-const TILE_CONTENT_TYPES = new Map([
-  ["image/bmp", "bmp"],
-  ["image/png", "png"],
-  ["image/webp", "webp"],
-]);
-
 const CHUNK_BLOCK_COUNT = 256;
 const MAX_CHUNKS_PER_REQUEST = 256;
 const MAX_CHUNKS_PER_BATCH = 384;
 const REGION_SIZE_CHUNKS = 16;
 const BATCH_WRITE_CONCURRENCY = 32;
+const CLEANUP_CONFIRMATION = "delete-map-data-v1";
+const CLEANUP_DEFAULT_LIMIT = 200;
+const CLEANUP_MAX_LIMIT = 500;
+const CLEANUP_PREFIXES = new Set(["chunks/v1/", "chunk-regions/v1/", "meta/v1/", "Bedrock_level/", "world/"]);
 const TEXTURE_MANIFEST_KEY = "textures/v1/manifest.json";
 const TEXTURE_ATLAS_KEY = "textures/v1/atlas.png";
 const TEXTURE_REPORT_KEY = "textures/v1/report.json";
@@ -137,12 +135,12 @@ export default {
         return handleTextureUpload(request, env);
       }
 
-      if (url.pathname === "/api/plugin/tiles") {
+      if (url.pathname === "/api/plugin/map-data/cleanup") {
         const auth = requirePluginAuth(request, env);
         if (auth) {
           return auth;
         }
-        return handleTileUpload(request, env);
+        return handleMapDataCleanup(request, env);
       }
 
       if (url.pathname === "/api/chunks") {
@@ -167,10 +165,6 @@ export default {
 
       if (url.pathname === "/textures/atlas.png") {
         return handleTextureAtlasGet(env);
-      }
-
-      if (url.pathname.startsWith("/tiles/")) {
-        return handleTileGet(url, env);
       }
 
       if (url.pathname === "/api/markers" || url.pathname.startsWith("/api/markers/")) {
@@ -513,48 +507,33 @@ async function handleWorldMetaGet(url, env) {
   return json(await readR2Json(object), 200, { "Cache-Control": "public, max-age=30" });
 }
 
-async function handleTileUpload(request, env) {
+async function handleMapDataCleanup(request, env) {
   const bucket = mapBucket(env);
   if (!bucket) {
     return json({ error: "r2_not_configured" }, 503);
   }
-
   const payload = await request.json();
-  const tile = normalizeTilePayload(payload);
-  const bytes = decodeBase64(payload.data);
-  const extension = TILE_CONTENT_TYPES.get(tile.contentType);
-  const key = tileKey(tile.world, tile.dimension, tile.z, tile.x, tile.y, extension);
+  const cleanup = normalizeCleanupPayload(payload);
+  if (!cleanup.dryRun && cleanup.confirm !== CLEANUP_CONFIRMATION) {
+    return json({ error: "cleanup_confirmation_required", confirm: CLEANUP_CONFIRMATION }, 400);
+  }
 
-  await bucket.put(key, bytes, {
-    httpMetadata: { contentType: tile.contentType },
-    customMetadata: { world: tile.world, dimension: tile.dimension },
+  const page = await bucket.list({ prefix: cleanup.prefix, cursor: cleanup.cursor || undefined, limit: cleanup.limit });
+  const keys = (page.objects || []).map((object) => object.key).filter((key) => key.startsWith(cleanup.prefix) && !key.startsWith("textures/v1/"));
+  if (!cleanup.dryRun) {
+    await mapWithConcurrency(keys, 25, (key) => bucket.delete(key));
+  }
+
+  return json({
+    ok: true,
+    dryRun: cleanup.dryRun,
+    prefix: cleanup.prefix,
+    deleted: cleanup.dryRun ? 0 : keys.length,
+    matched: keys.length,
+    keys,
+    truncated: page.truncated === true,
+    cursor: page.truncated ? page.cursor : null,
   });
-
-  await broadcastLive(env, JSON.stringify({ type: "tile_ready", ...tile, extension }));
-  return json({ ok: true, key });
-}
-
-async function handleTileGet(url, env) {
-  const bucket = mapBucket(env);
-  const parsed = parseTilePath(url.pathname);
-  if (!parsed) {
-    return json({ error: "bad_tile_path" }, 400);
-  }
-  if (!bucket) {
-    return json({ error: "r2_not_configured" }, 503);
-  }
-
-  const object = await bucket.get(parsed.key);
-  if (!object) {
-    return new Response("tile not found", { status: 404, headers: CORS_HEADERS });
-  }
-  const headers = new Headers(CORS_HEADERS);
-  object.writeHttpMetadata?.(headers);
-  if (!headers.has("Content-Type")) {
-    headers.set("Content-Type", contentTypeForExtension(parsed.extension));
-  }
-  headers.set("Cache-Control", "public, max-age=60");
-  return new Response(object.body, { headers });
 }
 
 async function handleMarkers(request, env, url) {
@@ -753,18 +732,18 @@ export function normalizeChunkQuery(params) {
   };
 }
 
-export function normalizeTilePayload(payload) {
-  const contentType = String(payload.contentType || "");
-  if (!TILE_CONTENT_TYPES.has(contentType)) {
-    throw new Error("unsupported tile content type");
+export function normalizeCleanupPayload(payload) {
+  const prefix = String(payload.prefix || "");
+  if (!CLEANUP_PREFIXES.has(prefix) || prefix.startsWith("textures/v1/")) {
+    throw new Error("cleanup prefix is not allowed");
   }
+  const limit = Math.min(CLEANUP_MAX_LIMIT, Math.max(1, numberOrThrow(payload.limit ?? CLEANUP_DEFAULT_LIMIT, "limit")));
   return {
-    world: cleanSegment(payload.world || "world"),
-    dimension: cleanSegment(payload.dimension || "Overworld"),
-    z: numberOrThrow(payload.z, "z"),
-    x: numberOrThrow(payload.x, "x"),
-    y: numberOrThrow(payload.y, "y"),
-    contentType,
+    prefix,
+    limit,
+    cursor: typeof payload.cursor === "string" && payload.cursor.length > 0 ? payload.cursor : "",
+    dryRun: payload.dryRun !== false,
+    confirm: String(payload.confirm || ""),
   };
 }
 
@@ -920,10 +899,6 @@ async function mapWithConcurrency(items, concurrency, fn) {
   return results;
 }
 
-export function tileKey(world, dimension, z, x, y, extension) {
-  return `${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(z, "z")}/${numberOrThrow(x, "x")}/${numberOrThrow(y, "y")}.${extension}`;
-}
-
 export function diffChunkSnapshots(previous, next) {
   if (!previous || !Array.isArray(previous.blocks) || !Array.isArray(previous.heights)) {
     return [];
@@ -961,21 +936,6 @@ function normalizeFixedNumberArray(value, field, length) {
     throw new Error(`${field} must contain ${length} entries`);
   }
   return value.map((item, index) => numberOrThrow(item, `${field}[${index}]`));
-}
-
-function parseTilePath(pathname) {
-  const parts = pathname.split("/").filter(Boolean);
-  if (parts.length !== 6 || parts[0] !== "tiles") {
-    return null;
-  }
-  const [fileY, extension] = parts[5].split(".");
-  if (!fileY || !extension) {
-    return null;
-  }
-  return {
-    key: tileKey(parts[1], parts[2], parts[3], parts[4], fileY, extension),
-    extension,
-  };
 }
 
 function cleanSegment(value) {
@@ -1019,7 +979,7 @@ function numberOrThrow(value, field) {
 
 function decodeBase64(value) {
   if (typeof value !== "string" || value.length === 0) {
-    throw new Error("missing base64 tile data");
+    throw new Error("missing base64 data");
   }
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
@@ -1027,17 +987,4 @@ function decodeBase64(value) {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
-}
-
-function contentTypeForExtension(extension) {
-  if (extension === "bmp") {
-    return "image/bmp";
-  }
-  if (extension === "png") {
-    return "image/png";
-  }
-  if (extension === "webp") {
-    return "image/webp";
-  }
-  return "application/octet-stream";
 }

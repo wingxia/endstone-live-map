@@ -1,9 +1,7 @@
 #include "livemap/base64.hpp"
-#include "livemap/bmp_writer.hpp"
 #include "livemap/chunk.hpp"
-#include "livemap/color_map.hpp"
 #include "livemap/protocol.hpp"
-#include "livemap/tile_renderer.hpp"
+#include "livemap/tile_math.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -14,17 +12,12 @@ namespace {
 
 void testTileMath()
 {
-    assert(livemap::floorDiv(0, 256) == 0);
-    assert(livemap::floorDiv(255, 256) == 0);
-    assert(livemap::floorDiv(256, 256) == 1);
-    assert(livemap::floorDiv(-1, 256) == -1);
-    assert(livemap::floorDiv(-256, 256) == -1);
-    assert(livemap::floorDiv(-257, 256) == -2);
-
-    const auto coord = livemap::tileForBlock("world", "Overworld", -1, 256);
-    assert(coord.x == -1);
-    assert(coord.y == 1);
-    assert(coord.path("bmp") == "world/Overworld/0/-1/1.bmp");
+    assert(livemap::floorDiv(0, 16) == 0);
+    assert(livemap::floorDiv(15, 16) == 0);
+    assert(livemap::floorDiv(16, 16) == 1);
+    assert(livemap::floorDiv(-1, 16) == -1);
+    assert(livemap::floorDiv(-16, 16) == -1);
+    assert(livemap::floorDiv(-17, 16) == -2);
 }
 
 void testDirtyTracker()
@@ -94,20 +87,6 @@ void testProtocol()
     assert(chunk_json.find("\"updatedAt\":99") != std::string::npos);
 }
 
-void testBmpAndRenderer()
-{
-    const std::vector<livemap::Color> pixels = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};
-    const auto bmp = livemap::encodeBmp24(2, 2, pixels);
-    assert(bmp.size() == 70);
-    assert(bmp[0] == 'B' && bmp[1] == 'M');
-
-    const auto rendered = livemap::renderTileBmp(4, 4, [](int x, int z) {
-        return livemap::BlockSample{(x + z) % 2 == 0 ? "minecraft:grass_block" : "minecraft:water", 64};
-    });
-    assert(rendered.size() > 54);
-    assert(rendered[0] == 'B' && rendered[1] == 'M');
-}
-
 void testBase64()
 {
     const std::vector<std::uint8_t> bytes = {'M', 'a', 'p'};
@@ -124,7 +103,6 @@ int main()
     testChunkMath();
     testDirtyTracker();
     testProtocol();
-    testBmpAndRenderer();
     testBase64();
     std::cout << "livemap core tests passed\n";
     return 0;

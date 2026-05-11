@@ -10,6 +10,7 @@ import {
   type TextureAtlasEntry,
   type TextureManifest,
 } from "../api";
+import { blockColumnIndex, blockToChunk } from "./coords";
 
 const BLOCKS_PER_CHUNK = 16;
 const TILE_SIZE = 256;
@@ -27,6 +28,16 @@ export interface ChunkLayerHandle extends GridLayer {
   setWorldDimension: (world: string, dimension: string) => void;
   refreshChunk: (message: ChunkReadyMessage) => void;
   applyBlockUpdates: (message: BlockUpdatesMessage) => void;
+  getBlockInfo: (x: number, z: number) => BlockInfo | null;
+}
+
+export interface BlockInfo {
+  block: string;
+  height: number;
+  chunkX: number;
+  chunkZ: number;
+  localX: number;
+  localZ: number;
 }
 
 export function createChunkGridLayer(L: typeof import("leaflet"), world: string, dimension: string): ChunkLayerHandle {
@@ -72,11 +83,29 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
         if (paletteIndex === -1) {
           paletteIndex = chunk.palette.push(update.block) - 1;
         }
-        const index = update.localZ * 16 + update.localX;
+        const index = blockColumnIndex(update.localX, update.localZ);
         chunk.blocks[index] = paletteIndex;
         chunk.heights[index] = update.height;
       }
       this.redraw();
+    }
+
+    getBlockInfo(x: number, z: number): BlockInfo | null {
+      const position = blockToChunk(x, z);
+      const chunk = this.chunkCache.get(cacheKey(this.worldName, this.dimensionName, position.chunkX, position.chunkZ));
+      if (!chunk) {
+        return {
+          ...position,
+          block: "未加载",
+          height: Number.NaN,
+        };
+      }
+      const index = blockColumnIndex(position.localX, position.localZ);
+      return {
+        ...position,
+        block: chunk.palette[chunk.blocks[index]] || "minecraft:air",
+        height: chunk.heights[index],
+      };
     }
 
     createTile(coords: Coords, done: DoneCallback): HTMLElement {
@@ -149,10 +178,14 @@ interface TileChunkRange {
 
 export function chunkRangeForTile(coords: Pick<Coords, "x" | "y" | "z">): TileChunkRange {
   const scale = 2 ** coords.z;
-  const minBlockX = Math.floor((coords.x * TILE_SIZE) / scale);
-  const maxBlockX = Math.floor(((coords.x + 1) * TILE_SIZE - 1) / scale);
-  const minBlockZ = Math.floor((coords.y * TILE_SIZE) / scale);
-  const maxBlockZ = Math.floor(((coords.y + 1) * TILE_SIZE - 1) / scale);
+  const minLeafletX = (coords.x * TILE_SIZE) / scale;
+  const maxLeafletX = ((coords.x + 1) * TILE_SIZE) / scale;
+  const minLeafletY = (coords.y * TILE_SIZE) / scale;
+  const maxLeafletY = ((coords.y + 1) * TILE_SIZE) / scale;
+  const minBlockX = Math.floor(minLeafletX);
+  const maxBlockX = Math.ceil(maxLeafletX) - 1;
+  const minBlockZ = Math.floor(-maxLeafletY) + 1;
+  const maxBlockZ = normalizeZero(Math.floor(-minLeafletY));
 
   return {
     minBlockX,
@@ -175,9 +208,9 @@ function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: T
       if (worldX < range.minBlockX || worldX > range.maxBlockX || worldZ < range.minBlockZ || worldZ > range.maxBlockZ) {
         continue;
       }
-      const index = localZ * BLOCKS_PER_CHUNK + localX;
+      const index = blockColumnIndex(localX, localZ);
       const blockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
-      drawBlock(ctx, atlas, blockId, (worldX - range.minBlockX) * range.scale, (worldZ - range.minBlockZ) * range.scale, range.scale);
+      drawBlock(ctx, atlas, blockId, (worldX - range.minBlockX) * range.scale, (range.maxBlockZ - worldZ) * range.scale, range.scale);
     }
   }
 }
@@ -222,7 +255,7 @@ function drawGrid(ctx: CanvasRenderingContext2D, range: TileChunkRange) {
       ctx.stroke();
     }
     for (let blockZ = range.minBlockZ; blockZ <= range.maxBlockZ; blockZ += 1) {
-      const y = (blockZ - range.minBlockZ) * range.scale + 0.5;
+      const y = (range.maxBlockZ - blockZ) * range.scale + 0.5;
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(TILE_SIZE, y);
@@ -240,7 +273,7 @@ function drawGrid(ctx: CanvasRenderingContext2D, range: TileChunkRange) {
     ctx.stroke();
   }
   for (let chunkZ = range.minChunkZ; chunkZ <= range.maxChunkZ + 1; chunkZ += 1) {
-    const y = (chunkZ * BLOCKS_PER_CHUNK - range.minBlockZ) * range.scale + 0.5;
+    const y = (range.maxBlockZ - chunkZ * BLOCKS_PER_CHUNK + 1) * range.scale + 0.5;
     ctx.beginPath();
     ctx.moveTo(0, y);
     ctx.lineTo(TILE_SIZE, y);
@@ -276,6 +309,10 @@ function cacheKey(world: string, dimension: string, chunkX: number, chunkZ: numb
 
 function floorDiv(value: number, divisor: number) {
   return Math.floor(value / divisor);
+}
+
+function normalizeZero(value: number) {
+  return Object.is(value, -0) ? 0 : value;
 }
 
 function stripNamespace(blockId: string) {

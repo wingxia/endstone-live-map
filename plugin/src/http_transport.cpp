@@ -1,13 +1,10 @@
-#include "livemap/base64.hpp"
 #include "livemap/chunk.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
-#include "livemap/tile_math.hpp"
 
 #include <curl/curl.h>
 
 #include <mutex>
-#include <span>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -50,16 +47,6 @@ public:
         return result == CURLE_OK && response_code >= 200 && response_code < 300;
     }
 
-    bool uploadTile(const TileCoord &coord, std::span<const std::uint8_t> bytes, std::string_view content_type) const
-    {
-        std::ostringstream json;
-        json << "{\"world\":\"" << jsonEscape(coord.world) << "\",\"dimension\":\"" << jsonEscape(coord.dimension)
-             << "\",\"z\":" << coord.zoom << ",\"x\":" << coord.x << ",\"y\":" << coord.y
-             << ",\"contentType\":\"" << jsonEscape(content_type) << "\",\"encoding\":\"base64\",\"data\":\""
-             << base64Encode(bytes) << "\"}";
-        return postJson("/api/plugin/tiles", json.str());
-    }
-
 private:
     LiveMapSettings settings_;
 };
@@ -67,11 +54,6 @@ private:
 bool postLiveJson(const LiveMapSettings &settings, std::string_view json)
 {
     return CurlTransport(settings).postJson("/api/plugin/live", json);
-}
-
-bool uploadTileBmp(const LiveMapSettings &settings, const TileCoord &coord, std::span<const std::uint8_t> bytes)
-{
-    return CurlTransport(settings).uploadTile(coord, bytes, "image/bmp");
 }
 
 bool uploadChunkSnapshot(const LiveMapSettings &settings, const ChunkSnapshot &snapshot)

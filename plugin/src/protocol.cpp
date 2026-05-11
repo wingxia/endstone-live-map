@@ -101,15 +101,6 @@ std::string serializeChunkReady(const ChunkCoord &coord)
     return out.str();
 }
 
-std::string serializeTileReady(const TileCoord &coord, std::string content_type)
-{
-    std::ostringstream out;
-    out << "{\"type\":\"tile_ready\",\"world\":\"" << jsonEscape(coord.world) << "\",\"dimension\":\""
-        << jsonEscape(coord.dimension) << "\",\"z\":" << coord.zoom << ",\"x\":" << coord.x << ",\"y\":"
-        << coord.y << ",\"contentType\":\"" << jsonEscape(content_type) << "\"}";
-    return out.str();
-}
-
 std::string serializeHeartbeat(std::string_view server_id, std::int64_t now_ms)
 {
     std::ostringstream out;

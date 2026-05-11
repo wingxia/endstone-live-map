@@ -80,6 +80,8 @@ test("loads the map application shell", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Endstone Live Map" })).toBeVisible();
   await expect(page.getByTestId("map-canvas")).toBeVisible();
-  await expect(page.getByText("区块")).toBeVisible();
+  await expect(page.getByTestId("coordinate-hud")).toContainText("X 0, Z 0");
+  await expect(page.getByTestId("coordinate-hud")).toContainText("区块");
+  await expect(page.getByLabel("地图状态")).toContainText("区块");
   await expect(page.getByText("Spawn")).toBeVisible();
 });

@@ -5,7 +5,6 @@
 #include <vector>
 
 #include "livemap/chunk.hpp"
-#include "livemap/tile_math.hpp"
 
 namespace livemap {
 
@@ -26,7 +25,6 @@ std::string jsonEscape(std::string_view value);
 std::string serializePlayerSnapshot(const std::vector<PlayerState> &players);
 std::string serializeChunkSnapshot(const ChunkSnapshot &snapshot);
 std::string serializeChunkReady(const ChunkCoord &coord);
-std::string serializeTileReady(const TileCoord &coord, std::string content_type);
 std::string serializeHeartbeat(std::string_view server_id, std::int64_t now_ms);
 
 }  // namespace livemap

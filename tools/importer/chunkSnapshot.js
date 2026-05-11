@@ -22,6 +22,10 @@ export function offsetToSubchunkIndex(localX, localY, localZ) {
   return ((localX & 0xf) << 8) | (localY & 0xf) | ((localZ & 0xf) << 4);
 }
 
+export function chunkColumnIndex(localX, localZ) {
+  return (localZ & 0xf) * CHUNK_SIZE + (localX & 0xf);
+}
+
 export function blockNameFromPaletteEntry(entry) {
   return entry?.value?.name?.value || entry?.name?.value || entry?.name || "minecraft:air";
 }
@@ -54,7 +58,7 @@ export function buildChunkSnapshot({ world = DEFAULT_WORLD, dimension, chunkX, c
 
   for (let localZ = 0; localZ < CHUNK_SIZE; localZ += 1) {
     for (let localX = 0; localX < CHUNK_SIZE; localX += 1) {
-      const columnIndex = localZ * CHUNK_SIZE + localX;
+      const columnIndex = chunkColumnIndex(localX, localZ);
       for (const subchunk of ordered) {
         const layer = subchunk.layers[0];
         if (!layer) {

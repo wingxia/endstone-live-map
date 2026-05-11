@@ -71,3 +71,16 @@ PLUGIN_TOKEN=... scripts/nas-full-import.sh
 ```
 
 The importer reads existing generated chunks only, uploads chunk snapshots in batches to `/api/plugin/chunks/batch`, writes world bounds to `/api/plugin/world-meta`, and stores progress under `/vol1/1000/live-map-import`.
+
+## Map data cleanup
+
+Bad imports can be removed through the authenticated Worker cleanup endpoint. It only accepts map-data prefixes and will reject `textures/v1/`, so the atlas stays in R2:
+
+```bash
+curl -fsS -X POST https://map.buhe.li/api/plugin/map-data/cleanup \
+  -H "Authorization: Bearer $PLUGIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"prefix":"chunks/v1/","dryRun":true}'
+```
+
+Run again with `"dryRun":false` and `"confirm":"delete-map-data-v1"` after checking the matched keys.
