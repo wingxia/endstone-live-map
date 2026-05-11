@@ -183,6 +183,11 @@ function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: T
 }
 
 function drawBlock(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId: string, x: number, y: number, size: number) {
+  if (usesMapTint(blockId)) {
+    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillRect(x, y, size, size);
+    return;
+  }
   const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
   if (atlas.image && entry) {
     drawAtlasEntry(ctx, atlas.image, entry, x, y, size);
@@ -277,9 +282,14 @@ function stripNamespace(blockId: string) {
   return blockId.includes(":") ? blockId.slice(blockId.indexOf(":") + 1) : blockId;
 }
 
+export function usesMapTint(blockId: string) {
+  const id = blockId.toLowerCase();
+  return id.includes("water") || id.includes("bubble_column");
+}
+
 export function fallbackTextureColor(blockId: string) {
   const id = blockId.toLowerCase();
-  if (id.includes("water")) {
+  if (id.includes("water") || id.includes("bubble_column")) {
     return "#2563b8";
   }
   if (id.includes("sand")) {

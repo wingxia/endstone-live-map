@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { chunkUrl, segmentKey, textureAtlasUrl, type WorldMeta } from "../src/api";
-import { chunkRangeForTile, fallbackTextureColor } from "../src/ui/chunkLayer";
+import { chunkRangeForTile, fallbackTextureColor, usesMapTint } from "../src/ui/chunkLayer";
 
 describe("api helpers", () => {
   it("builds chunk query urls for the selected viewport", () => {
@@ -20,6 +20,8 @@ describe("api helpers", () => {
   it("uses manifest atlas paths and deterministic fallback colors", () => {
     expect(textureAtlasUrl({ version: 1, tileSize: 16, atlas: "/textures/atlas.png", blocks: {} })).toBe("/textures/atlas.png");
     expect(fallbackTextureColor("minecraft:water")).toBe("#2563b8");
+    expect(usesMapTint("minecraft:water")).toBe(true);
+    expect(usesMapTint("minecraft:stone")).toBe(false);
     expect(segmentKey("Bedrock level")).toBe("Bedrock_level");
   });
 
