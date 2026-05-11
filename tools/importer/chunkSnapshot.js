@@ -12,6 +12,9 @@ const DIMENSION_LABELS = new Map([
 ]);
 
 export function normalizeDimension(value) {
+  if (value === undefined || value === null || value === "") {
+    return "Overworld";
+  }
   return DIMENSION_LABELS.get(value) || String(value);
 }
 

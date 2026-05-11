@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildChunkSnapshot, mergeWorldMeta, offsetToSubchunkIndex, summarizeSnapshots } from "../chunkSnapshot.js";
+import { buildChunkSnapshot, mergeWorldMeta, normalizeDimension, offsetToSubchunkIndex, summarizeSnapshots } from "../chunkSnapshot.js";
 import { readSubchunkGroups } from "../import-bedrock-world.mjs";
 
 function layerWithBlocks(entries) {
@@ -27,6 +27,11 @@ function block(name) {
 describe("chunk snapshot importer helpers", () => {
   it("uses Bedrock subchunk x/y/z index ordering", () => {
     expect(offsetToSubchunkIndex(1, 2, 3)).toBe(0x132);
+  });
+
+  it("treats missing Bedrock dimension fields as Overworld", () => {
+    expect(normalizeDimension(undefined)).toBe("Overworld");
+    expect(normalizeDimension("")).toBe("Overworld");
   });
 
   it("selects the highest non-air top block per x/z column", () => {
