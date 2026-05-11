@@ -137,7 +137,8 @@ export async function readSubchunkGroups(db, levelUtils, options = {}) {
 export async function* iterateSubchunkGroups(db, levelUtils, options = {}) {
   const { getContentTypeFromDBKey, getChunkKeyIndices, entryContentTypeToFormatMap } = levelUtils;
   const iterator = db.getIterator({ keys: true, values: true, keyAsBuffer: true, valueAsBuffer: true });
-  const groups = new Map();
+  let currentKey = "";
+  let currentGroup = null;
   let skippedSubchunks = 0;
   try {
     let next;
@@ -164,19 +165,23 @@ export async function* iterateSubchunkGroups(db, levelUtils, options = {}) {
       }
       const subchunkIndex = "subChunkIndex" in indices ? indices.subChunkIndex : parsed.value.subChunkIndex?.value ?? 0;
       const key = `${dimension}/${indices.x}/${indices.z}`;
-      let group = groups.get(key);
-      if (!group) {
-        group = { dimension, chunkX: indices.x, chunkZ: indices.z, subchunks: [] };
-        groups.set(key, group);
+      if (currentKey && key !== currentKey) {
+        yield currentGroup;
+        currentKey = "";
+        currentGroup = null;
+      }
+      if (!currentGroup) {
+        currentKey = key;
+        currentGroup = { dimension, chunkX: indices.x, chunkZ: indices.z, subchunks: [] };
       }
       const layers = parsed.value.layers?.value?.value || [];
-      group.subchunks.push({ y: subchunkIndex, layers });
+      currentGroup.subchunks.push({ y: subchunkIndex, layers });
     }
     if (skippedSubchunks > 10) {
       console.warn(`Skipped ${skippedSubchunks} unparsable subchunks total.`);
     }
-    for (const group of groups.values()) {
-      yield group;
+    if (currentGroup) {
+      yield currentGroup;
     }
   } finally {
     await iterator.end?.();
