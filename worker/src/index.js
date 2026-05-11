@@ -15,6 +15,7 @@ const TILE_CONTENT_TYPES = new Map([
 const CHUNK_BLOCK_COUNT = 256;
 const MAX_CHUNKS_PER_REQUEST = 256;
 const MAX_CHUNKS_PER_BATCH = 64;
+const BATCH_WRITE_CONCURRENCY = 16;
 const TEXTURE_MANIFEST_KEY = "textures/v1/manifest.json";
 const TEXTURE_ATLAS_KEY = "textures/v1/atlas.png";
 const TEXTURE_REPORT_KEY = "textures/v1/report.json";
@@ -266,10 +267,7 @@ async function handleChunkBatchUpload(request, env) {
 
   const snapshots = rawChunks.map((chunk) => normalizeChunkSnapshot(chunk));
   const broadcast = payload.broadcast === true;
-  const results = [];
-  for (const snapshot of snapshots) {
-    results.push(await putChunkSnapshot(bucket, snapshot, { env, broadcast, diffForViewers: broadcast }));
-  }
+  const results = await mapWithConcurrency(snapshots, BATCH_WRITE_CONCURRENCY, (snapshot) => putChunkSnapshot(bucket, snapshot, { env, broadcast, diffForViewers: broadcast }));
 
   return json({
     ok: true,
@@ -806,6 +804,20 @@ function parseChunkKey(key) {
 
 function range(min, max) {
   return Array.from({ length: max - min + 1 }, (_, index) => min + index);
+}
+
+async function mapWithConcurrency(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await fn(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 export function tileKey(world, dimension, z, x, y, extension) {
