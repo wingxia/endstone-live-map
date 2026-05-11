@@ -12,8 +12,11 @@ import {
 } from "../api";
 
 const BLOCKS_PER_CHUNK = 16;
-const CHUNKS_PER_TILE = 16;
-const TILE_SIZE = BLOCKS_PER_CHUNK * CHUNKS_PER_TILE;
+const TILE_SIZE = 256;
+const MIN_ZOOM = 0;
+const MAX_ZOOM = 4;
+
+export const INITIAL_MAP_ZOOM = 4;
 
 interface AtlasResource {
   manifest: TextureManifest;
@@ -95,15 +98,14 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       ctx.imageSmoothingEnabled = false;
       drawEmptyTile(canvas, "#17202a");
 
-      const minChunkX = coords.x * CHUNKS_PER_TILE;
-      const minChunkZ = coords.y * CHUNKS_PER_TILE;
+      const tileRange = chunkRangeForTile(coords);
       const response = await fetchChunks({
         world: this.worldName,
         dimension: this.dimensionName,
-        minChunkX,
-        maxChunkX: minChunkX + CHUNKS_PER_TILE - 1,
-        minChunkZ,
-        maxChunkZ: minChunkZ + CHUNKS_PER_TILE - 1,
+        minChunkX: tileRange.minChunkX,
+        maxChunkX: tileRange.maxChunkX,
+        minChunkZ: tileRange.minChunkZ,
+        maxChunkZ: tileRange.maxChunkZ,
       });
       for (const chunk of response.chunks) {
         this.chunkCache.set(cacheKey(chunk.world, chunk.dimension, chunk.chunkX, chunk.chunkZ), chunk);
@@ -111,9 +113,9 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
 
       const atlas = await this.loadAtlas();
       for (const chunk of response.chunks) {
-        drawChunk(ctx, chunk, minChunkX, minChunkZ, atlas);
+        drawChunk(ctx, chunk, tileRange, atlas);
       }
-      drawGrid(ctx);
+      drawGrid(ctx, tileRange);
     }
 
     private loadAtlas() {
@@ -126,37 +128,72 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
 
   return new ChunkGridLayer({
     tileSize: TILE_SIZE,
-    minZoom: 0,
-    maxZoom: 0,
+    minZoom: MIN_ZOOM,
+    maxZoom: MAX_ZOOM,
     noWrap: false,
     className: "chunk-grid-layer",
   }) as ChunkLayerHandle;
 }
 
-function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, minChunkX: number, minChunkZ: number, atlas: AtlasResource) {
-  const baseX = (chunk.chunkX - minChunkX) * BLOCKS_PER_CHUNK;
-  const baseY = (chunk.chunkZ - minChunkZ) * BLOCKS_PER_CHUNK;
+interface TileChunkRange {
+  minBlockX: number;
+  maxBlockX: number;
+  minBlockZ: number;
+  maxBlockZ: number;
+  minChunkX: number;
+  maxChunkX: number;
+  minChunkZ: number;
+  maxChunkZ: number;
+  scale: number;
+}
+
+export function chunkRangeForTile(coords: Pick<Coords, "x" | "y" | "z">): TileChunkRange {
+  const scale = 2 ** coords.z;
+  const minBlockX = Math.floor((coords.x * TILE_SIZE) / scale);
+  const maxBlockX = Math.floor(((coords.x + 1) * TILE_SIZE - 1) / scale);
+  const minBlockZ = Math.floor((coords.y * TILE_SIZE) / scale);
+  const maxBlockZ = Math.floor(((coords.y + 1) * TILE_SIZE - 1) / scale);
+
+  return {
+    minBlockX,
+    maxBlockX,
+    minBlockZ,
+    maxBlockZ,
+    minChunkX: floorDiv(minBlockX, BLOCKS_PER_CHUNK),
+    maxChunkX: floorDiv(maxBlockX, BLOCKS_PER_CHUNK),
+    minChunkZ: floorDiv(minBlockZ, BLOCKS_PER_CHUNK),
+    maxChunkZ: floorDiv(maxBlockZ, BLOCKS_PER_CHUNK),
+    scale,
+  };
+}
+
+function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: TileChunkRange, atlas: AtlasResource) {
   for (let localZ = 0; localZ < BLOCKS_PER_CHUNK; localZ += 1) {
     for (let localX = 0; localX < BLOCKS_PER_CHUNK; localX += 1) {
+      const worldX = chunk.chunkX * BLOCKS_PER_CHUNK + localX;
+      const worldZ = chunk.chunkZ * BLOCKS_PER_CHUNK + localZ;
+      if (worldX < range.minBlockX || worldX > range.maxBlockX || worldZ < range.minBlockZ || worldZ > range.maxBlockZ) {
+        continue;
+      }
       const index = localZ * BLOCKS_PER_CHUNK + localX;
       const blockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
-      drawBlock(ctx, atlas, blockId, baseX + localX, baseY + localZ);
+      drawBlock(ctx, atlas, blockId, (worldX - range.minBlockX) * range.scale, (worldZ - range.minBlockZ) * range.scale, range.scale);
     }
   }
 }
 
-function drawBlock(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId: string, x: number, y: number) {
+function drawBlock(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId: string, x: number, y: number, size: number) {
   const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
   if (atlas.image && entry) {
-    drawAtlasEntry(ctx, atlas.image, entry, x, y);
+    drawAtlasEntry(ctx, atlas.image, entry, x, y, size);
     return;
   }
   ctx.fillStyle = fallbackTextureColor(blockId);
-  ctx.fillRect(x, y, 1, 1);
+  ctx.fillRect(x, y, size, size);
 }
 
-function drawAtlasEntry(ctx: CanvasRenderingContext2D, image: HTMLImageElement, entry: TextureAtlasEntry, x: number, y: number) {
-  ctx.drawImage(image, entry.x, entry.y, entry.w, entry.h, x, y, 1, 1);
+function drawAtlasEntry(ctx: CanvasRenderingContext2D, image: HTMLImageElement, entry: TextureAtlasEntry, x: number, y: number, size: number) {
+  ctx.drawImage(image, entry.x, entry.y, entry.w, entry.h, x, y, size, size);
 }
 
 function drawEmptyTile(canvas: HTMLCanvasElement, color: string) {
@@ -168,15 +205,40 @@ function drawEmptyTile(canvas: HTMLCanvasElement, color: string) {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
 
-function drawGrid(ctx: CanvasRenderingContext2D) {
-  ctx.strokeStyle = "rgba(255,255,255,0.055)";
+function drawGrid(ctx: CanvasRenderingContext2D, range: TileChunkRange) {
+  if (range.scale >= 8) {
+    ctx.strokeStyle = "rgba(255,255,255,0.035)";
+    ctx.lineWidth = 1;
+    for (let blockX = range.minBlockX; blockX <= range.maxBlockX; blockX += 1) {
+      const x = (blockX - range.minBlockX) * range.scale + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, TILE_SIZE);
+      ctx.stroke();
+    }
+    for (let blockZ = range.minBlockZ; blockZ <= range.maxBlockZ; blockZ += 1) {
+      const y = (blockZ - range.minBlockZ) * range.scale + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(TILE_SIZE, y);
+      ctx.stroke();
+    }
+  }
+
+  ctx.strokeStyle = "rgba(255,255,255,0.11)";
   ctx.lineWidth = 1;
-  for (let value = 0; value <= TILE_SIZE; value += BLOCKS_PER_CHUNK) {
+  for (let chunkX = range.minChunkX; chunkX <= range.maxChunkX + 1; chunkX += 1) {
+    const x = (chunkX * BLOCKS_PER_CHUNK - range.minBlockX) * range.scale + 0.5;
     ctx.beginPath();
-    ctx.moveTo(value + 0.5, 0);
-    ctx.lineTo(value + 0.5, TILE_SIZE);
-    ctx.moveTo(0, value + 0.5);
-    ctx.lineTo(TILE_SIZE, value + 0.5);
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, TILE_SIZE);
+    ctx.stroke();
+  }
+  for (let chunkZ = range.minChunkZ; chunkZ <= range.maxChunkZ + 1; chunkZ += 1) {
+    const y = (chunkZ * BLOCKS_PER_CHUNK - range.minBlockZ) * range.scale + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(TILE_SIZE, y);
     ctx.stroke();
   }
 }
@@ -205,6 +267,10 @@ function loadImage(src: string) {
 
 function cacheKey(world: string, dimension: string, chunkX: number, chunkZ: number) {
   return `${world}/${dimension}/${chunkX}/${chunkZ}`;
+}
+
+function floorDiv(value: number, divisor: number) {
+  return Math.floor(value / divisor);
 }
 
 function stripNamespace(blockId: string) {

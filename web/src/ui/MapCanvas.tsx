@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 
 import type { BlockUpdatesMessage, ChunkReadyMessage, Marker, PlayerState } from "../api";
-import { createChunkGridLayer, type ChunkLayerHandle } from "./chunkLayer";
+import { createChunkGridLayer, INITIAL_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
 interface MapCanvasProps {
   world: string;
@@ -34,8 +34,8 @@ export function MapCanvas({ world, dimension, players, markers, chunkReady, bloc
         zoomControl: false,
         attributionControl: false,
         minZoom: 0,
-        maxZoom: 0,
-      }).setView([0, 0], 0);
+        maxZoom: INITIAL_MAP_ZOOM,
+      }).setView([0, 0], INITIAL_MAP_ZOOM);
 
       L.control.zoom({ position: "bottomright" }).addTo(map);
       const chunkLayer = createChunkGridLayer(L, world, dimension).addTo(map);
