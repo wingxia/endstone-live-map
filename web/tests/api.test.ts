@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { chunkUrl, textureAtlasUrl } from "../src/api";
+import { chunkUrl, segmentKey, textureAtlasUrl, type WorldMeta } from "../src/api";
 import { chunkRangeForTile, fallbackTextureColor } from "../src/ui/chunkLayer";
 
 describe("api helpers", () => {
@@ -20,6 +20,31 @@ describe("api helpers", () => {
   it("uses manifest atlas paths and deterministic fallback colors", () => {
     expect(textureAtlasUrl({ version: 1, tileSize: 16, atlas: "/textures/atlas.png", blocks: {} })).toBe("/textures/atlas.png");
     expect(fallbackTextureColor("minecraft:water")).toBe("#2563b8");
+    expect(segmentKey("Bedrock level")).toBe("Bedrock_level");
+  });
+
+  it("models imported world bounds for map fitting", () => {
+    const meta: WorldMeta = {
+      version: 1,
+      world: "Bedrock level",
+      dimension: "Overworld",
+      status: "complete",
+      chunkCount: 2,
+      importedAt: 1,
+      updatedAt: 1,
+      bounds: {
+        minChunkX: -1,
+        maxChunkX: 1,
+        minChunkZ: -2,
+        maxChunkZ: 2,
+        minBlockX: -16,
+        maxBlockX: 31,
+        minBlockZ: -32,
+        maxBlockZ: 47,
+      },
+      topBlocks: { "minecraft:grass_block": 20 },
+    };
+    expect(meta.bounds.maxBlockX - meta.bounds.minBlockX + 1).toBe(48);
   });
 
   it("converts Leaflet tile coordinates into zoom-aware chunk ranges", () => {

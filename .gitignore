@@ -26,3 +26,6 @@ plugins/
 # Generated texture deployment artifacts
 texture-atlas/
 livemap-textures/
+
+# Full-map import runtime artifacts
+live-map-import/

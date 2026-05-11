@@ -19,23 +19,21 @@ const COMMON_ALIASES = {
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.input || !args.output) {
-  console.error("Usage: node scripts/build-texture-atlas.mjs --input <resource-pack-root> --output <dir> [--tile-size 16]");
+  console.error("Usage: node scripts/build-texture-atlas.mjs --input <resource-pack-root> [--input <override-pack>] --output <dir> [--tile-size 16]");
   process.exit(2);
 }
 
 const tileSize = Number(args["tile-size"] || 16);
-const resourceRoot = path.resolve(args.input);
+const resourceRoots = values(args.input).map((input) => path.resolve(input));
 const outputDir = path.resolve(args.output);
-const terrainPath = path.join(resourceRoot, "textures", "terrain_texture.json");
-const terrain = JSON.parse(await fs.readFile(terrainPath, "utf8"));
-const entries = await collectEntries(resourceRoot, terrain.texture_data || {}, tileSize);
+const result = await collectEntries(resourceRoots, tileSize);
 
-if (entries.length === 0) {
-  throw new Error(`No block textures found under ${resourceRoot}`);
+if (result.entries.length === 0) {
+  throw new Error(`No block textures found under ${resourceRoots.join(", ")}`);
 }
 
-const columns = Math.ceil(Math.sqrt(entries.length));
-const rows = Math.ceil(entries.length / columns);
+const columns = Math.ceil(Math.sqrt(result.entries.length));
+const rows = Math.ceil(result.entries.length / columns);
 const atlas = new PNG({ width: columns * tileSize, height: rows * tileSize });
 const manifest = {
   version: 1,
@@ -44,8 +42,8 @@ const manifest = {
   blocks: {},
 };
 
-for (let index = 0; index < entries.length; index += 1) {
-  const entry = entries[index];
+for (let index = 0; index < result.entries.length; index += 1) {
+  const entry = result.entries[index];
   const x = (index % columns) * tileSize;
   const y = Math.floor(index / columns) * tileSize;
   blitNearest(entry.png, atlas, x, y, tileSize);
@@ -55,37 +53,145 @@ for (let index = 0; index < entries.length; index += 1) {
   }
 }
 
+const report = {
+  generatedAt: new Date().toISOString(),
+  inputs: resourceRoots,
+  entries: result.entries.length,
+  manifestBlocks: Object.keys(manifest.blocks).length,
+  missing: result.missing,
+  overrides: result.overrides,
+};
+
 await fs.mkdir(outputDir, { recursive: true });
 await fs.writeFile(path.join(outputDir, "atlas.png"), PNG.sync.write(atlas));
 await fs.writeFile(path.join(outputDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-console.log(`Wrote ${entries.length} textures to ${outputDir}`);
+await fs.writeFile(path.join(outputDir, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
+console.log(`Wrote ${result.entries.length} textures to ${outputDir}`);
 
-async function collectEntries(root, textureData, size) {
-  const entries = [];
-  const seen = new Set();
-  for (const [key, value] of Object.entries(textureData)) {
-    const texture = firstTexturePath(value?.textures);
-    if (!texture) {
+async function collectEntries(roots, size) {
+  const byId = new Map();
+  const missing = [];
+  const overrides = [];
+
+  for (const root of roots) {
+    const terrain = await readJsonIfExists(path.join(root, "textures", "terrain_texture.json"));
+    const blockTextureAliases = await readBlockTextureAliases(root);
+    if (!terrain?.texture_data) {
+      missing.push({ root, id: "terrain_texture.json", reason: "not_found" });
       continue;
     }
-    const pngPath = path.join(root, `${texture}.png`);
-    try {
-      const png = PNG.sync.read(await fs.readFile(pngPath));
-      const id = key.includes(":") ? key : `minecraft:${key}`;
-      if (seen.has(id)) {
+
+    for (const [key, value] of Object.entries(terrain.texture_data)) {
+      const texture = firstTexturePath(value?.textures);
+      if (!texture) {
+        missing.push({ root, id: key, reason: "no_texture_path" });
         continue;
       }
-      seen.add(id);
-      const aliases = new Set([key]);
-      if (COMMON_ALIASES[key]) {
-        aliases.add(COMMON_ALIASES[key]);
+      const pngPath = await findPng(root, texture);
+      if (!pngPath) {
+        missing.push({ root, id: key, reason: "png_not_found", texture });
+        continue;
       }
-      entries.push({ id, aliases: [...aliases].filter((alias) => alias !== id), png: resizeNearest(png, size) });
-    } catch {
-      // Resource packs often reference optional variant textures. Missing files use the frontend fallback.
+      try {
+        const png = PNG.sync.read(await fs.readFile(pngPath));
+        const id = namespaced(key);
+        const aliases = new Set([key, id, ...aliasesForTextureKey(key), ...(blockTextureAliases.get(key) || [])]);
+        if (COMMON_ALIASES[key]) {
+          aliases.add(COMMON_ALIASES[key]);
+        }
+        const entry = { id, aliases: [...aliases].filter((alias) => alias !== id), png: resizeNearest(png, size), source: root };
+        if (byId.has(id)) {
+          overrides.push({ id, from: byId.get(id).source, to: root });
+        }
+        byId.set(id, entry);
+      } catch (error) {
+        missing.push({ root, id: key, reason: "png_decode_failed", texture, message: error instanceof Error ? error.message : String(error) });
+      }
     }
   }
-  return entries;
+
+  return { entries: [...byId.values()].sort((a, b) => a.id.localeCompare(b.id)), missing, overrides };
+}
+
+async function readBlockTextureAliases(root) {
+  const aliases = new Map();
+  const blocks = await readJsonLike(path.join(root, "blocks.json"));
+  if (!blocks || typeof blocks !== "object") {
+    return aliases;
+  }
+  for (const [blockId, value] of Object.entries(blocks)) {
+    const textureNames = extractTextureNames(value);
+    for (const textureName of textureNames) {
+      if (!aliases.has(textureName)) {
+        aliases.set(textureName, new Set());
+      }
+      aliases.get(textureName).add(namespaced(blockId));
+    }
+  }
+  return new Map([...aliases.entries()].map(([key, set]) => [key, [...set]]));
+}
+
+function extractTextureNames(value) {
+  const textures = value?.textures;
+  if (typeof textures === "string") {
+    return [textures];
+  }
+  if (Array.isArray(textures)) {
+    return textures.filter((item) => typeof item === "string");
+  }
+  if (textures && typeof textures === "object") {
+    return Object.values(textures).flatMap((entry) => {
+      if (typeof entry === "string") {
+        return [entry];
+      }
+      if (Array.isArray(entry)) {
+        return entry.filter((item) => typeof item === "string");
+      }
+      return [];
+    });
+  }
+  return [];
+}
+
+async function readJsonIfExists(file) {
+  try {
+    return JSON.parse(await fs.readFile(file, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function readJsonLike(file) {
+  try {
+    const text = await fs.readFile(file, "utf8");
+    return JSON.parse(stripJsonCommentsAndTrailingCommas(text));
+  } catch {
+    return null;
+  }
+}
+
+function stripJsonCommentsAndTrailingCommas(text) {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1")
+    .replace(/,\s*([}\]])/g, "$1");
+}
+
+async function findPng(root, texture) {
+  const candidates = [`${texture}.png`, path.join("textures", `${texture}.png`), path.join("textures", "blocks", `${texture}.png`)];
+  for (const candidate of candidates) {
+    const pngPath = path.join(root, candidate);
+    try {
+      await fs.access(pngPath);
+      return pngPath;
+    } catch {
+      // Try the next path shape.
+    }
+  }
+  return "";
 }
 
 function firstTexturePath(value) {
@@ -99,6 +205,21 @@ function firstTexturePath(value) {
     return firstTexturePath(value.path || value.variations || value.textures);
   }
   return "";
+}
+
+function aliasesForTextureKey(key) {
+  const aliases = new Set();
+  aliases.add(key);
+  aliases.add(namespaced(key));
+  aliases.add(namespaced(key.replace(/_top$/, "")));
+  aliases.add(namespaced(key.replace(/_side$/, "")));
+  aliases.add(namespaced(key.replace(/^tile\./, "")));
+  return [...aliases];
+}
+
+function namespaced(value) {
+  const id = String(value);
+  return id.includes(":") ? id : `minecraft:${id}`;
 }
 
 function resizeNearest(source, size) {
@@ -141,8 +262,17 @@ function parseArgs(values) {
     if (!value.startsWith("--")) {
       continue;
     }
-    parsed[value.slice(2)] = values[index + 1];
+    const key = value.slice(2);
+    const next = values[index + 1];
+    if (!parsed[key]) {
+      parsed[key] = [];
+    }
+    parsed[key].push(next);
     index += 1;
   }
-  return parsed;
+  return Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, value.length === 1 ? value[0] : value]));
+}
+
+function values(value) {
+  return Array.isArray(value) ? value : [value];
 }

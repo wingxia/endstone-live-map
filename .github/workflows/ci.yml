@@ -41,7 +41,7 @@ jobs:
           if-no-files-found: error
 
   web-worker:
-    name: Worker and frontend tests
+    name: Worker, importer, and frontend tests
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -55,8 +55,12 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Unit tests
         run: npm test
+      - name: Importer tests
+        run: npm run test -w tools/importer
       - name: Typecheck
         run: npm run typecheck
+      - name: Importer syntax check
+        run: npm run build -w tools/importer
       - name: Build
         run: npm run build
       - name: E2E tests

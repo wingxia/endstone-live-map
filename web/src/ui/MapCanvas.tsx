@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 
-import type { BlockUpdatesMessage, ChunkReadyMessage, Marker, PlayerState } from "../api";
+import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type Marker, type PlayerState, type WorldMeta } from "../api";
 import { createChunkGridLayer, INITIAL_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
 interface MapCanvasProps {
@@ -8,11 +8,12 @@ interface MapCanvasProps {
   dimension: string;
   players: PlayerState[];
   markers: Marker[];
+  worldMeta: WorldMeta | null;
   chunkReady: ChunkReadyMessage | null;
   blockUpdates: BlockUpdatesMessage | null;
 }
 
-export function MapCanvas({ world, dimension, players, markers, chunkReady, blockUpdates }: MapCanvasProps) {
+export function MapCanvas({ world, dimension, players, markers, worldMeta, chunkReady, blockUpdates }: MapCanvasProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const stateRef = useRef<{
     map: import("leaflet").Map;
@@ -53,6 +54,21 @@ export function MapCanvas({ world, dimension, players, markers, chunkReady, bloc
   useEffect(() => {
     stateRef.current?.chunkLayer.setWorldDimension(world, dimension);
   }, [dimension, world]);
+
+  useEffect(() => {
+    const state = stateRef.current;
+    if (!state || !worldMeta || worldMeta.dimension !== dimension || segmentKey(worldMeta.world) !== segmentKey(world)) {
+      return;
+    }
+    const bounds = worldMeta.bounds;
+    state.map.fitBounds(
+      [
+        [bounds.minBlockZ, bounds.minBlockX],
+        [bounds.maxBlockZ, bounds.maxBlockX],
+      ],
+      { animate: false, padding: [24, 24] },
+    );
+  }, [dimension, worldMeta]);
 
   useEffect(() => {
     if (chunkReady) {

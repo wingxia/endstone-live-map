@@ -1,4 +1,4 @@
-import type { ChunkSnapshot, Marker, PlayerState } from "./api";
+import type { ChunkSnapshot, Marker, PlayerState, WorldMeta } from "./api";
 
 const MOCK_WORLD = "Bedrock level";
 
@@ -84,6 +84,29 @@ export const mockMarkers: Marker[] = [
 ];
 
 export const mockChunks: ChunkSnapshot[] = createMockChunks();
+
+export const mockWorlds: WorldMeta[] = [
+  {
+    version: 1,
+    world: MOCK_WORLD,
+    dimension: "Overworld",
+    status: "complete",
+    chunkCount: 289,
+    importedAt: Date.now(),
+    updatedAt: Date.now(),
+    bounds: {
+      minChunkX: -8,
+      maxChunkX: 8,
+      minChunkZ: -8,
+      maxChunkZ: 8,
+      minBlockX: -128,
+      maxBlockX: 143,
+      minBlockZ: -128,
+      maxBlockZ: 143,
+    },
+    topBlocks: { "minecraft:grass_block": 52000, "minecraft:water": 11000 },
+  },
+];
 
 function createMockChunks(): ChunkSnapshot[] {
   const chunks: ChunkSnapshot[] = [];

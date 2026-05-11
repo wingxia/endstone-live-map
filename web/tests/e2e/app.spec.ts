@@ -24,6 +24,35 @@ test("loads the map application shell", async ({ page }) => {
     });
   });
   await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        worlds: [
+          {
+            version: 1,
+            world: "Bedrock level",
+            dimension: "Overworld",
+            status: "complete",
+            chunkCount: 1,
+            importedAt: 1,
+            updatedAt: 1,
+            bounds: {
+              minChunkX: 0,
+              maxChunkX: 0,
+              minChunkZ: 0,
+              maxChunkZ: 0,
+              minBlockX: 0,
+              maxBlockX: 15,
+              minBlockZ: 0,
+              maxBlockZ: 15,
+            },
+            topBlocks: { "minecraft:grass_block": 200 },
+          },
+        ],
+      }),
+    });
+  });
   await page.route("**/api/chunks?**", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -51,5 +80,6 @@ test("loads the map application shell", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Endstone Live Map" })).toBeVisible();
   await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect(page.getByText("区块")).toBeVisible();
   await expect(page.getByText("Spawn")).toBeVisible();
 });

@@ -54,9 +54,20 @@ The current NAS Bedrock level name is `Bedrock level`, which is also the default
 Generate the atlas from a server/resource pack on NAS or a local copy of that pack:
 
 ```bash
-npm run textures:atlas -- --input /path/to/resource_pack --output /tmp/livemap-textures
+npm run textures:atlas -- --input /path/to/vanilla_resource_pack --input /path/to/server_override_pack --output /tmp/livemap-textures
 npx wrangler r2 object put endstone-live-map-tiles/textures/v1/atlas.png --file /tmp/livemap-textures/atlas.png
 npx wrangler r2 object put endstone-live-map-tiles/textures/v1/manifest.json --file /tmp/livemap-textures/manifest.json --content-type application/json
+npx wrangler r2 object put endstone-live-map-tiles/textures/v1/report.json --file /tmp/livemap-textures/report.json --content-type application/json
 ```
 
 The generated `atlas.png` and `manifest.json` are deployment artifacts and are not committed.
+
+## Full map import
+
+Do not run a full block scan inside the live Endstone plugin. For the NAS server, use a stopped-server LevelDB snapshot and the offline importer:
+
+```bash
+PLUGIN_TOKEN=... scripts/nas-full-import.sh
+```
+
+The importer reads existing generated chunks only, uploads chunk snapshots in batches to `/api/plugin/chunks/batch`, writes world bounds to `/api/plugin/world-meta`, and stores progress under `/vol1/1000/live-map-import`.

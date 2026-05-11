@@ -66,6 +66,27 @@ export interface TextureManifest {
   blocks: Record<string, TextureAtlasEntry>;
 }
 
+export interface WorldMeta {
+  version: number;
+  world: string;
+  dimension: string;
+  status: string;
+  chunkCount: number;
+  importedAt: number;
+  updatedAt: number;
+  bounds: {
+    minChunkX: number;
+    maxChunkX: number;
+    minChunkZ: number;
+    maxChunkZ: number;
+    minBlockX: number;
+    maxBlockX: number;
+    minBlockZ: number;
+    maxBlockZ: number;
+  };
+  topBlocks: Record<string, number>;
+}
+
 export interface BlockUpdate {
   localX: number;
   localZ: number;
@@ -162,6 +183,27 @@ export async function fetchTextureManifest(): Promise<TextureManifest> {
 
 export function textureAtlasUrl(manifest: TextureManifest): string {
   return manifest.atlas || "/textures/atlas.png";
+}
+
+export function segmentKey(value: string): string {
+  return String(value).replace(/[^A-Za-z0-9_.:-]/g, "_").slice(0, 80);
+}
+
+export async function listWorlds(): Promise<WorldMeta[]> {
+  try {
+    const response = await fetch("/api/worlds");
+    if (!response.ok) {
+      throw new Error(`Failed to load worlds: ${response.status}`);
+    }
+    const data = (await response.json()) as { worlds: WorldMeta[] };
+    return data.worlds;
+  } catch (error) {
+    if (import.meta.env.DEV) {
+      const { mockWorlds } = await import("./mockData");
+      return mockWorlds;
+    }
+    throw error;
+  }
 }
 
 export async function listMarkers(): Promise<Marker[]> {

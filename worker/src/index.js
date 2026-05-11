@@ -14,8 +14,11 @@ const TILE_CONTENT_TYPES = new Map([
 
 const CHUNK_BLOCK_COUNT = 256;
 const MAX_CHUNKS_PER_REQUEST = 256;
+const MAX_CHUNKS_PER_BATCH = 64;
 const TEXTURE_MANIFEST_KEY = "textures/v1/manifest.json";
 const TEXTURE_ATLAS_KEY = "textures/v1/atlas.png";
+const TEXTURE_REPORT_KEY = "textures/v1/report.json";
+const WORLD_META_PREFIX = "meta/v1/";
 
 export class LiveRoom {
   constructor(state, env) {
@@ -107,6 +110,22 @@ export default {
         return handleChunkUpload(request, env);
       }
 
+      if (url.pathname === "/api/plugin/chunks/batch") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleChunkBatchUpload(request, env);
+      }
+
+      if (url.pathname === "/api/plugin/world-meta") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleWorldMetaUpload(request, env);
+      }
+
       if (url.pathname === "/api/plugin/tiles") {
         const auth = requirePluginAuth(request, env);
         if (auth) {
@@ -119,8 +138,20 @@ export default {
         return handleChunksGet(url, env);
       }
 
+      if (url.pathname === "/api/worlds") {
+        return handleWorldsGet(env);
+      }
+
+      if (url.pathname === "/api/world-meta") {
+        return handleWorldMetaGet(url, env);
+      }
+
       if (url.pathname === "/api/textures/manifest") {
         return handleTextureManifestGet(env);
+      }
+
+      if (url.pathname === "/api/textures/report") {
+        return handleTextureReportGet(env);
       }
 
       if (url.pathname === "/textures/atlas.png") {
@@ -209,8 +240,40 @@ async function handleChunkUpload(request, env) {
   }
 
   const snapshot = normalizeChunkSnapshot(await request.json());
+  const result = await putChunkSnapshot(bucket, snapshot, { env, broadcast: true, diffForViewers: true });
+  return json({ ok: true, key: result.key, updates: result.updates });
+}
+
+async function handleChunkBatchUpload(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
+  const payload = await request.json();
+  const rawChunks = Array.isArray(payload.chunks) ? payload.chunks : [];
+  if (rawChunks.length < 1 || rawChunks.length > MAX_CHUNKS_PER_BATCH) {
+    return json({ error: "invalid_chunk_batch", max: MAX_CHUNKS_PER_BATCH }, 400);
+  }
+
+  const snapshots = rawChunks.map((chunk) => normalizeChunkSnapshot(chunk));
+  const broadcast = payload.broadcast === true;
+  const results = [];
+  for (const snapshot of snapshots) {
+    results.push(await putChunkSnapshot(bucket, snapshot, { env, broadcast, diffForViewers: broadcast }));
+  }
+
+  return json({
+    ok: true,
+    chunks: results.length,
+    keys: results.map((result) => result.key),
+    updates: results.reduce((sum, result) => sum + result.updates, 0),
+  });
+}
+
+async function putChunkSnapshot(bucket, snapshot, options) {
   const key = chunkKey(snapshot.world, snapshot.dimension, snapshot.chunkX, snapshot.chunkZ);
-  const stats = await getLiveStats(env).catch(() => ({ sessions: 0 }));
+  const stats = options.diffForViewers ? await getLiveStats(options.env).catch(() => ({ sessions: 0 })) : { sessions: 0 };
   let updates = [];
 
   if (stats.sessions > 0) {
@@ -223,34 +286,36 @@ async function handleChunkUpload(request, env) {
     customMetadata: { world: snapshot.world, dimension: snapshot.dimension },
   });
 
-  await broadcastLive(
-    env,
-    JSON.stringify({
-      type: "chunk_ready",
-      world: snapshot.world,
-      dimension: snapshot.dimension,
-      chunkX: snapshot.chunkX,
-      chunkZ: snapshot.chunkZ,
-      updatedAt: snapshot.updatedAt,
-    }),
-  );
-
-  if (updates.length > 0) {
+  if (options.broadcast) {
     await broadcastLive(
-      env,
+      options.env,
       JSON.stringify({
-        type: "block_updates",
+        type: "chunk_ready",
         world: snapshot.world,
         dimension: snapshot.dimension,
         chunkX: snapshot.chunkX,
         chunkZ: snapshot.chunkZ,
-        updates,
         updatedAt: snapshot.updatedAt,
       }),
     );
+
+    if (updates.length > 0) {
+      await broadcastLive(
+        options.env,
+        JSON.stringify({
+          type: "block_updates",
+          world: snapshot.world,
+          dimension: snapshot.dimension,
+          chunkX: snapshot.chunkX,
+          chunkZ: snapshot.chunkZ,
+          updates,
+          updatedAt: snapshot.updatedAt,
+        }),
+      );
+    }
   }
 
-  return json({ ok: true, key, updates: updates.length });
+  return { key, updates: updates.length };
 }
 
 async function handleChunksGet(url, env) {
@@ -319,6 +384,18 @@ async function handleTextureManifestGet(env) {
   return json(await readR2Json(object), 200, { "Cache-Control": "public, max-age=3600" });
 }
 
+async function handleTextureReportGet(env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  const object = await bucket.get(TEXTURE_REPORT_KEY);
+  if (!object) {
+    return json({ error: "texture_report_not_found" }, 404);
+  }
+  return json(await readR2Json(object), 200, { "Cache-Control": "public, max-age=3600" });
+}
+
 async function handleTextureAtlasGet(env) {
   const bucket = mapBucket(env);
   if (!bucket) {
@@ -333,6 +410,55 @@ async function handleTextureAtlasGet(env) {
   headers.set("Content-Type", headers.get("Content-Type") || "image/png");
   headers.set("Cache-Control", "public, max-age=3600");
   return new Response(object.body, { headers });
+}
+
+async function handleWorldMetaUpload(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  const meta = normalizeWorldMeta(await request.json());
+  const key = worldMetaKey(meta.world, meta.dimension);
+  await bucket.put(key, JSON.stringify(meta), {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+    customMetadata: { world: meta.world, dimension: meta.dimension },
+  });
+  return json({ ok: true, key });
+}
+
+async function handleWorldsGet(env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  const objects = await listR2Objects(bucket, WORLD_META_PREFIX);
+  const worlds = [];
+  await Promise.all(
+    objects
+      .filter((object) => object.key.endsWith(".json"))
+      .map(async (object) => {
+        const value = await readR2Json(await bucket.get(object.key));
+        if (value) {
+          worlds.push(value);
+        }
+      }),
+  );
+  worlds.sort((a, b) => String(a.world).localeCompare(String(b.world)) || String(a.dimension).localeCompare(String(b.dimension)));
+  return json({ worlds }, 200, { "Cache-Control": "public, max-age=30" });
+}
+
+async function handleWorldMetaGet(url, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  const world = cleanSegment(url.searchParams.get("world") || "world");
+  const dimension = cleanSegment(url.searchParams.get("dimension") || "Overworld");
+  const object = await bucket.get(worldMetaKey(world, dimension));
+  if (!object) {
+    return json({ error: "world_meta_not_found" }, 404);
+  }
+  return json(await readR2Json(object), 200, { "Cache-Control": "public, max-age=30" });
 }
 
 async function handleTileUpload(request, env) {
@@ -518,6 +644,44 @@ export function normalizeChunkSnapshot(payload) {
   };
 }
 
+export function normalizeChunkBatchPayload(payload) {
+  const chunks = Array.isArray(payload.chunks) ? payload.chunks.map((chunk) => normalizeChunkSnapshot(chunk)) : [];
+  if (chunks.length < 1 || chunks.length > MAX_CHUNKS_PER_BATCH) {
+    throw new Error(`chunks must contain 1-${MAX_CHUNKS_PER_BATCH} entries`);
+  }
+  return { chunks, broadcast: payload.broadcast === true };
+}
+
+export function normalizeWorldMeta(payload) {
+  const world = cleanSegment(payload.world || "world");
+  const dimension = cleanSegment(payload.dimension || "Overworld");
+  const bounds = payload.bounds || {};
+  const normalized = {
+    version: numberOrThrow(payload.version ?? 1, "version"),
+    world,
+    dimension,
+    status: cleanSegment(payload.status || "complete"),
+    chunkCount: numberOrThrow(payload.chunkCount ?? payload.chunks ?? 0, "chunkCount"),
+    importedAt: numberOrThrow(payload.importedAt ?? Date.now(), "importedAt"),
+    updatedAt: numberOrThrow(payload.updatedAt ?? payload.importedAt ?? Date.now(), "updatedAt"),
+    bounds: {
+      minChunkX: numberOrThrow(bounds.minChunkX, "bounds.minChunkX"),
+      maxChunkX: numberOrThrow(bounds.maxChunkX, "bounds.maxChunkX"),
+      minChunkZ: numberOrThrow(bounds.minChunkZ, "bounds.minChunkZ"),
+      maxChunkZ: numberOrThrow(bounds.maxChunkZ, "bounds.maxChunkZ"),
+      minBlockX: numberOrThrow(bounds.minBlockX ?? bounds.minChunkX * 16, "bounds.minBlockX"),
+      maxBlockX: numberOrThrow(bounds.maxBlockX ?? bounds.maxChunkX * 16 + 15, "bounds.maxBlockX"),
+      minBlockZ: numberOrThrow(bounds.minBlockZ ?? bounds.minChunkZ * 16, "bounds.minBlockZ"),
+      maxBlockZ: numberOrThrow(bounds.maxBlockZ ?? bounds.maxChunkZ * 16 + 15, "bounds.maxBlockZ"),
+    },
+    topBlocks: normalizeTopBlocks(payload.topBlocks || {}),
+  };
+  if (normalized.bounds.maxChunkX < normalized.bounds.minChunkX || normalized.bounds.maxChunkZ < normalized.bounds.minChunkZ) {
+    throw new Error("invalid world bounds");
+  }
+  return normalized;
+}
+
 export function normalizeChunkQuery(params) {
   const minChunkX = numberOrThrow(params.get("minChunkX"), "minChunkX");
   const maxChunkX = numberOrThrow(params.get("maxChunkX"), "maxChunkX");
@@ -570,6 +734,10 @@ export function normalizeMarkerPayload(payload) {
 
 export function chunkKey(world, dimension, chunkX, chunkZ) {
   return `chunks/v1/${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(chunkX, "chunkX")}/${numberOrThrow(chunkZ, "chunkZ")}.json`;
+}
+
+export function worldMetaKey(world, dimension) {
+  return `${WORLD_META_PREFIX}${cleanSegment(world)}/${cleanSegment(dimension)}.json`;
 }
 
 function chunkPrefix(world, dimension, chunkX) {
@@ -680,6 +848,14 @@ function cleanBlockId(value) {
     throw new Error("invalid block id");
   }
   return cleaned;
+}
+
+function normalizeTopBlocks(value) {
+  const result = {};
+  for (const [key, count] of Object.entries(value)) {
+    result[cleanBlockId(key)] = numberOrThrow(count, `topBlocks.${key}`);
+  }
+  return result;
 }
 
 function numberOrThrow(value, field) {

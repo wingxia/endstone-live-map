@@ -1,0 +1,17 @@
+{
+  "name": "@endstone-live-map/importer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node --check import-bedrock-world.mjs && node --check chunkSnapshot.js",
+    "test": "vitest run",
+    "typecheck": "node --check import-bedrock-world.mjs && node --check chunkSnapshot.js"
+  },
+  "dependencies": {
+    "@8crafter/leveldb-zlib": "^1.6.0",
+    "mcbe-leveldb": "^1.15.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
+  }
+}

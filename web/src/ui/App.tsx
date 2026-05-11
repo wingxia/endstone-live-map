@@ -1,7 +1,7 @@
 import { Layers, LocateFixed, MapPin, RadioTower } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { createMarker, listMarkers, type Marker, type MarkerDraft } from "../api";
+import { createMarker, listMarkers, listWorlds, segmentKey, type Marker, type MarkerDraft, type WorldMeta } from "../api";
 import { useLivePlayers } from "../hooks/useLivePlayers";
 import { MapCanvas } from "./MapCanvas";
 import { MarkerForm } from "./MarkerForm";
@@ -14,12 +14,19 @@ const DEFAULT_DIMENSION = "Overworld";
 export function App() {
   const live = useLivePlayers();
   const [markers, setMarkers] = useState<Marker[]>([]);
+  const [worlds, setWorlds] = useState<WorldMeta[]>([]);
   const [selectedDimension, setSelectedDimension] = useState(DEFAULT_DIMENSION);
   const [error, setError] = useState("");
 
   useEffect(() => {
     listMarkers()
       .then(setMarkers)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  useEffect(() => {
+    listWorlds()
+      .then(setWorlds)
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }, []);
 
@@ -40,6 +47,8 @@ export function App() {
     setMarkers((current) => [marker, ...current.filter((item) => item.id !== marker.id)]);
   };
 
+  const selectedWorldMeta = worlds.find((world) => world.dimension === selectedDimension && segmentKey(world.world) === segmentKey(DEFAULT_WORLD)) || null;
+
   return (
     <main className="app-shell">
       <section className="map-surface" aria-label="服务器地图">
@@ -48,11 +57,14 @@ export function App() {
           dimension={selectedDimension}
           players={live.players.filter((player) => player.dimension === selectedDimension)}
           markers={markers.filter((marker) => marker.dimension === selectedDimension)}
+          worldMeta={selectedWorldMeta}
           chunkReady={live.chunkReady}
           blockUpdates={live.blockUpdates}
         />
         <div className="map-hud" aria-label="地图状态">
           <span>{selectedDimension}</span>
+          <strong>{selectedWorldMeta ? selectedWorldMeta.chunkCount.toLocaleString() : "0"}</strong>
+          <span>区块</span>
           <strong>{live.players.filter((player) => player.dimension === selectedDimension).length}</strong>
           <span>在线</span>
           <strong>{markers.filter((marker) => marker.dimension === selectedDimension).length}</strong>

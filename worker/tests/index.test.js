@@ -3,10 +3,13 @@ import { describe, expect, it } from "vitest";
 import worker, {
   chunkKey,
   diffChunkSnapshots,
+  normalizeChunkBatchPayload,
   normalizeChunkSnapshot,
   normalizeMarkerPayload,
   normalizeTilePayload,
+  normalizeWorldMeta,
   tileKey,
+  worldMetaKey,
 } from "../src/index.js";
 
 class MockR2Object {
@@ -138,6 +141,8 @@ describe("worker helpers", () => {
     const chunk = normalizeChunkSnapshot(createChunk({ world: "my world", chunkX: -1 }));
     expect(chunk).toMatchObject({ world: "my_world", chunkX: -1, blocks: expect.any(Array) });
     expect(chunkKey("world", "Overworld", -1, 2)).toBe("chunks/v1/world/Overworld/-1/2.json");
+    expect(normalizeChunkBatchPayload({ chunks: [createChunk()], broadcast: true })).toMatchObject({ broadcast: true, chunks: [expect.any(Object)] });
+    expect(() => normalizeChunkBatchPayload({ chunks: [] })).toThrow(/chunks/);
   });
 
   it("detects block updates between chunk snapshots", () => {
@@ -163,6 +168,22 @@ describe("worker helpers", () => {
       y: 64,
     });
     expect(() => normalizeMarkerPayload({ title: "", x: 1, z: 2 })).toThrow(/title/);
+  });
+
+  it("normalizes world meta payloads and keys", () => {
+    const meta = normalizeWorldMeta({
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkCount: 2,
+      bounds: { minChunkX: -1, maxChunkX: 1, minChunkZ: -2, maxChunkZ: 2 },
+      topBlocks: { "minecraft:grass block": 5 },
+    });
+    expect(meta).toMatchObject({
+      world: "Bedrock_level",
+      bounds: { minBlockX: -16, maxBlockX: 31, minBlockZ: -32, maxBlockZ: 47 },
+      topBlocks: { "minecraft:grass_block": 5 },
+    });
+    expect(worldMetaKey("Bedrock level", "Overworld")).toBe("meta/v1/Bedrock_level/Overworld.json");
   });
 });
 
@@ -233,6 +254,71 @@ describe("worker routes", () => {
     expect(env.live.messages.some((message) => String(message).includes("block_updates"))).toBe(true);
   });
 
+  it("accepts authenticated chunk batch uploads without broadcasting by default", async () => {
+    const env = createEnv();
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/batch", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ chunks: [createChunk(), createChunk({ chunkX: 1 })] }),
+      }),
+      env,
+      {},
+    );
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, chunks: 2 });
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(true);
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/1/0.json")).toBe(true);
+    expect(env.live.messages).toHaveLength(0);
+  });
+
+  it("rejects oversized chunk batch uploads", async () => {
+    const env = createEnv();
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/batch", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ chunks: Array.from({ length: 65 }, () => createChunk()) }),
+      }),
+      env,
+      {},
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("stores and serves imported world metadata", async () => {
+    const env = createEnv();
+    const metaPayload = {
+      version: 1,
+      world: "Bedrock level",
+      dimension: "Overworld",
+      status: "complete",
+      chunkCount: 2,
+      bounds: { minChunkX: -1, maxChunkX: 1, minChunkZ: -2, maxChunkZ: 2 },
+      topBlocks: { "minecraft:grass_block": 10 },
+      importedAt: 123,
+      updatedAt: 123,
+    };
+    const upload = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/world-meta", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(metaPayload),
+      }),
+      env,
+      {},
+    );
+    expect(upload.status).toBe(200);
+    expect(env.MAP_DATA.objects.has("meta/v1/Bedrock_level/Overworld.json")).toBe(true);
+
+    const meta = await worker.fetch(new Request("https://map.buhe.li/api/world-meta?world=Bedrock%20level&dimension=Overworld"), env, {});
+    expect(await meta.json()).toMatchObject({ world: "Bedrock_level", chunkCount: 2 });
+
+    const worlds = await worker.fetch(new Request("https://map.buhe.li/api/worlds"), env, {});
+    expect((await worlds.json()).worlds).toHaveLength(1);
+  });
+
   it("serves texture manifest and atlas from R2", async () => {
     const env = createEnv();
     await env.MAP_DATA.put("textures/v1/manifest.json", JSON.stringify({ version: 1, tileSize: 16, blocks: {} }), {
@@ -249,6 +335,17 @@ describe("worker routes", () => {
     const atlas = await worker.fetch(new Request("https://map.buhe.li/textures/atlas.png"), env, {});
     expect(atlas.status).toBe(200);
     expect(atlas.headers.get("Content-Type")).toBe("image/png");
+  });
+
+  it("serves texture generation reports from R2", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("textures/v1/report.json", JSON.stringify({ entries: 100, missing: [] }), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const response = await worker.fetch(new Request("https://map.buhe.li/api/textures/report"), env, {});
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ entries: 100 });
   });
 
   it("keeps legacy tile reads R2-only without D1", async () => {

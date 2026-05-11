@@ -48,7 +48,7 @@ textarea {
   top: 16px;
   z-index: 500;
   display: grid;
-  grid-template-columns: auto auto auto auto auto;
+  grid-template-columns: auto auto auto auto auto auto auto;
   gap: 8px;
   align-items: center;
   min-height: 38px;
