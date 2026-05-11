@@ -348,6 +348,28 @@ describe("worker routes", () => {
     expect(await response.json()).toMatchObject({ entries: 100 });
   });
 
+  it("lets authenticated import jobs upload texture atlas artifacts through the Worker", async () => {
+    const env = createEnv();
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/textures", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          atlas: btoa("png"),
+          manifest: { version: 1, blocks: { "minecraft:stone": { x: 0, y: 0, w: 16, h: 16 } } },
+          report: { entries: 1 },
+        }),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    expect(env.MAP_DATA.objects.has("textures/v1/atlas.png")).toBe(true);
+    expect(await env.MAP_DATA.objects.get("textures/v1/manifest.json").json()).toMatchObject({ version: 1 });
+    expect(await env.MAP_DATA.objects.get("textures/v1/report.json").json()).toMatchObject({ entries: 1 });
+  });
+
   it("keeps legacy tile reads R2-only without D1", async () => {
     const env = createEnv();
     const upload = await worker.fetch(

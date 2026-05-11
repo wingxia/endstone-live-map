@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildChunkSnapshot, mergeWorldMeta, offsetToSubchunkIndex, summarizeSnapshots } from "../chunkSnapshot.js";
+import { readSubchunkGroups } from "../import-bedrock-world.mjs";
 
 function layerWithBlocks(entries) {
   const block_indices = Array.from({ length: 4096 }, () => 0);
@@ -70,5 +71,46 @@ describe("chunk snapshot importer helpers", () => {
       bounds: { minChunkX: -1, maxChunkX: 2, minChunkZ: 0, maxChunkZ: 3 },
       topBlocks: { "minecraft:stone": 512 },
     });
+  });
+
+  it("accepts LevelDB iterator entries in key/value or value/key order", async () => {
+    const key = Buffer.from("subchunk-key");
+    const value = Buffer.from("subchunk-value");
+    const parsed = {
+      value: {
+        subChunkIndex: { value: 0 },
+        layers: { value: { value: [layerWithBlocks([{ x: 0, y: 0, z: 0, paletteIndex: 1 }])] } },
+      },
+    };
+    const levelUtils = {
+      getContentTypeFromDBKey: (rawKey) => (rawKey === key ? "SubChunkPrefix" : "Other"),
+      getChunkKeyIndices: () => ({ x: -2, z: 3, dimension: 0, subChunkIndex: 0 }),
+      entryContentTypeToFormatMap: {
+        SubChunkPrefix: { parse: async (rawValue) => (rawValue === value ? parsed : null) },
+      },
+    };
+
+    for (const pair of [
+      [key, value],
+      [value, key],
+    ]) {
+      const db = {
+        getIterator: () => {
+          let used = false;
+          return {
+            next: async () => {
+              if (used) {
+                return undefined;
+              }
+              used = true;
+              return pair;
+            },
+            end: async () => {},
+          };
+        },
+      };
+      const groups = await readSubchunkGroups(db, levelUtils);
+      expect(groups.get("Overworld/-2/3")).toMatchObject({ chunkX: -2, chunkZ: 3, dimension: "Overworld" });
+    }
   });
 });

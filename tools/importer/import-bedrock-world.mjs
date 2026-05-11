@@ -16,6 +16,7 @@ import {
 
 const SUBCHUNK_TYPE = "SubChunkPrefix";
 const DEFAULT_BATCH_SIZE = 64;
+const MAX_POST_ATTEMPTS = 5;
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
@@ -133,10 +134,11 @@ export async function readSubchunkGroups(db, levelUtils, options = {}) {
   try {
     let next;
     while ((next = await iterator.next())) {
-      const [rawKey, rawValue] = next;
-      if (!Buffer.isBuffer(rawKey) || getContentTypeFromDBKey(rawKey) !== SUBCHUNK_TYPE) {
+      const entry = coerceIteratorEntry(next, getContentTypeFromDBKey);
+      if (!entry) {
         continue;
       }
+      const { rawKey, rawValue } = entry;
       const indices = getChunkKeyIndices(rawKey);
       const dimension = normalizeDimension(indices.dimension);
       if (options.dimension && dimension !== options.dimension) {
@@ -176,18 +178,36 @@ async function flushBatch(batch, options, uploaded) {
 }
 
 async function postJson(url, payload, token) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) {
-    throw new Error(`POST ${url} failed with ${response.status}: ${await response.text()}`);
+  for (let attempt = 1; attempt <= MAX_POST_ATTEMPTS; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      if (attempt === MAX_POST_ATTEMPTS) {
+        throw error;
+      }
+      await delay(backoffMs(attempt));
+      continue;
+    }
+
+    if (response.ok) {
+      return response.json();
+    }
+
+    const text = await response.text();
+    if (attempt === MAX_POST_ATTEMPTS || response.status < 500) {
+      throw new Error(`POST ${url} failed with ${response.status}: ${text}`);
+    }
+    await delay(backoffMs(attempt));
   }
-  return response.json();
+  throw new Error(`POST ${url} failed after ${MAX_POST_ATTEMPTS} attempts`);
 }
 
 async function readResume(file) {
@@ -244,4 +264,33 @@ function optionalNumber(value) {
 
 function stripTrailingSlash(value) {
   return String(value).replace(/\/+$/, "");
+}
+
+function coerceIteratorEntry(next, getContentTypeFromDBKey) {
+  if (!Array.isArray(next) || next.length < 2) {
+    return null;
+  }
+  const [first, second] = next;
+  if (isSubchunkKey(first, getContentTypeFromDBKey)) {
+    return { rawKey: first, rawValue: second };
+  }
+  if (isSubchunkKey(second, getContentTypeFromDBKey)) {
+    return { rawKey: second, rawValue: first };
+  }
+  return null;
+}
+
+function isSubchunkKey(value, getContentTypeFromDBKey) {
+  if (!Buffer.isBuffer(value)) {
+    return false;
+  }
+  try {
+    return getContentTypeFromDBKey(value) === SUBCHUNK_TYPE;
+  } catch {
+    return false;
+  }
+}
+
+function backoffMs(attempt) {
+  return Math.min(30_000, 500 * 2 ** (attempt - 1));
 }

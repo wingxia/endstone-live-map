@@ -6,8 +6,7 @@ WORLD_NAME="${WORLD_NAME:-Bedrock level}"
 IMPORT_ROOT="${IMPORT_ROOT:-/vol1/1000/live-map-import}"
 WORKER_URL="${WORKER_URL:-https://map.buhe.li}"
 BDS_SAMPLES_VERSION="${BDS_SAMPLES_VERSION:-v1.26.20.4}"
-BDS_SAMPLES_URL="${BDS_SAMPLES_URL:-https://github.com/Mojang/bedrock-samples/releases/download/${BDS_SAMPLES_VERSION}/bedrock-samples-${BDS_SAMPLES_VERSION}-min.zip}"
-R2_BUCKET="${R2_BUCKET:-endstone-live-map-tiles}"
+BDS_SAMPLES_URL="${BDS_SAMPLES_URL:-https://gh.buhe.li/Mojang/bedrock-samples/releases/download/${BDS_SAMPLES_VERSION}/bedrock-samples-${BDS_SAMPLES_VERSION}-min.zip}"
 ROOT_SYSTEMCTL="${ROOT_SYSTEMCTL:-systemctl}"
 NODE_IMAGE="${NODE_IMAGE:-docker.buhe.li/library/node:24-bookworm}"
 
@@ -15,21 +14,29 @@ if [[ -z "${PLUGIN_TOKEN:-}" ]]; then
   echo "PLUGIN_TOKEN is required" >&2
   exit 2
 fi
-if [[ -z "${CLOUDFLARE_API_TOKEN:-}" || -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
-  echo "CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are required for R2 uploads" >&2
-  exit 2
-fi
 
 mkdir -p "$IMPORT_ROOT"/{snapshots,work,textures}
 timestamp="$(date +%Y%m%d-%H%M%S)"
 snapshot_dir="$IMPORT_ROOT/snapshots/$timestamp"
 level_src="$SERVER_ROOT/bedrock_server/worlds/$WORLD_NAME"
+service_stopped=0
+
+start_mc_service() {
+  if [[ "$service_stopped" == "1" ]]; then
+    echo "Starting mc.service..."
+    $ROOT_SYSTEMCTL start mc.service || true
+    service_stopped=0
+  fi
+}
+
+trap start_mc_service EXIT
 
 echo "Stopping mc.service for a consistent LevelDB snapshot..."
 $ROOT_SYSTEMCTL stop mc.service
+service_stopped=1
 mkdir -p "$snapshot_dir"
 rsync -a --delete "$level_src/" "$snapshot_dir/$WORLD_NAME/"
-$ROOT_SYSTEMCTL start mc.service
+start_mc_service
 systemctl is-active --quiet mc.service
 echo "Snapshot created at $snapshot_dir/$WORLD_NAME"
 
@@ -39,6 +46,7 @@ if [[ ! -d "$repo_dir/.git" ]]; then
 else
   git -C "$repo_dir" pull --ff-only
 fi
+git -C "$repo_dir" reset --hard origin/main
 
 samples_zip="$IMPORT_ROOT/work/bedrock-samples-${BDS_SAMPLES_VERSION}-min.zip"
 samples_dir="$IMPORT_ROOT/work/bedrock-samples-${BDS_SAMPLES_VERSION}"
@@ -54,6 +62,7 @@ if [[ -z "$vanilla_pack" ]]; then
   echo "Could not find terrain_texture.json in $samples_zip" >&2
   exit 1
 fi
+vanilla_pack_container="/samples/${vanilla_pack#"$samples_dir"/}"
 
 docker run --rm \
   -v "$repo_dir:/repo" \
@@ -62,16 +71,15 @@ docker run --rm \
   -v "$IMPORT_ROOT/textures:/out" \
   -w /repo \
   "$NODE_IMAGE" \
-  bash -lc "npm ci && npm run textures:atlas -- --input '$vanilla_pack' --input /resource_packs/chemistry --output /out"
+  bash -lc "npm ci && npm run textures:atlas -- --input '$vanilla_pack_container' --input /resource_packs/chemistry --output /out"
 
 docker run --rm \
-  -e CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}" \
-  -e CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-}" \
+  -e PLUGIN_TOKEN="$PLUGIN_TOKEN" \
   -v "$repo_dir:/repo" \
   -v "$IMPORT_ROOT/textures:/out:ro" \
   -w /repo \
   "$NODE_IMAGE" \
-  bash -lc "npm ci && npx wrangler r2 object put '$R2_BUCKET/textures/v1/atlas.png' --file /out/atlas.png --content-type image/png && npx wrangler r2 object put '$R2_BUCKET/textures/v1/manifest.json' --file /out/manifest.json --content-type application/json && npx wrangler r2 object put '$R2_BUCKET/textures/v1/report.json' --file /out/report.json --content-type application/json"
+  bash -lc "npm ci && npm run textures:upload -- --input /out --worker-url '$WORKER_URL'"
 
 echo "Running dry-run import..."
 docker run --rm \

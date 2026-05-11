@@ -126,6 +126,14 @@ export default {
         return handleWorldMetaUpload(request, env);
       }
 
+      if (url.pathname === "/api/plugin/textures") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleTextureUpload(request, env);
+      }
+
       if (url.pathname === "/api/plugin/tiles") {
         const auth = requirePluginAuth(request, env);
         if (auth) {
@@ -410,6 +418,30 @@ async function handleTextureAtlasGet(env) {
   headers.set("Content-Type", headers.get("Content-Type") || "image/png");
   headers.set("Cache-Control", "public, max-age=3600");
   return new Response(object.body, { headers });
+}
+
+async function handleTextureUpload(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
+  const payload = await request.json();
+  const atlas = decodeBase64(payload.atlas);
+  const manifest = normalizeTextureJson(payload.manifest, "manifest");
+  const report = normalizeTextureJson(payload.report || {}, "report");
+
+  await bucket.put(TEXTURE_ATLAS_KEY, atlas, {
+    httpMetadata: { contentType: "image/png" },
+  });
+  await bucket.put(TEXTURE_MANIFEST_KEY, JSON.stringify(manifest), {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+  });
+  await bucket.put(TEXTURE_REPORT_KEY, JSON.stringify(report), {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+  });
+
+  return json({ ok: true, keys: [TEXTURE_ATLAS_KEY, TEXTURE_MANIFEST_KEY, TEXTURE_REPORT_KEY] });
 }
 
 async function handleWorldMetaUpload(request, env) {
@@ -856,6 +888,13 @@ function normalizeTopBlocks(value) {
     result[cleanBlockId(key)] = numberOrThrow(count, `topBlocks.${key}`);
   }
   return result;
+}
+
+function normalizeTextureJson(value, field) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${field} must be an object`);
+  }
+  return value;
 }
 
 function numberOrThrow(value, field) {
