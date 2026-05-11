@@ -6,6 +6,7 @@
 
 #include <curl/curl.h>
 
+#include <mutex>
 #include <span>
 #include <sstream>
 #include <string>
@@ -19,6 +20,9 @@ public:
 
     bool postJson(std::string_view path, std::string_view json) const
     {
+        static std::once_flag curl_once;
+        std::call_once(curl_once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
+
         CURL *curl = curl_easy_init();
         if (curl == nullptr) {
             return false;

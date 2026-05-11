@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -104,11 +105,17 @@ public:
                     sender.sendMessage("Level is not ready.");
                     return true;
                 }
-                std::scoped_lock lock(dirty_mutex_);
-                const auto queued = dirty_.markChunk({level->getName(), "Overworld", chunk_x, chunk_z}) ? 1 : 0;
+                int queued = 0;
+                {
+                    std::scoped_lock lock(dirty_mutex_);
+                    queued = dirty_.markChunk({level->getName(), "Overworld", chunk_x, chunk_z}) ? 1 : 0;
+                }
                 sender.sendMessage("Queued " + std::to_string(queued) + " chunk for live map sampling.");
                 getLogger().info("Queued chunk {}/Overworld/{}/{} for live map sampling.", level->getName(), chunk_x,
                                  chunk_z);
+                if (queued > 0) {
+                    publishDirtyChunks();
+                }
             }
             catch (...) {
                 sender.sendMessage("Usage: /livemap render-chunk <chunkX> <chunkZ>");
@@ -200,6 +207,22 @@ private:
         return queued;
     }
 
+    bool chunkIsLoaded(endstone::Dimension &dimension, int chunk_x, int chunk_z)
+    {
+        for (const auto &loaded : dimension.getLoadedChunks()) {
+            if (loaded != nullptr && loaded->getX() == chunk_x && loaded->getZ() == chunk_z) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void requeueChunk(const livemap::ChunkCoord &coord)
+    {
+        std::scoped_lock lock(dirty_mutex_);
+        dirty_.markChunk(coord);
+    }
+
     void publishPlayers()
     {
         if (!settings_.upload_players || settings_.plugin_token.empty()) {
@@ -261,6 +284,12 @@ private:
             if (dimension == nullptr) {
                 continue;
             }
+            if (!chunkIsLoaded(*dimension, coord.x, coord.z)) {
+                requeueChunk(coord);
+                getLogger().warning("Deferred live map chunk {}/{}/{} because it is not loaded.", coord.world, coord.x,
+                                    coord.z);
+                continue;
+            }
 
             livemap::ChunkSnapshot snapshot;
             snapshot.world = coord.world;
@@ -281,20 +310,33 @@ private:
                 return index;
             };
 
-            for (int local_z = 0; local_z < livemap::kChunkSize; ++local_z) {
-                for (int local_x = 0; local_x < livemap::kChunkSize; ++local_x) {
-                    const int block_x = coord.x * livemap::kChunkSize + local_x;
-                    const int block_z = coord.z * livemap::kChunkSize + local_z;
-                    const int index = local_z * livemap::kChunkSize + local_x;
-                    const auto block = dimension->getHighestBlockAt(block_x, block_z);
-                    if (block == nullptr) {
-                        snapshot.blocks[index] = palette_index("minecraft:air");
-                        snapshot.heights[index] = -64;
-                        continue;
+            try {
+                for (int local_z = 0; local_z < livemap::kChunkSize; ++local_z) {
+                    for (int local_x = 0; local_x < livemap::kChunkSize; ++local_x) {
+                        const int block_x = coord.x * livemap::kChunkSize + local_x;
+                        const int block_z = coord.z * livemap::kChunkSize + local_z;
+                        const int index = local_z * livemap::kChunkSize + local_x;
+                        const auto block = dimension->getHighestBlockAt(block_x, block_z);
+                        if (block == nullptr) {
+                            snapshot.blocks[index] = palette_index("minecraft:air");
+                            snapshot.heights[index] = -64;
+                            continue;
+                        }
+                        snapshot.blocks[index] = palette_index(block->getType());
+                        snapshot.heights[index] = block->getY();
                     }
-                    snapshot.blocks[index] = palette_index(block->getType());
-                    snapshot.heights[index] = block->getY();
                 }
+            }
+            catch (const std::exception &error) {
+                requeueChunk(coord);
+                getLogger().error("Failed to sample live map chunk {}/{}/{}: {}", coord.world, coord.x, coord.z,
+                                  error.what());
+                continue;
+            }
+            catch (...) {
+                requeueChunk(coord);
+                getLogger().error("Failed to sample live map chunk {}/{}/{}.", coord.world, coord.x, coord.z);
+                continue;
             }
 
             const auto settings = settings_;
