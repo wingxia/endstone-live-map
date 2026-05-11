@@ -32,16 +32,6 @@ std::int64_t nowMs()
     return std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
 }
 
-bool isAirBlock(const std::string &type)
-{
-    return type == "minecraft:air" || type == "minecraft:cave_air" || type == "minecraft:void_air";
-}
-
-struct TopBlockSample {
-    std::string type = "minecraft:air";
-    int y = -64;
-};
-
 class LiveMapPlugin;
 
 class LiveMapListener {
@@ -214,36 +204,7 @@ private:
             queued += markChunkSquare(dimension.getLevel().getName(), dimension.getName(), chunk_x, chunk_z, radius);
         }
 
-        if (queued == 0) {
-            for (const auto &dimension_name : settings_.dimensions) {
-                auto *dimension = level->getDimension(dimension_name);
-                if (dimension == nullptr) {
-                    continue;
-                }
-                queued += markChunkSquare(level->getName(), dimension->getName(), 0, 0, radius);
-            }
-        }
-
         return queued;
-    }
-
-    TopBlockSample sampleTopVisibleBlock(endstone::Dimension &dimension, int block_x, int block_z)
-    {
-        const auto highest = dimension.getHighestBlockAt(block_x, block_z);
-        if (highest != nullptr && !isAirBlock(highest->getType())) {
-            return {highest->getType(), highest->getY()};
-        }
-
-        const int start_y =
-            highest != nullptr ? highest->getY() : std::clamp(dimension.getHighestBlockYAt(block_x, block_z), -64, 320);
-        for (int y = start_y; y >= -64; --y) {
-            const auto block = dimension.getBlockAt(block_x, y, block_z);
-            if (block != nullptr && !isAirBlock(block->getType())) {
-                return {block->getType(), block->getY()};
-            }
-        }
-
-        return {"minecraft:air", start_y};
     }
 
     bool chunkIsLoaded(endstone::Dimension &dimension, int chunk_x, int chunk_z)
@@ -355,9 +316,14 @@ private:
                         const int block_x = coord.x * livemap::kChunkSize + local_x;
                         const int block_z = coord.z * livemap::kChunkSize + local_z;
                         const int index = local_z * livemap::kChunkSize + local_x;
-                        const auto sample = sampleTopVisibleBlock(*dimension, block_x, block_z);
-                        snapshot.blocks[index] = palette_index(sample.type);
-                        snapshot.heights[index] = sample.y;
+                        const auto block = dimension->getHighestBlockAt(block_x, block_z);
+                        if (block == nullptr) {
+                            snapshot.blocks[index] = palette_index("minecraft:air");
+                            snapshot.heights[index] = -64;
+                            continue;
+                        }
+                        snapshot.blocks[index] = palette_index(block->getType());
+                        snapshot.heights[index] = block->getY();
                     }
                 }
             }
