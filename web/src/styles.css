@@ -42,6 +42,21 @@ textarea {
   background: #1b242d;
 }
 
+.map-empty-state {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 480;
+  transform: translate(-50%, -50%);
+  padding: 10px 12px;
+  border: 1px solid rgba(94, 113, 129, 0.36);
+  border-radius: 8px;
+  background: rgba(13, 19, 26, 0.78);
+  color: #aebdcc;
+  font-size: 13px;
+  backdrop-filter: blur(10px);
+}
+
 .map-hud {
   position: absolute;
   left: 16px;

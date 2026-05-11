@@ -85,3 +85,29 @@ test("loads the map application shell", async ({ page }) => {
   await expect(page.getByLabel("地图状态")).toContainText("区块");
   await expect(page.getByText("Spawn")).toBeVisible();
 });
+
+test("does not request chunk data before a world import exists", async ({ page }) => {
+  let chunkRequests = 0;
+
+  await page.route("**/api/markers", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ markers: [] }) });
+  });
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ worlds: [] }) });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    chunkRequests += 1;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({ status: 404, body: "texture manifest not found" });
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Endstone Live Map" })).toBeVisible();
+  await expect(page.getByTestId("map-empty-state")).toContainText("暂无已导入地图数据");
+  await expect(page.getByTestId("coordinate-hud")).toContainText("未加载");
+  await page.waitForTimeout(1000);
+  expect(chunkRequests).toBe(0);
+});

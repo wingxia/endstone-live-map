@@ -25,6 +25,7 @@ interface AtlasResource {
 }
 
 export interface ChunkLayerHandle extends GridLayer {
+  setActive: (active: boolean) => void;
   setWorldDimension: (world: string, dimension: string) => void;
   refreshChunk: (message: ChunkReadyMessage) => void;
   applyBlockUpdates: (message: BlockUpdatesMessage) => void;
@@ -44,8 +45,20 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
   class ChunkGridLayer extends L.GridLayer implements ChunkLayerHandle {
     private worldName = world;
     private dimensionName = dimension;
+    private active = false;
     private readonly chunkCache = new Map<string, ChunkSnapshot>();
     private atlasPromise: Promise<AtlasResource> | null = null;
+
+    setActive(active: boolean) {
+      if (this.active === active) {
+        return;
+      }
+      this.active = active;
+      if (!active) {
+        this.chunkCache.clear();
+      }
+      this.redraw();
+    }
 
     setWorldDimension(nextWorld: string, nextDimension: string) {
       if (this.worldName === nextWorld && this.dimensionName === nextDimension) {
@@ -126,6 +139,9 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       }
       ctx.imageSmoothingEnabled = false;
       drawEmptyTile(canvas, "#17202a");
+      if (!this.active) {
+        return;
+      }
 
       const tileRange = chunkRangeForTile(coords);
       const response = await fetchChunks({

@@ -36,6 +36,7 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
     chunkLayer: ChunkLayerHandle;
   } | null>(null);
   const [coordinate, setCoordinate] = useState<CoordinateState>(() => buildCoordinateState(0, 0, null, false));
+  const [mapReady, setMapReady] = useState(false);
   const lockedRef = useRef(false);
 
   useEffect(() => {
@@ -60,6 +61,7 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
 
       const layers = L.layerGroup().addTo(map);
       stateRef.current = { map, layers, chunkLayer };
+      setMapReady(true);
 
       const updateCoordinate = (event: import("leaflet").LeafletMouseEvent, locked: boolean) => {
         const point = leafletToMinecraft(event.latlng.lat, event.latlng.lng);
@@ -93,10 +95,17 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
 
   useEffect(() => {
     const state = stateRef.current;
-    if (!state || !worldMeta || worldMeta.dimension !== dimension || segmentKey(worldMeta.world) !== segmentKey(world)) {
+    if (!state || !mapReady) {
       return;
     }
-    const bounds = worldMeta.bounds;
+    if (!isWorldMetaForMap(worldMeta, world, dimension)) {
+      state.chunkLayer.setActive(false);
+      state.map.setView([0, 0], INITIAL_MAP_ZOOM, { animate: false });
+      return;
+    }
+    const meta = worldMeta;
+    state.chunkLayer.setActive(true);
+    const bounds = meta.bounds;
     const widthChunks = bounds.maxChunkX - bounds.minChunkX + 1;
     const heightChunks = bounds.maxChunkZ - bounds.minChunkZ + 1;
     if (widthChunks > MAX_INITIAL_CHUNKS || heightChunks > MAX_INITIAL_CHUNKS) {
@@ -123,7 +132,7 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
       ],
       { animate: false, padding: [24, 24] },
     );
-  }, [dimension, worldMeta]);
+  }, [dimension, mapReady, world, worldMeta]);
 
   useEffect(() => {
     if (chunkReady) {
@@ -184,6 +193,11 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
   return (
     <>
       <div ref={mapRef} className="map-canvas" data-testid="map-canvas" />
+      {!isWorldMetaForMap(worldMeta, world, dimension) ? (
+        <div className="map-empty-state" data-testid="map-empty-state">
+          暂无已导入地图数据
+        </div>
+      ) : null}
       <div className="coordinate-hud" data-testid="coordinate-hud" aria-label="当前地图坐标">
         <div>
           <span>{coordinate.locked ? "已锁定" : "指针"}</span>
@@ -229,6 +243,10 @@ function buildCoordinateState(x: number, z: number, block: ReturnType<ChunkLayer
     block: block?.block || "未加载",
     locked,
   };
+}
+
+function isWorldMetaForMap(worldMeta: WorldMeta | null, world: string, dimension: string): worldMeta is WorldMeta {
+  return Boolean(worldMeta && worldMeta.dimension === dimension && segmentKey(worldMeta.world) === segmentKey(world));
 }
 
 function clampChunk(value: number, min: number, max: number) {
