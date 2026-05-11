@@ -95,7 +95,7 @@ public:
             int radius = settings_.scan_radius_chunks;
             if (args.size() >= 2) {
                 try {
-                    radius = std::clamp(std::stoi(args[1]), 0, 64);
+                    radius = std::clamp(std::stoi(args[1]), 0, 16);
                 }
                 catch (...) {
                     sender.sendMessage("Usage: /livemap render-near <radius>");
@@ -172,15 +172,6 @@ private:
             queued += markChunkSquare(dimension.getLevel().getName(), dimension.getName(), chunk_x, chunk_z, radius);
         }
 
-        if (queued != 0) {
-            return queued;
-        }
-
-        for (auto *dimension : level->getDimensions()) {
-            if (dimension != nullptr && dimensionEnabled(dimension->getName())) {
-                queued += markChunkSquare(level->getName(), dimension->getName(), 0, 0, radius);
-            }
-        }
         return queued;
     }
 
