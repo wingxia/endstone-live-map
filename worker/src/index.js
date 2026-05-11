@@ -270,11 +270,14 @@ async function handleChunksGet(url, env) {
   const presentKeys = new Set();
   const readKeys = [];
 
-  for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
-    const prefix = chunkPrefix(query.world, query.dimension, chunkX);
-    for (const object of await listR2Objects(bucket, prefix)) {
+  const objectLists = await Promise.all(
+    range(query.minChunkX, query.maxChunkX).map((chunkX) => listR2Objects(bucket, chunkPrefix(query.world, query.dimension, chunkX))),
+  );
+
+  for (const objects of objectLists) {
+    for (const object of objects) {
       const parsed = parseChunkKey(object.key);
-      if (!parsed || parsed.chunkX !== chunkX || parsed.chunkZ < query.minChunkZ || parsed.chunkZ > query.maxChunkZ) {
+      if (!parsed || parsed.chunkX < query.minChunkX || parsed.chunkX > query.maxChunkX || parsed.chunkZ < query.minChunkZ || parsed.chunkZ > query.maxChunkZ) {
         continue;
       }
       presentKeys.add(`${parsed.chunkX}/${parsed.chunkZ}`);
@@ -599,6 +602,10 @@ function parseChunkKey(key) {
     chunkX: Number(match[3]),
     chunkZ: Number(match[4]),
   };
+}
+
+function range(min, max) {
+  return Array.from({ length: max - min + 1 }, (_, index) => min + index);
 }
 
 export function tileKey(world, dimension, z, x, y, extension) {
