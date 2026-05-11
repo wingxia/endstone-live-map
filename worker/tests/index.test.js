@@ -43,6 +43,14 @@ class MockR2Bucket {
   async get(key) {
     return this.objects.get(key) || null;
   }
+
+  async list(options = {}) {
+    const prefix = options.prefix || "";
+    return {
+      objects: [...this.objects.keys()].filter((key) => key.startsWith(prefix)).map((key) => ({ key })),
+      truncated: false,
+    };
+  }
 }
 
 class MockMarkerDb {
@@ -182,6 +190,25 @@ describe("worker routes", () => {
     const body = await chunks.json();
     expect(body.chunks).toHaveLength(1);
     expect(body.missing).toHaveLength(0);
+  });
+
+  it("serves sparse chunk ranges without reading every missing chunk", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk()), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/1/0.json", JSON.stringify(createChunk({ chunkX: 1 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const chunks = await worker.fetch(
+      new Request("https://map.buhe.li/api/chunks?world=world&dimension=Overworld&minChunkX=0&maxChunkX=15&minChunkZ=0&maxChunkZ=15"),
+      env,
+      {},
+    );
+    const body = await chunks.json();
+    expect(body.chunks).toHaveLength(2);
+    expect(body.missing).toHaveLength(254);
   });
 
   it("broadcasts block updates when viewers are connected", async () => {

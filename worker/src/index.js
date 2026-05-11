@@ -267,23 +267,38 @@ async function handleChunksGet(url, env) {
 
   const chunks = [];
   const missing = [];
-  const reads = [];
-  for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
-    for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
-      reads.push(
-        (async () => {
-          const key = chunkKey(query.world, query.dimension, chunkX, chunkZ);
-          const object = await bucket.get(key);
-          if (!object) {
-            missing.push({ chunkX, chunkZ });
-            return;
-          }
-          chunks.push(await readR2Json(object));
-        })(),
-      );
+  const presentKeys = new Set();
+  const readKeys = [];
+
+  for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
+    const prefix = chunkPrefix(query.world, query.dimension, chunkX);
+    for (const object of await listR2Objects(bucket, prefix)) {
+      const parsed = parseChunkKey(object.key);
+      if (!parsed || parsed.chunkX !== chunkX || parsed.chunkZ < query.minChunkZ || parsed.chunkZ > query.maxChunkZ) {
+        continue;
+      }
+      presentKeys.add(`${parsed.chunkX}/${parsed.chunkZ}`);
+      readKeys.push(object.key);
     }
   }
-  await Promise.all(reads);
+
+  await Promise.all(
+    readKeys.map(async (key) => {
+      const object = await bucket.get(key);
+      if (object) {
+        chunks.push(await readR2Json(object));
+      }
+    }),
+  );
+
+  for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
+    for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
+      if (!presentKeys.has(`${chunkX}/${chunkZ}`)) {
+        missing.push({ chunkX, chunkZ });
+      }
+    }
+  }
+
   chunks.sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
   missing.sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
   return json({ chunks, missing }, 200, { "Cache-Control": "public, max-age=15" });
@@ -552,6 +567,38 @@ export function normalizeMarkerPayload(payload) {
 
 export function chunkKey(world, dimension, chunkX, chunkZ) {
   return `chunks/v1/${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(chunkX, "chunkX")}/${numberOrThrow(chunkZ, "chunkZ")}.json`;
+}
+
+function chunkPrefix(world, dimension, chunkX) {
+  return `chunks/v1/${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(chunkX, "chunkX")}/`;
+}
+
+async function listR2Objects(bucket, prefix) {
+  if (typeof bucket.list !== "function") {
+    return [];
+  }
+
+  const objects = [];
+  let cursor;
+  do {
+    const page = await bucket.list({ prefix, cursor });
+    objects.push(...(page.objects || []));
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  return objects;
+}
+
+function parseChunkKey(key) {
+  const match = /^chunks\/v1\/([^/]+)\/([^/]+)\/(-?\d+)\/(-?\d+)\.json$/.exec(key);
+  if (!match) {
+    return null;
+  }
+  return {
+    world: match[1],
+    dimension: match[2],
+    chunkX: Number(match[3]),
+    chunkZ: Number(match[4]),
+  };
 }
 
 export function tileKey(world, dimension, z, x, y, extension) {
