@@ -94,7 +94,7 @@ docker run --rm \
 echo "Running dry-run import..."
 docker run --rm \
   -v "$repo_dir:/repo" \
-  -v "$snapshot_dir/$WORLD_NAME/db:/worlddb:ro" \
+  -v "$snapshot_dir/$WORLD_NAME/db:/worlddb" \
   -v "$IMPORT_ROOT:/import" \
   -w /repo \
   "$NODE_IMAGE" \
@@ -104,7 +104,7 @@ echo "Running full import..."
 docker run --rm \
   -e PLUGIN_TOKEN="$PLUGIN_TOKEN" \
   -v "$repo_dir:/repo" \
-  -v "$snapshot_dir/$WORLD_NAME/db:/worlddb:ro" \
+  -v "$snapshot_dir/$WORLD_NAME/db:/worlddb" \
   -v "$IMPORT_ROOT:/import" \
   -w /repo \
   "$NODE_IMAGE" \
