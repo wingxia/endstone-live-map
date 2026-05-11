@@ -440,6 +440,25 @@ describe("worker routes", () => {
     expect(env.MAP_DATA.objects.has("textures/v1/manifest.json")).toBe(true);
   });
 
+  it("rejects cleanup attempts for texture artifacts with a clear error", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("textures/v1/manifest.json", "{}");
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-data/cleanup", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ prefix: "textures/v1/", dryRun: true }),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "cleanup_prefix_not_allowed" });
+    expect(env.MAP_DATA.objects.has("textures/v1/manifest.json")).toBe(true);
+  });
+
   it("rejects unauthenticated plugin writes", async () => {
     const env = createEnv();
     const response = await worker.fetch(new Request("https://map.buhe.li/api/plugin/live", { method: "POST", body: "{}" }), env, {});

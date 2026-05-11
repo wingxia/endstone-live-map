@@ -513,7 +513,12 @@ async function handleMapDataCleanup(request, env) {
     return json({ error: "r2_not_configured" }, 503);
   }
   const payload = await request.json();
-  const cleanup = normalizeCleanupPayload(payload);
+  let cleanup;
+  try {
+    cleanup = normalizeCleanupPayload(payload);
+  } catch (error) {
+    return json({ error: "cleanup_prefix_not_allowed", message: error instanceof Error ? error.message : String(error) }, 400);
+  }
   if (!cleanup.dryRun && cleanup.confirm !== CLEANUP_CONFIRMATION) {
     return json({ error: "cleanup_confirmation_required", confirm: CLEANUP_CONFIRMATION }, 400);
   }
