@@ -6,7 +6,8 @@ WORLD_NAME="${WORLD_NAME:-Bedrock level}"
 IMPORT_ROOT="${IMPORT_ROOT:-/vol1/1000/live-map-import}"
 WORKER_URL="${WORKER_URL:-https://map.buhe.li}"
 BDS_SAMPLES_VERSION="${BDS_SAMPLES_VERSION:-v1.26.20.4}"
-BDS_SAMPLES_URL="${BDS_SAMPLES_URL:-https://gh.buhe.li/Mojang/bedrock-samples/releases/download/${BDS_SAMPLES_VERSION}/bedrock-samples-${BDS_SAMPLES_VERSION}-min.zip}"
+BDS_SAMPLES_ARCHIVE="${BDS_SAMPLES_ARCHIVE:-bedrock-samples-${BDS_SAMPLES_VERSION}.zip}"
+BDS_SAMPLES_URL="${BDS_SAMPLES_URL:-https://gh.buhe.li/Mojang/bedrock-samples/releases/download/${BDS_SAMPLES_VERSION}/${BDS_SAMPLES_ARCHIVE}}"
 REPO_URL="${REPO_URL:-https://gh.buhe.li/wingxia/endstone-live-map.git}"
 ROOT_SYSTEMCTL="${ROOT_SYSTEMCTL:-systemctl}"
 NODE_IMAGE="${NODE_IMAGE:-docker.buhe.li/library/node:24-bookworm}"
@@ -58,7 +59,7 @@ else
 fi
 git -C "$repo_dir" reset --hard origin/main
 
-samples_zip="$IMPORT_ROOT/work/bedrock-samples-${BDS_SAMPLES_VERSION}-min.zip"
+samples_zip="$IMPORT_ROOT/work/$BDS_SAMPLES_ARCHIVE"
 samples_dir="$IMPORT_ROOT/work/bedrock-samples-${BDS_SAMPLES_VERSION}"
 if [[ ! -f "$samples_zip" ]]; then
   curl -fL --retry 5 --retry-delay 5 -o "$samples_zip" "$BDS_SAMPLES_URL"
