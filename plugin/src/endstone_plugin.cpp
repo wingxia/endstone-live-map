@@ -91,6 +91,31 @@ public:
             return false;
         }
 
+        if (!args.empty() && args[0] == "render-chunk") {
+            if (args.size() < 3) {
+                sender.sendMessage("Usage: /livemap render-chunk <chunkX> <chunkZ>");
+                return true;
+            }
+            try {
+                const int chunk_x = std::stoi(args[1]);
+                const int chunk_z = std::stoi(args[2]);
+                auto *level = getServer().getLevel();
+                if (level == nullptr) {
+                    sender.sendMessage("Level is not ready.");
+                    return true;
+                }
+                std::scoped_lock lock(dirty_mutex_);
+                const auto queued = dirty_.markChunk({level->getName(), "Overworld", chunk_x, chunk_z}) ? 1 : 0;
+                sender.sendMessage("Queued " + std::to_string(queued) + " chunk for live map sampling.");
+                getLogger().info("Queued chunk {}/Overworld/{}/{} for live map sampling.", level->getName(), chunk_x,
+                                 chunk_z);
+            }
+            catch (...) {
+                sender.sendMessage("Usage: /livemap render-chunk <chunkX> <chunkZ>");
+            }
+            return true;
+        }
+
         if (!args.empty() && (args[0] == "render-near" || args[0] == "render")) {
             int radius = settings_.scan_radius_chunks;
             if (args.size() >= 2) {
@@ -331,7 +356,7 @@ ENDSTONE_PLUGIN("live_map", "0.1.0", LiveMapPlugin)
 
     command("livemap")
         .description("Inspect or queue live map sampling")
-        .usages("/livemap", "/livemap <render-near> [radius: int]")
+        .usages("/livemap", "/livemap <render-near> [radius: int]", "/livemap <render-chunk> <chunkX: int> <chunkZ: int>")
         .permissions("livemap.command");
 
     permission("livemap.command")
