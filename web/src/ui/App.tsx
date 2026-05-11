@@ -8,7 +8,7 @@ import { MarkerForm } from "./MarkerForm";
 import { MarkerList } from "./MarkerList";
 import { PlayerList } from "./PlayerList";
 
-const DEFAULT_WORLD = "world";
+const DEFAULT_WORLD = "Bedrock level";
 const DEFAULT_DIMENSION = "Overworld";
 
 export function App() {

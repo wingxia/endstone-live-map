@@ -47,6 +47,7 @@ C++ and Worker checks are intended to run on GitHub Actions or NAS for this depl
 Copy `plugin/config/live_map.json.example` to the plugin data folder as `live_map.json`, then set `plugin_token`.
 
 For the NAS target in this environment, `mc.service` runs Endstone from `/vol1/1000`; the plugin directory is `/vol1/1000/bedrock_server/plugins`, and the data directory is `/vol1/1000/bedrock_server/plugins/live_map`.
+The current NAS Bedrock level name is `Bedrock level`, which is also the default frontend world filter.
 
 ## Texture atlas
 

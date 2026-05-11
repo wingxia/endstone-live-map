@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -103,6 +104,7 @@ public:
             }
             const auto queued = seedChunksNearPlayers(radius);
             sender.sendMessage("Queued " + std::to_string(queued) + " chunks for live map sampling.");
+            getLogger().info("Queued {} chunks for live map sampling with radius {}.", queued, radius);
             return true;
         }
 
@@ -231,6 +233,7 @@ private:
         if (chunks.empty()) {
             return;
         }
+        getLogger().info("Sampling {} dirty live map chunk(s).", chunks.size());
 
         auto *level = getServer().getLevel();
         if (level == nullptr) {
@@ -280,7 +283,11 @@ private:
 
             const auto settings = settings_;
             getServer().getScheduler().runTaskAsync(*this, [settings, snapshot = std::move(snapshot)] {
-                livemap::uploadChunkSnapshot(settings, snapshot);
+                const auto ok = livemap::uploadChunkSnapshot(settings, snapshot);
+                const auto prefix = std::string("[LiveMap] ");
+                auto &stream = ok ? std::cout : std::cerr;
+                stream << prefix << (ok ? "Uploaded" : "Failed to upload") << " chunk " << snapshot.world << "/"
+                       << snapshot.dimension << "/" << snapshot.chunk_x << "/" << snapshot.chunk_z << std::endl;
             });
         }
     }
@@ -333,7 +340,7 @@ ENDSTONE_PLUGIN("live_map", "0.1.0", LiveMapPlugin)
 
     command("livemap")
         .description("Inspect or queue live map sampling")
-        .usages("/livemap", "/livemap render-near <radius>")
+        .usages("/livemap", "/livemap <render-near> [radius: int]")
         .permissions("livemap.command");
 
     permission("livemap.command")

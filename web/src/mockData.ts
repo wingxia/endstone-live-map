@@ -1,10 +1,12 @@
 import type { ChunkSnapshot, Marker, PlayerState } from "./api";
 
+const MOCK_WORLD = "Bedrock level";
+
 export const mockPlayers: PlayerState[] = [
   {
     id: "mock-wing",
     name: "Wing",
-    world: "world",
+    world: MOCK_WORLD,
     dimension: "Overworld",
     x: 18,
     y: 72,
@@ -16,7 +18,7 @@ export const mockPlayers: PlayerState[] = [
   {
     id: "mock-alex",
     name: "Alex",
-    world: "world",
+    world: MOCK_WORLD,
     dimension: "Overworld",
     x: -64,
     y: 68,
@@ -28,7 +30,7 @@ export const mockPlayers: PlayerState[] = [
   {
     id: "mock-nether",
     name: "Builder",
-    world: "world",
+    world: MOCK_WORLD,
     dimension: "Nether",
     x: 112,
     y: 42,
@@ -42,7 +44,7 @@ export const mockPlayers: PlayerState[] = [
 export const mockMarkers: Marker[] = [
   {
     id: "spawn",
-    world: "world",
+    world: MOCK_WORLD,
     dimension: "Overworld",
     x: 0,
     y: 64,
@@ -55,7 +57,7 @@ export const mockMarkers: Marker[] = [
   },
   {
     id: "iron-farm",
-    world: "world",
+    world: MOCK_WORLD,
     dimension: "Overworld",
     x: -128,
     y: 68,
@@ -68,7 +70,7 @@ export const mockMarkers: Marker[] = [
   },
   {
     id: "nether-hub",
-    world: "world",
+    world: MOCK_WORLD,
     dimension: "Nether",
     x: 16,
     y: 58,
@@ -101,7 +103,7 @@ function createMockChunks(): ChunkSnapshot[] {
           heights.push(block === 1 ? 62 : Math.round(66 + ridge * 5));
         }
       }
-      chunks.push({ world: "world", dimension: "Overworld", chunkX, chunkZ, palette, blocks, heights, updatedAt: Date.now() });
+      chunks.push({ world: MOCK_WORLD, dimension: "Overworld", chunkX, chunkZ, palette, blocks, heights, updatedAt: Date.now() });
     }
   }
   return chunks;

@@ -8,7 +8,7 @@ test("loads the map application shell", async ({ page }) => {
         markers: [
           {
             id: "spawn",
-            world: "world",
+            world: "Bedrock level",
             dimension: "Overworld",
             x: 0,
             y: 64,
@@ -30,7 +30,7 @@ test("loads the map application shell", async ({ page }) => {
       body: JSON.stringify({
         chunks: [
           {
-            world: "world",
+            world: "Bedrock level",
             dimension: "Overworld",
             chunkX: 0,
             chunkZ: 0,
