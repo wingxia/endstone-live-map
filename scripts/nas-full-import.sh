@@ -18,7 +18,7 @@ fi
 
 mkdir -p "$IMPORT_ROOT"/{snapshots,work,textures}
 timestamp="$(date +%Y%m%d-%H%M%S)"
-snapshot_dir="$IMPORT_ROOT/snapshots/$timestamp"
+snapshot_dir="${SNAPSHOT_DIR:-$IMPORT_ROOT/snapshots/$timestamp}"
 level_src="$SERVER_ROOT/bedrock_server/worlds/$WORLD_NAME"
 service_stopped=0
 
@@ -32,14 +32,22 @@ start_mc_service() {
 
 trap start_mc_service EXIT
 
-echo "Stopping mc.service for a consistent LevelDB snapshot..."
-$ROOT_SYSTEMCTL stop mc.service
-service_stopped=1
-mkdir -p "$snapshot_dir"
-rsync -a --delete "$level_src/" "$snapshot_dir/$WORLD_NAME/"
-start_mc_service
-systemctl is-active --quiet mc.service
-echo "Snapshot created at $snapshot_dir/$WORLD_NAME"
+if [[ -n "${SNAPSHOT_DIR:-}" ]]; then
+  if [[ ! -d "$snapshot_dir/$WORLD_NAME/db" ]]; then
+    echo "SNAPSHOT_DIR does not contain $WORLD_NAME/db: $snapshot_dir" >&2
+    exit 1
+  fi
+  echo "Using existing snapshot at $snapshot_dir/$WORLD_NAME"
+else
+  echo "Stopping mc.service for a consistent LevelDB snapshot..."
+  $ROOT_SYSTEMCTL stop mc.service
+  service_stopped=1
+  mkdir -p "$snapshot_dir"
+  rsync -a --delete "$level_src/" "$snapshot_dir/$WORLD_NAME/"
+  start_mc_service
+  systemctl is-active --quiet mc.service
+  echo "Snapshot created at $snapshot_dir/$WORLD_NAME"
+fi
 
 repo_dir="$IMPORT_ROOT/repo"
 if [[ ! -d "$repo_dir/.git" ]]; then

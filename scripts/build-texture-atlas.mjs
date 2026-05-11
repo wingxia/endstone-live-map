@@ -155,7 +155,7 @@ function extractTextureNames(value) {
 
 async function readJsonIfExists(file) {
   try {
-    return JSON.parse(await fs.readFile(file, "utf8"));
+    return JSON.parse(stripJsonCommentsAndTrailingCommas(await fs.readFile(file, "utf8")));
   } catch (error) {
     if (error?.code === "ENOENT") {
       return null;
