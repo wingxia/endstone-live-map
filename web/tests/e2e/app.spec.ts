@@ -60,6 +60,7 @@ test("loads the map application shell", async ({ page }) => {
   await expect(page.getByTestId("map-canvas")).toBeVisible();
   await expect(page.getByTestId("coordinate-hud")).toContainText("X 0, Z 0");
   await expect(page.getByTestId("coordinate-hud")).toContainText("区块");
+  await expect(page.getByTestId("coordinate-hud")).toContainText("方块");
   await expect(page.getByLabel("地图状态")).toContainText("区块");
   await expect(page.getByRole("heading", { name: "在线玩家" })).toBeVisible();
 });
@@ -84,6 +85,7 @@ test("does not request chunk data before a world import exists", async ({ page }
   await expect(page.getByTestId("map-canvas")).toBeVisible();
   await expect(page.getByTestId("map-empty-state")).toHaveCount(0);
   await expect(page.getByTestId("coordinate-hud")).toContainText("X 0, Z 0");
+  await expect(page.getByTestId("coordinate-hud")).toContainText("未加载");
   await page.waitForTimeout(1000);
   expect(chunkRequests).toBe(0);
 });

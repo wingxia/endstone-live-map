@@ -10,7 +10,7 @@ import {
   type TextureAtlasEntry,
   type TextureManifest,
 } from "../api";
-import { blockColumnIndex } from "./coords";
+import { blockColumnIndex, blockToChunk } from "./coords";
 
 const BLOCKS_PER_CHUNK = 16;
 const TILE_SIZE = 256;
@@ -29,6 +29,16 @@ export interface ChunkLayerHandle extends GridLayer {
   setWorldDimension: (world: string, dimension: string) => void;
   refreshChunk: (message: ChunkReadyMessage) => void;
   applyBlockUpdates: (message: BlockUpdatesMessage) => void;
+  getBlockInfo: (x: number, z: number) => BlockInfo | null;
+}
+
+export interface BlockInfo {
+  block: string;
+  height: number;
+  chunkX: number;
+  chunkZ: number;
+  localX: number;
+  localZ: number;
 }
 
 export function createChunkGridLayer(L: typeof import("leaflet"), world: string, dimension: string): ChunkLayerHandle {
@@ -91,6 +101,24 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
         chunk.heights[index] = update.height;
       }
       this.redraw();
+    }
+
+    getBlockInfo(x: number, z: number): BlockInfo | null {
+      const position = blockToChunk(x, z);
+      const chunk = this.chunkCache.get(cacheKey(this.worldName, this.dimensionName, position.chunkX, position.chunkZ));
+      if (!chunk) {
+        return {
+          ...position,
+          block: "未加载",
+          height: Number.NaN,
+        };
+      }
+      const index = blockColumnIndex(position.localX, position.localZ);
+      return {
+        ...position,
+        block: chunk.palette[chunk.blocks[index]] || "minecraft:air",
+        height: chunk.heights[index],
+      };
     }
 
     createTile(coords: Coords, done: DoneCallback): HTMLElement {

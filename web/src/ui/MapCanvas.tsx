@@ -14,6 +14,9 @@ interface CoordinateState {
   chunkZ: number;
   localX: number;
   localZ: number;
+  height: number;
+  block: string;
+  locked: boolean;
 }
 
 interface MapCanvasProps {
@@ -32,8 +35,9 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
     layers: import("leaflet").LayerGroup;
     chunkLayer: ChunkLayerHandle;
   } | null>(null);
-  const [coordinate, setCoordinate] = useState<CoordinateState>(() => buildCoordinateState(0, 0));
+  const [coordinate, setCoordinate] = useState<CoordinateState>(() => buildCoordinateState(0, 0, null, false));
   const [mapReady, setMapReady] = useState(false);
+  const lockedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,12 +63,24 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
       stateRef.current = { map, layers, chunkLayer };
       setMapReady(true);
 
-      const updateCoordinate = (event: import("leaflet").LeafletMouseEvent) => {
+      const updateCoordinate = (event: import("leaflet").LeafletMouseEvent, locked: boolean) => {
         const point = leafletToMinecraft(event.latlng.lat, event.latlng.lng);
-        setCoordinate(buildCoordinateState(point.x, point.z));
+        const block = chunkLayer.getBlockInfo(point.x, point.z);
+        lockedRef.current = locked;
+        setCoordinate(buildCoordinateState(point.x, point.z, block, locked));
       };
 
-      map.on("mousemove", updateCoordinate);
+      map.on("mousemove", (event) => {
+        if (!lockedRef.current) {
+          updateCoordinate(event, false);
+        }
+      });
+      map.on("click", (event) => updateCoordinate(event, true));
+      map.on("mouseout", () => {
+        if (!lockedRef.current) {
+          setCoordinate((current) => ({ ...current, block: "移出地图", height: Number.NaN }));
+        }
+      });
     }
 
     mount();
@@ -181,10 +197,14 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
       <div ref={mapRef} className="map-canvas" data-testid="map-canvas" />
       <div className="coordinate-hud" data-testid="coordinate-hud" aria-label="当前地图坐标">
         <div>
-          <span>坐标</span>
+          <span>{coordinate.locked ? "已锁定" : "指针"}</span>
           <strong>
             X {coordinate.x}, Z {coordinate.z}
           </strong>
+        </div>
+        <div>
+          <span>Y</span>
+          <strong>{Number.isFinite(coordinate.height) ? coordinate.height : "--"}</strong>
         </div>
         <div>
           <span>区块</span>
@@ -198,13 +218,22 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
             {coordinate.localX}, {coordinate.localZ}
           </strong>
         </div>
+        <div className="coordinate-block">
+          <span>方块</span>
+          <strong>{coordinate.block}</strong>
+        </div>
       </div>
     </>
   );
 }
 
-function buildCoordinateState(x: number, z: number): CoordinateState {
-  const position = blockToChunk(x, z);
+function buildCoordinateState(
+  x: number,
+  z: number,
+  block: ReturnType<ChunkLayerHandle["getBlockInfo"]>,
+  locked: boolean,
+): CoordinateState {
+  const position = block || blockToChunk(x, z);
   return {
     x,
     z,
@@ -212,6 +241,9 @@ function buildCoordinateState(x: number, z: number): CoordinateState {
     chunkZ: position.chunkZ,
     localX: position.localX,
     localZ: position.localZ,
+    height: block?.height ?? Number.NaN,
+    block: block?.block || "未加载",
+    locked,
   };
 }
 

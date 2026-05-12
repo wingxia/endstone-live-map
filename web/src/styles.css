@@ -73,10 +73,10 @@ textarea {
   bottom: 16px;
   z-index: 500;
   display: grid;
-  grid-template-columns: repeat(3, auto);
+  grid-template-columns: repeat(5, auto);
   gap: 10px;
   align-items: center;
-  max-width: min(620px, calc(100% - 32px));
+  max-width: min(760px, calc(100% - 32px));
   padding: 9px 11px;
   border: 1px solid rgba(94, 113, 129, 0.42);
   border-radius: 8px;
@@ -102,6 +102,10 @@ textarea {
   color: #eef5fa;
   font-size: 13px;
   font-weight: 700;
+}
+
+.coordinate-block {
+  min-width: 140px;
 }
 
 .chunk-tile,
