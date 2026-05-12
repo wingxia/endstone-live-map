@@ -185,8 +185,7 @@ h2 {
   gap: 8px;
 }
 
-.dimension-tabs button,
-.marker-form button {
+.dimension-tabs button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -209,16 +208,12 @@ h2 {
   color: #e8fff5;
 }
 
-.dimension-tabs button:focus-visible,
-.marker-form button:focus-visible,
-.marker-form input:focus-visible,
-.marker-form textarea:focus-visible {
+.dimension-tabs button:focus-visible {
   outline: 2px solid #58d39c;
   outline-offset: 2px;
 }
 
-.dimension-tabs button:hover,
-.marker-form button:hover:not(:disabled) {
+.dimension-tabs button:hover {
   border-color: #4aa883;
 }
 
@@ -267,8 +262,7 @@ h2 {
   font-style: normal;
 }
 
-.avatar,
-.item-icon {
+.avatar {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -282,41 +276,6 @@ h2 {
 
 .trailing-icon {
   color: #718292;
-}
-
-.marker-form {
-  display: grid;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.marker-form-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-}
-
-.marker-form label {
-  display: grid;
-  gap: 5px;
-  color: #9badbc;
-  font-size: 12px;
-}
-
-.marker-form input,
-.marker-form textarea {
-  width: 100%;
-  border: 1px solid #31404d;
-  border-radius: 7px;
-  background: #10171f;
-  color: #eef5fa;
-  padding: 9px 10px;
-}
-
-.coord-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
 }
 
 .form-error,

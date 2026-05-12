@@ -1,4 +1,4 @@
-import type { ChunkSnapshot, Marker, PlayerState, WorldMeta } from "./api";
+import type { ChunkSnapshot, PlayerState, WorldMeta } from "./api";
 
 const MOCK_WORLD = "Bedrock level";
 
@@ -38,48 +38,6 @@ export const mockPlayers: PlayerState[] = [
     yaw: 40,
     pitch: 0,
     updatedAt: Date.now(),
-  },
-];
-
-export const mockMarkers: Marker[] = [
-  {
-    id: "spawn",
-    world: MOCK_WORLD,
-    dimension: "Overworld",
-    x: 0,
-    y: 64,
-    z: 0,
-    title: "主城出生点",
-    description: "公告牌、传送入口和公共仓库。",
-    createdBy: "Wing",
-    createdAt: Date.now() - 86400000,
-    updatedAt: Date.now() - 3600000,
-  },
-  {
-    id: "iron-farm",
-    world: MOCK_WORLD,
-    dimension: "Overworld",
-    x: -128,
-    y: 68,
-    z: 96,
-    title: "铁厂",
-    description: "不要移动村民和床。",
-    createdBy: "Admin",
-    createdAt: Date.now() - 7200000,
-    updatedAt: Date.now() - 7200000,
-  },
-  {
-    id: "nether-hub",
-    world: MOCK_WORLD,
-    dimension: "Nether",
-    x: 16,
-    y: 58,
-    z: -16,
-    title: "下界交通站",
-    description: "四向冰道入口。",
-    createdBy: "Wing",
-    createdAt: Date.now() - 6200000,
-    updatedAt: Date.now() - 6200000,
   },
 ];
 

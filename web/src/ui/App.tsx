@@ -1,11 +1,9 @@
-import { Layers, LocateFixed, MapPin, RadioTower } from "lucide-react";
+import { Layers, LocateFixed, RadioTower } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { createMarker, listMarkers, listWorlds, segmentKey, type Marker, type MarkerDraft, type WorldMeta } from "../api";
+import { listWorlds, segmentKey, type WorldMeta } from "../api";
 import { useLivePlayers } from "../hooks/useLivePlayers";
 import { MapCanvas } from "./MapCanvas";
-import { MarkerForm } from "./MarkerForm";
-import { MarkerList } from "./MarkerList";
 import { PlayerList } from "./PlayerList";
 
 const DEFAULT_WORLD = "Bedrock level";
@@ -13,16 +11,9 @@ const DEFAULT_DIMENSION = "Overworld";
 
 export function App() {
   const live = useLivePlayers();
-  const [markers, setMarkers] = useState<Marker[]>([]);
   const [worlds, setWorlds] = useState<WorldMeta[]>([]);
   const [selectedDimension, setSelectedDimension] = useState(DEFAULT_DIMENSION);
   const [error, setError] = useState("");
-
-  useEffect(() => {
-    listMarkers()
-      .then(setMarkers)
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
 
   useEffect(() => {
     listWorlds()
@@ -30,24 +21,8 @@ export function App() {
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }, []);
 
-  useEffect(() => {
-    if (live.upsertedMarker) {
-      setMarkers((current) => [live.upsertedMarker!, ...current.filter((marker) => marker.id !== live.upsertedMarker!.id)]);
-    }
-  }, [live.upsertedMarker]);
-
-  useEffect(() => {
-    if (live.deletedMarkerId) {
-      setMarkers((current) => current.filter((marker) => marker.id !== live.deletedMarkerId));
-    }
-  }, [live.deletedMarkerId]);
-
-  const handleCreateMarker = async (draft: MarkerDraft) => {
-    const marker = await createMarker(draft);
-    setMarkers((current) => [marker, ...current.filter((item) => item.id !== marker.id)]);
-  };
-
   const selectedWorldMeta = worlds.find((world) => world.dimension === selectedDimension && segmentKey(world.world) === segmentKey(DEFAULT_WORLD)) || null;
+  const selectedPlayers = live.players.filter((player) => player.dimension === selectedDimension);
 
   return (
     <main className="app-shell">
@@ -55,8 +30,7 @@ export function App() {
         <MapCanvas
           world={DEFAULT_WORLD}
           dimension={selectedDimension}
-          players={live.players.filter((player) => player.dimension === selectedDimension)}
-          markers={markers.filter((marker) => marker.dimension === selectedDimension)}
+          players={selectedPlayers}
           worldMeta={selectedWorldMeta}
           chunkReady={live.chunkReady}
           blockUpdates={live.blockUpdates}
@@ -65,10 +39,8 @@ export function App() {
           <span>{selectedDimension}</span>
           <strong>{selectedWorldMeta ? selectedWorldMeta.chunkCount.toLocaleString() : "0"}</strong>
           <span>区块</span>
-          <strong>{live.players.filter((player) => player.dimension === selectedDimension).length}</strong>
+          <strong>{selectedPlayers.length}</strong>
           <span>在线</span>
-          <strong>{markers.filter((marker) => marker.dimension === selectedDimension).length}</strong>
-          <span>标注</span>
         </div>
       </section>
 
@@ -105,16 +77,7 @@ export function App() {
             <LocateFixed size={17} aria-hidden="true" />
             在线玩家
           </h2>
-          <PlayerList players={live.players.filter((player) => player.dimension === selectedDimension)} />
-        </section>
-
-        <section aria-labelledby="markers-title">
-          <h2 id="markers-title">
-            <MapPin size={17} aria-hidden="true" />
-            地图标注
-          </h2>
-          <MarkerForm world={DEFAULT_WORLD} dimension={selectedDimension} onCreate={handleCreateMarker} />
-          <MarkerList markers={markers.filter((marker) => marker.dimension === selectedDimension)} />
+          <PlayerList players={selectedPlayers} />
         </section>
       </aside>
     </main>

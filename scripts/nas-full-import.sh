@@ -17,6 +17,8 @@ if [[ -z "${PLUGIN_TOKEN:-}" ]]; then
   exit 2
 fi
 
+echo "Offline import is a repair/backfill path. The live plugin now seeds online-player areas as the primary map base."
+
 mkdir -p "$IMPORT_ROOT"/{snapshots,work,textures}
 timestamp="$(date +%Y%m%d-%H%M%S)"
 snapshot_dir="${SNAPSHOT_DIR:-$IMPORT_ROOT/snapshots/$timestamp}"

@@ -90,9 +90,9 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"server_id\": \"vvnas\",\n"
         << "  \"dimensions\": [\"Overworld\", \"Nether\", \"TheEnd\"],\n"
         << "  \"scan_radius_chunks\": 8,\n"
-        << "  \"chunk_refresh_seconds\": 60,\n"
+        << "  \"chunk_refresh_seconds\": 20,\n"
         << "  \"player_push_seconds\": 1,\n"
-        << "  \"max_chunks_per_refresh\": 1,\n"
+        << "  \"max_chunks_per_refresh\": 32,\n"
         << "  \"upload_chunks\": true,\n"
         << "  \"upload_players\": true\n"
         << "}\n";

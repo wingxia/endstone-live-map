@@ -4,7 +4,7 @@ Realtime 2D web map for an Endstone Bedrock server.
 
 The project is a monorepo:
 
-- `plugin/`: C++20 Endstone plugin. It samples highest visible blocks into 16x16 chunk snapshots, tracks dirty chunks from block events, and publishes player snapshots.
+- `plugin/`: C++20 Endstone plugin. It publishes player snapshots, automatically seeds chunks around online players, and keeps changed terrain fresh from block events.
 - `worker/`: Cloudflare Worker API, R2 chunk/texture storage, Hyperdrive MySQL marker API, and Durable Object live room.
 - `web/`: React/Leaflet frontend served by the Worker static assets binding.
 
@@ -12,8 +12,8 @@ The project is a monorepo:
 
 - 2D top-down highest-block chunks, one native zoom layer for v1.
 - Player positions update independently from terrain chunks.
-- Terrain changes mark dirty chunks and are sampled/uploaded on a timer.
-- Markers support title, description, coordinates, dimension, creator, and timestamps.
+- Online players seed nearby chunks as the live-first base map; terrain changes mark dirty chunks and are sampled/uploaded on the same timer.
+- Marker UI is currently hidden. The Worker API and NAS MySQL schema are retained dormant for later restoration.
 - Chunk snapshots and texture atlas files use the R2 `MAP_DATA` binding.
 - Marker storage uses NAS MySQL through Cloudflare Hyperdrive. D1 is not used.
 
@@ -49,6 +49,8 @@ Copy `plugin/config/live_map.json.example` to the plugin data folder as `live_ma
 For the NAS target in this environment, `mc.service` runs Endstone from `/vol1/1000`; the plugin directory is `/vol1/1000/bedrock_server/plugins`, and the data directory is `/vol1/1000/bedrock_server/plugins/live_map`.
 The current NAS Bedrock level name is `Bedrock level`, which is also the default frontend world filter.
 
+The production live-first defaults sample chunks every 20 seconds, enqueue an 8-chunk radius around each online player, and upload up to 32 chunks per refresh. This lets player-loaded areas become the visible base map without waiting for an offline full import.
+
 ## Texture atlas
 
 Generate the atlas from a server/resource pack on NAS or a local copy of that pack:
@@ -62,9 +64,11 @@ npx wrangler r2 object put endstone-live-map-tiles/textures/v1/report.json --fil
 
 The generated `atlas.png` and `manifest.json` are deployment artifacts and are not committed.
 
-## Full map import
+## Offline map import fallback
 
-Do not run a full block scan inside the live Endstone plugin. For the NAS server, use a stopped-server LevelDB snapshot and the offline importer:
+The live plugin is the primary production path for current terrain: players load nearby chunks, the plugin uploads those chunks, and later block changes correct them.
+
+Use the offline importer only for repair/backfill, such as rebuilding a known-good wider base map from a stopped-server LevelDB snapshot. Do not run a full block scan inside the live Endstone plugin. For the NAS server:
 
 ```bash
 PLUGIN_TOKEN=... scripts/nas-full-import.sh

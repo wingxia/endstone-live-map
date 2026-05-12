@@ -67,7 +67,7 @@ public:
         const auto chunk_ticks = static_cast<std::uint64_t>(std::max(5, settings_.chunk_refresh_seconds) * 20);
         player_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { publishPlayers(); }, player_ticks,
                                                                player_ticks);
-        chunk_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { publishDirtyChunks(); }, chunk_ticks,
+        chunk_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { seedAndPublishChunks(); }, chunk_ticks,
                                                               chunk_ticks);
 
         getLogger().info("Endstone Live Map enabled for {}", settings_.worker_url);
@@ -167,12 +167,16 @@ private:
     }
 
     std::size_t markChunkSquare(const std::string &world, const std::string &dimension, int center_x, int center_z,
-                                int radius)
+                                int radius, bool only_unseeded = false)
     {
         std::size_t queued = 0;
         for (int dz = -radius; dz <= radius; ++dz) {
             for (int dx = -radius; dx <= radius; ++dx) {
-                if (dirty_.markChunk({world, dimension, center_x + dx, center_z + dz})) {
+                livemap::ChunkCoord coord{world, dimension, center_x + dx, center_z + dz};
+                if (only_unseeded && !seeded_.markChunk(coord)) {
+                    continue;
+                }
+                if (dirty_.markChunk(std::move(coord))) {
                     ++queued;
                 }
             }
@@ -200,7 +204,8 @@ private:
             }
             const int chunk_x = livemap::floorDiv(static_cast<int>(std::floor(location.getX())), livemap::kChunkSize);
             const int chunk_z = livemap::floorDiv(static_cast<int>(std::floor(location.getZ())), livemap::kChunkSize);
-            queued += markChunkSquare(dimension.getLevel().getName(), dimension.getName(), chunk_x, chunk_z, radius);
+            queued += markChunkSquare(dimension.getLevel().getName(), dimension.getName(), chunk_x, chunk_z, radius,
+                                      true);
         }
 
         return queued;
@@ -255,6 +260,17 @@ private:
         const auto json = livemap::serializePlayerSnapshot(players);
         const auto settings = settings_;
         getServer().getScheduler().runTaskAsync(*this, [settings, json] { livemap::postLiveJson(settings, json); });
+    }
+
+    void seedAndPublishChunks()
+    {
+        if (settings_.upload_chunks && !settings_.plugin_token.empty()) {
+            const auto queued = seedChunksNearPlayers(settings_.scan_radius_chunks);
+            if (queued > 0) {
+                getLogger().info("Queued {} live map base chunk(s) near online players.", queued);
+            }
+        }
+        publishDirtyChunks();
     }
 
     void publishDirtyChunks()
@@ -355,6 +371,7 @@ private:
     std::shared_ptr<endstone::Task> chunk_task_;
     mutable std::mutex dirty_mutex_;
     livemap::DirtyChunkTracker dirty_;
+    livemap::DirtyChunkTracker seeded_;
 };
 
 void LiveMapListener::onBlockPlace(endstone::BlockPlaceEvent &event)

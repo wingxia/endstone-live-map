@@ -1,28 +1,6 @@
 import { expect, test } from "@playwright/test";
 
 test("loads the map application shell", async ({ page }) => {
-  await page.route("**/api/markers", async (route) => {
-    await route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({
-        markers: [
-          {
-            id: "spawn",
-            world: "Bedrock level",
-            dimension: "Overworld",
-            x: 0,
-            y: 64,
-            z: 0,
-            title: "Spawn",
-            description: "Main hub",
-            createdBy: "Wing",
-            createdAt: 1,
-            updatedAt: 1,
-          },
-        ],
-      }),
-    });
-  });
   await page.route("**/api/live", async (route) => route.abort());
   await page.route("**/api/worlds", async (route) => {
     await route.fulfill({
@@ -83,15 +61,12 @@ test("loads the map application shell", async ({ page }) => {
   await expect(page.getByTestId("coordinate-hud")).toContainText("X 0, Z 0");
   await expect(page.getByTestId("coordinate-hud")).toContainText("区块");
   await expect(page.getByLabel("地图状态")).toContainText("区块");
-  await expect(page.getByText("Spawn")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "在线玩家" })).toBeVisible();
 });
 
 test("does not request chunk data before a world import exists", async ({ page }) => {
   let chunkRequests = 0;
 
-  await page.route("**/api/markers", async (route) => {
-    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ markers: [] }) });
-  });
   await page.route("**/api/live", async (route) => route.abort());
   await page.route("**/api/worlds", async (route) => {
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ worlds: [] }) });
@@ -110,4 +85,74 @@ test("does not request chunk data before a world import exists", async ({ page }
   await expect(page.getByTestId("coordinate-hud")).toContainText("未加载");
   await page.waitForTimeout(1000);
   expect(chunkRequests).toBe(0);
+});
+
+test("requests live player chunks before a world import exists", async ({ page }) => {
+  let chunkRequests = 0;
+
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.addInitScript(() => {
+    class MockWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = MockWebSocket.OPEN;
+      url: string;
+
+      constructor(url: string) {
+        super();
+        this.url = url;
+        setTimeout(() => {
+          this.dispatchEvent(new Event("open"));
+          this.dispatchEvent(
+            new MessageEvent("message", {
+              data: JSON.stringify({
+                type: "player_snapshot",
+                players: [
+                  {
+                    id: "wing",
+                    name: "Wing",
+                    world: "Bedrock level",
+                    dimension: "Overworld",
+                    x: 0,
+                    y: 64,
+                    z: 0,
+                    yaw: 0,
+                    pitch: 0,
+                    updatedAt: 1,
+                  },
+                ],
+              }),
+            }),
+          );
+        }, 50);
+      }
+
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.dispatchEvent(new Event("close"));
+      }
+
+      send() {}
+    }
+
+    Object.assign(MockWebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+    window.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+  });
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ worlds: [] }) });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    chunkRequests += 1;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({ status: 404, body: "texture manifest not found" });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("Wing")).toBeVisible();
+  await expect(page.getByTestId("map-empty-state")).toContainText("正在加载在线玩家附近地图");
+  await expect.poll(() => chunkRequests).toBeGreaterThan(0);
 });

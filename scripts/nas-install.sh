@@ -21,9 +21,9 @@ cat > "$DATA_DIR/live_map.json" <<JSON
   "server_id": "vvnas",
   "dimensions": ["Overworld", "Nether", "TheEnd"],
   "scan_radius_chunks": 8,
-  "chunk_refresh_seconds": 60,
+  "chunk_refresh_seconds": 20,
   "player_push_seconds": 1,
-  "max_chunks_per_refresh": 1,
+  "max_chunks_per_refresh": 32,
   "upload_chunks": true,
   "upload_players": true
 }

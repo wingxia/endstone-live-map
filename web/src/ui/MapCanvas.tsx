@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 
-import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type Marker, type PlayerState, type WorldMeta } from "../api";
+import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type PlayerState, type WorldMeta } from "../api";
 import { blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "./coords";
 import { createChunkGridLayer, INITIAL_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
 const MAX_INITIAL_CHUNKS = 96;
+const LIVE_PLAYER_PADDING_BLOCKS = 96;
 
 interface CoordinateState {
   x: number;
@@ -22,13 +23,12 @@ interface MapCanvasProps {
   world: string;
   dimension: string;
   players: PlayerState[];
-  markers: Marker[];
   worldMeta: WorldMeta | null;
   chunkReady: ChunkReadyMessage | null;
   blockUpdates: BlockUpdatesMessage | null;
 }
 
-export function MapCanvas({ world, dimension, players, markers, worldMeta, chunkReady, blockUpdates }: MapCanvasProps) {
+export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, blockUpdates }: MapCanvasProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const stateRef = useRef<{
     map: import("leaflet").Map;
@@ -98,13 +98,27 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
     if (!state || !mapReady) {
       return;
     }
-    if (!isWorldMetaForMap(worldMeta, world, dimension)) {
+    const meta = isWorldMetaForMap(worldMeta, world, dimension) ? worldMeta : null;
+    const playerBounds = players.length > 0 ? boundsForPlayers(players) : null;
+    if (!meta && !playerBounds) {
       state.chunkLayer.setActive(false);
       state.map.setView([0, 0], INITIAL_MAP_ZOOM, { animate: false });
       return;
     }
-    const meta = worldMeta;
     state.chunkLayer.setActive(true);
+    if (!meta && playerBounds) {
+      state.map.fitBounds(
+        [
+          minecraftToLeaflet(playerBounds.minX, playerBounds.maxZ),
+          minecraftToLeaflet(playerBounds.maxX, playerBounds.minZ),
+        ],
+        { animate: false, padding: [24, 24], maxZoom: INITIAL_MAP_ZOOM },
+      );
+      return;
+    }
+    if (!meta) {
+      return;
+    }
     const bounds = meta.bounds;
     const widthChunks = bounds.maxChunkX - bounds.minChunkX + 1;
     const heightChunks = bounds.maxChunkZ - bounds.minChunkZ + 1;
@@ -132,7 +146,7 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
       ],
       { animate: false, padding: [24, 24] },
     );
-  }, [dimension, mapReady, world, worldMeta]);
+  }, [dimension, mapReady, players, world, worldMeta]);
 
   useEffect(() => {
     if (chunkReady) {
@@ -157,18 +171,6 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
       }
       state.layers.clearLayers();
 
-      for (const marker of markers) {
-        L.circleMarker(minecraftToLeaflet(marker.x, marker.z), {
-          radius: 9,
-          color: "#101820",
-          weight: 2,
-          fillColor: "#60a5fa",
-          fillOpacity: 0.95,
-        })
-          .bindPopup(`<strong>${escapeHtml(marker.title)}</strong><br>${escapeHtml(marker.description)}`)
-          .addTo(state.layers);
-      }
-
       for (const player of players) {
         L.circleMarker(minecraftToLeaflet(player.x, player.z), {
           radius: 7,
@@ -188,14 +190,14 @@ export function MapCanvas({ world, dimension, players, markers, worldMeta, chunk
     return () => {
       cancelled = true;
     };
-  }, [players, markers]);
+  }, [players]);
 
   return (
     <>
       <div ref={mapRef} className="map-canvas" data-testid="map-canvas" />
       {!isWorldMetaForMap(worldMeta, world, dimension) ? (
         <div className="map-empty-state" data-testid="map-empty-state">
-          暂无已导入地图数据
+          {players.length > 0 ? "正在加载在线玩家附近地图" : "暂无已导入地图数据"}
         </div>
       ) : null}
       <div className="coordinate-hud" data-testid="coordinate-hud" aria-label="当前地图坐标">
@@ -251,6 +253,17 @@ function isWorldMetaForMap(worldMeta: WorldMeta | null, world: string, dimension
 
 function clampChunk(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function boundsForPlayers(players: PlayerState[]) {
+  const xs = players.map((player) => player.x);
+  const zs = players.map((player) => player.z);
+  return {
+    minX: Math.floor(Math.min(...xs) - LIVE_PLAYER_PADDING_BLOCKS),
+    maxX: Math.ceil(Math.max(...xs) + LIVE_PLAYER_PADDING_BLOCKS),
+    minZ: Math.floor(Math.min(...zs) - LIVE_PLAYER_PADDING_BLOCKS),
+    maxZ: Math.ceil(Math.max(...zs) + LIVE_PLAYER_PADDING_BLOCKS),
+  };
 }
 
 function escapeHtml(value: string) {
