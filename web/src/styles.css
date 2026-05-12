@@ -67,6 +67,43 @@ textarea {
   font-size: 14px;
 }
 
+.coordinate-hud {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  z-index: 500;
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  gap: 10px;
+  align-items: center;
+  max-width: min(620px, calc(100% - 32px));
+  padding: 9px 11px;
+  border: 1px solid rgba(94, 113, 129, 0.42);
+  border-radius: 8px;
+  background: rgba(13, 19, 26, 0.86);
+  color: #aebdcc;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(12px);
+  font-size: 12px;
+}
+
+.coordinate-hud div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.coordinate-hud span {
+  color: #8192a2;
+}
+
+.coordinate-hud strong {
+  overflow-wrap: anywhere;
+  color: #eef5fa;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .chunk-tile,
 .chunk-grid-layer {
   image-rendering: pixelated;
@@ -256,6 +293,14 @@ h2 {
     right: 10px;
     top: 10px;
     grid-template-columns: auto auto auto auto auto;
+  }
+
+  .coordinate-hud {
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-width: none;
   }
 
   .side-panel {

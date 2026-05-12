@@ -1,11 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 
 import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type PlayerState, type WorldMeta } from "../api";
-import { minecraftToLeaflet } from "./coords";
+import { blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "./coords";
 import { createChunkGridLayer, INITIAL_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
 const MAX_INITIAL_CHUNKS = 96;
 const LIVE_PLAYER_PADDING_BLOCKS = 96;
+
+interface CoordinateState {
+  x: number;
+  z: number;
+  chunkX: number;
+  chunkZ: number;
+  localX: number;
+  localZ: number;
+}
 
 interface MapCanvasProps {
   world: string;
@@ -23,6 +32,7 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
     layers: import("leaflet").LayerGroup;
     chunkLayer: ChunkLayerHandle;
   } | null>(null);
+  const [coordinate, setCoordinate] = useState<CoordinateState>(() => buildCoordinateState(0, 0));
   const [mapReady, setMapReady] = useState(false);
 
   useEffect(() => {
@@ -48,6 +58,13 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
       const layers = L.layerGroup().addTo(map);
       stateRef.current = { map, layers, chunkLayer };
       setMapReady(true);
+
+      const updateCoordinate = (event: import("leaflet").LeafletMouseEvent) => {
+        const point = leafletToMinecraft(event.latlng.lat, event.latlng.lng);
+        setCoordinate(buildCoordinateState(point.x, point.z));
+      };
+
+      map.on("mousemove", updateCoordinate);
     }
 
     mount();
@@ -162,8 +179,40 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
   return (
     <>
       <div ref={mapRef} className="map-canvas" data-testid="map-canvas" />
+      <div className="coordinate-hud" data-testid="coordinate-hud" aria-label="当前地图坐标">
+        <div>
+          <span>坐标</span>
+          <strong>
+            X {coordinate.x}, Z {coordinate.z}
+          </strong>
+        </div>
+        <div>
+          <span>区块</span>
+          <strong>
+            {coordinate.chunkX}, {coordinate.chunkZ}
+          </strong>
+        </div>
+        <div>
+          <span>局部</span>
+          <strong>
+            {coordinate.localX}, {coordinate.localZ}
+          </strong>
+        </div>
+      </div>
     </>
   );
+}
+
+function buildCoordinateState(x: number, z: number): CoordinateState {
+  const position = blockToChunk(x, z);
+  return {
+    x,
+    z,
+    chunkX: position.chunkX,
+    chunkZ: position.chunkZ,
+    localX: position.localX,
+    localZ: position.localZ,
+  };
 }
 
 function isWorldMetaForMap(worldMeta: WorldMeta | null, world: string, dimension: string): worldMeta is WorldMeta {
