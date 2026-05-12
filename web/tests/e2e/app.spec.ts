@@ -58,8 +58,6 @@ test("loads the map application shell", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Endstone Live Map" })).toBeVisible();
   await expect(page.getByTestId("map-canvas")).toBeVisible();
-  await expect(page.getByTestId("coordinate-hud")).toContainText("X 0, Z 0");
-  await expect(page.getByTestId("coordinate-hud")).toContainText("区块");
   await expect(page.getByLabel("地图状态")).toContainText("区块");
   await expect(page.getByRole("heading", { name: "在线玩家" })).toBeVisible();
 });
@@ -81,8 +79,9 @@ test("does not request chunk data before a world import exists", async ({ page }
 
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Endstone Live Map" })).toBeVisible();
-  await expect(page.getByTestId("map-empty-state")).toContainText("暂无已导入地图数据");
-  await expect(page.getByTestId("coordinate-hud")).toContainText("未加载");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect(page.getByTestId("map-empty-state")).toHaveCount(0);
+  await expect(page.getByTestId("coordinate-hud")).toHaveCount(0);
   await page.waitForTimeout(1000);
   expect(chunkRequests).toBe(0);
 });
@@ -153,6 +152,6 @@ test("requests live player chunks before a world import exists", async ({ page }
 
   await page.goto("/");
   await expect(page.getByText("Wing")).toBeVisible();
-  await expect(page.getByTestId("map-empty-state")).toContainText("正在加载在线玩家附近地图");
+  await expect(page.getByTestId("map-empty-state")).toHaveCount(0);
   await expect.poll(() => chunkRequests).toBeGreaterThan(0);
 });
