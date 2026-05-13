@@ -1,6 +1,8 @@
 #include "livemap/settings.hpp"
 
+#include <algorithm>
 #include <fstream>
+#include <optional>
 #include <regex>
 #include <sstream>
 
@@ -26,18 +28,56 @@ std::string stringValue(const std::string &source, const std::string &key, std::
     return std::regex_search(source, match, pattern) ? match[1].str() : std::move(fallback);
 }
 
-int intValue(const std::string &source, const std::string &key, int fallback)
+std::optional<int> maybeIntValue(const std::string &source, const std::string &key)
 {
     const std::regex pattern("\"" + key + "\"\\s*:\\s*(-?[0-9]+)");
     std::smatch match;
-    return std::regex_search(source, match, pattern) ? std::stoi(match[1].str()) : fallback;
+    if (!std::regex_search(source, match, pattern)) {
+        return std::nullopt;
+    }
+    return std::stoi(match[1].str());
+}
+
+int intValue(const std::string &source, const std::string &key, int fallback)
+{
+    const auto value = maybeIntValue(source, key);
+    return value.has_value() ? *value : fallback;
+}
+
+int legacyIntValue(const std::string &source, const std::string &key, const std::string &legacy_key, int fallback)
+{
+    const auto value = maybeIntValue(source, key);
+    if (value.has_value()) {
+        return *value;
+    }
+    const auto legacy_value = maybeIntValue(source, legacy_key);
+    return legacy_value.has_value() ? *legacy_value : fallback;
+}
+
+std::optional<bool> maybeBoolValue(const std::string &source, const std::string &key)
+{
+    const std::regex pattern("\"" + key + "\"\\s*:\\s*(true|false)");
+    std::smatch match;
+    if (!std::regex_search(source, match, pattern)) {
+        return std::nullopt;
+    }
+    return match[1].str() == "true";
 }
 
 bool boolValue(const std::string &source, const std::string &key, bool fallback)
 {
-    const std::regex pattern("\"" + key + "\"\\s*:\\s*(true|false)");
-    std::smatch match;
-    return std::regex_search(source, match, pattern) ? match[1].str() == "true" : fallback;
+    const auto value = maybeBoolValue(source, key);
+    return value.has_value() ? *value : fallback;
+}
+
+bool legacyBoolValue(const std::string &source, const std::string &key, const std::string &legacy_key, bool fallback)
+{
+    const auto value = maybeBoolValue(source, key);
+    if (value.has_value()) {
+        return *value;
+    }
+    const auto legacy_value = maybeBoolValue(source, legacy_key);
+    return legacy_value.has_value() ? *legacy_value : fallback;
 }
 
 std::vector<std::string> dimensionsValue(const std::string &source, std::vector<std::string> fallback)
@@ -72,11 +112,18 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.server_id = stringValue(source, "server_id", settings.server_id);
     settings.dimensions = dimensionsValue(source, settings.dimensions);
     settings.scan_radius_chunks = intValue(source, "scan_radius_chunks", settings.scan_radius_chunks);
-    settings.chunk_refresh_seconds = intValue(source, "chunk_refresh_seconds", settings.chunk_refresh_seconds);
+    settings.chunk_refresh_seconds =
+        legacyIntValue(source, "chunk_refresh_seconds", "tile_refresh_seconds", settings.chunk_refresh_seconds);
     settings.player_push_seconds = intValue(source, "player_push_seconds", settings.player_push_seconds);
-    settings.max_chunks_per_refresh = intValue(source, "max_chunks_per_refresh", settings.max_chunks_per_refresh);
-    settings.upload_chunks = boolValue(source, "upload_chunks", settings.upload_chunks);
+    settings.max_chunks_per_refresh =
+        legacyIntValue(source, "max_chunks_per_refresh", "max_tiles_per_refresh", settings.max_chunks_per_refresh);
+    settings.upload_chunks = legacyBoolValue(source, "upload_chunks", "upload_tiles", settings.upload_chunks);
     settings.upload_players = boolValue(source, "upload_players", settings.upload_players);
+
+    settings.scan_radius_chunks = std::clamp(settings.scan_radius_chunks, 0, 16);
+    settings.chunk_refresh_seconds = std::clamp(settings.chunk_refresh_seconds, 5, 3600);
+    settings.player_push_seconds = std::clamp(settings.player_push_seconds, 1, 300);
+    settings.max_chunks_per_refresh = std::clamp(settings.max_chunks_per_refresh, 1, 64);
     return settings;
 }
 

@@ -19,6 +19,13 @@ struct LiveMapSettings {
     bool upload_players = true;
 };
 
+struct TransportResult {
+    bool ok = false;
+    long response_code = 0;
+    int curl_code = 0;
+    std::string error;
+};
+
 LiveMapSettings loadSettings(const std::filesystem::path &path);
 void writeExampleSettings(const std::filesystem::path &path);
 

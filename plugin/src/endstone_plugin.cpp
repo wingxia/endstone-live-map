@@ -19,8 +19,8 @@
 #include <vector>
 
 namespace livemap {
-bool postLiveJson(const LiveMapSettings &settings, std::string_view json);
-bool uploadChunkSnapshot(const LiveMapSettings &settings, const ChunkSnapshot &snapshot);
+TransportResult postLiveJson(const LiveMapSettings &settings, std::string_view json);
+TransportResult uploadChunkSnapshot(const LiveMapSettings &settings, const ChunkSnapshot &snapshot);
 }  // namespace livemap
 
 namespace {
@@ -70,7 +70,11 @@ public:
         chunk_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { seedAndPublishChunks(); }, chunk_ticks,
                                                               chunk_ticks);
 
-        getLogger().info("Endstone Live Map enabled for {}", settings_.worker_url);
+        getLogger().info(
+            "Endstone Live Map enabled for {} with uploads players={} chunks={} radius={} chunkRefresh={}s "
+            "maxChunksPerRefresh={} dimensions={}.",
+            settings_.worker_url, settings_.upload_players, settings_.upload_chunks, settings_.scan_radius_chunks,
+            settings_.chunk_refresh_seconds, settings_.max_chunks_per_refresh, settings_.dimensions.size());
     }
 
     void onDisable() override
@@ -259,7 +263,18 @@ private:
 
         const auto json = livemap::serializePlayerSnapshot(players);
         const auto settings = settings_;
-        getServer().getScheduler().runTaskAsync(*this, [settings, json] { livemap::postLiveJson(settings, json); });
+        getServer().getScheduler().runTaskAsync(*this, [settings, json] {
+            const auto result = livemap::postLiveJson(settings, json);
+            if (result.ok) {
+                return;
+            }
+            std::cerr << "[LiveMap] Failed to upload player snapshot HTTP " << result.response_code << " curl "
+                      << result.curl_code;
+            if (!result.error.empty()) {
+                std::cerr << " error=" << result.error;
+            }
+            std::cerr << std::endl;
+        });
     }
 
     void seedAndPublishChunks()
@@ -356,11 +371,20 @@ private:
 
             const auto settings = settings_;
             getServer().getScheduler().runTaskAsync(*this, [settings, snapshot = std::move(snapshot)] {
-                const auto ok = livemap::uploadChunkSnapshot(settings, snapshot);
-                const auto prefix = std::string("[LiveMap] ");
-                auto &stream = ok ? std::cout : std::cerr;
-                stream << prefix << (ok ? "Uploaded" : "Failed to upload") << " chunk " << snapshot.world << "/"
-                       << snapshot.dimension << "/" << snapshot.chunk_x << "/" << snapshot.chunk_z << std::endl;
+                const auto result = livemap::uploadChunkSnapshot(settings, snapshot);
+                const auto chunk_name = snapshot.world + "/" + snapshot.dimension + "/" +
+                                        std::to_string(snapshot.chunk_x) + "/" + std::to_string(snapshot.chunk_z);
+                if (result.ok) {
+                    std::cout << "[LiveMap] Uploaded chunk " << chunk_name << " HTTP " << result.response_code
+                              << std::endl;
+                    return;
+                }
+                std::cerr << "[LiveMap] Failed to upload chunk " << chunk_name << " HTTP " << result.response_code
+                          << " curl " << result.curl_code;
+                if (!result.error.empty()) {
+                    std::cerr << " error=" << result.error;
+                }
+                std::cerr << std::endl;
             });
         }
     }

@@ -49,7 +49,15 @@ Copy `plugin/config/live_map.json.example` to the plugin data folder as `live_ma
 For the NAS target in this environment, `mc.service` runs Endstone from `/vol1/1000`; the plugin directory is `/vol1/1000/bedrock_server/plugins`, and the data directory is `/vol1/1000/bedrock_server/plugins/live_map`.
 The current NAS Bedrock level name is `Bedrock level`, which is also the default frontend world filter.
 
-The production live-first defaults sample chunks every 20 seconds, enqueue an 8-chunk radius around each online player, and upload up to 32 chunks per refresh. This lets player-loaded areas become the visible base map without waiting for an offline full import.
+The plugin accepts the current `chunk_*` keys and the legacy `tile_*` names used by older NAS configs. New configs should use `chunk_refresh_seconds`, `max_chunks_per_refresh`, and `upload_chunks`.
+
+For crash recovery or first smoke tests, start conservatively: `scan_radius_chunks` 1-2, `chunk_refresh_seconds` 30, and `max_chunks_per_refresh` 2-4. After the server stays stable with a player online and chunk uploads are visible in logs, increase the radius/batch gradually. The code clamps unsafe values, but production configs should still stay deliberate.
+
+The normal live-first path samples chunks around online players and uploads changed chunks later from block events. This lets player-loaded areas become the visible base map without waiting for an offline full import.
+
+### NAS plugin safety checks
+
+Only one active shared object with plugin name `live_map` should be present under `/vol1/1000/bedrock_server/plugins`. If Endstone logs `Ambiguous plugin name 'live_map'`, keep the canonical `endstone_live_map.so` and rename older duplicates such as `endstone_endstone_live_map.so` to a disabled backup name before restarting `mc.service`.
 
 ## Texture atlas
 

@@ -1,10 +1,13 @@
 #include "livemap/base64.hpp"
 #include "livemap/chunk.hpp"
 #include "livemap/protocol.hpp"
+#include "livemap/settings.hpp"
 #include "livemap/tile_math.hpp"
 
 #include <cassert>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <vector>
 
@@ -95,6 +98,61 @@ void testBase64()
     assert(livemap::base64Encode(one) == "TQ==");
 }
 
+void testSettingsLegacyKeys()
+{
+    const auto path = std::filesystem::temp_directory_path() / "live_map_legacy_settings_test.json";
+    {
+        std::ofstream out(path);
+        out << "{\n"
+            << "  \"worker_url\": \"https://example.invalid\",\n"
+            << "  \"plugin_token\": \"token\",\n"
+            << "  \"server_id\": \"vvnas\",\n"
+            << "  \"dimensions\": [\"Overworld\", \"Nether\"],\n"
+            << "  \"scan_radius_chunks\": 99,\n"
+            << "  \"tile_refresh_seconds\": 2,\n"
+            << "  \"player_push_seconds\": 0,\n"
+            << "  \"max_tiles_per_refresh\": 999,\n"
+            << "  \"upload_tiles\": false,\n"
+            << "  \"upload_players\": false\n"
+            << "}\n";
+    }
+
+    const auto settings = livemap::loadSettings(path);
+    assert(settings.worker_url == "https://example.invalid");
+    assert(settings.plugin_token == "token");
+    assert(settings.server_id == "vvnas");
+    assert(settings.dimensions.size() == 2);
+    assert(settings.scan_radius_chunks == 16);
+    assert(settings.chunk_refresh_seconds == 5);
+    assert(settings.player_push_seconds == 1);
+    assert(settings.max_chunks_per_refresh == 64);
+    assert(!settings.upload_chunks);
+    assert(!settings.upload_players);
+    std::filesystem::remove(path);
+}
+
+void testSettingsNewKeysOverrideLegacyKeys()
+{
+    const auto path = std::filesystem::temp_directory_path() / "live_map_new_settings_test.json";
+    {
+        std::ofstream out(path);
+        out << "{\n"
+            << "  \"chunk_refresh_seconds\": 30,\n"
+            << "  \"tile_refresh_seconds\": 5,\n"
+            << "  \"max_chunks_per_refresh\": 4,\n"
+            << "  \"max_tiles_per_refresh\": 64,\n"
+            << "  \"upload_chunks\": true,\n"
+            << "  \"upload_tiles\": false\n"
+            << "}\n";
+    }
+
+    const auto settings = livemap::loadSettings(path);
+    assert(settings.chunk_refresh_seconds == 30);
+    assert(settings.max_chunks_per_refresh == 4);
+    assert(settings.upload_chunks);
+    std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main()
@@ -104,6 +162,8 @@ int main()
     testDirtyTracker();
     testProtocol();
     testBase64();
+    testSettingsLegacyKeys();
+    testSettingsNewKeysOverrideLegacyKeys();
     std::cout << "livemap core tests passed\n";
     return 0;
 }
