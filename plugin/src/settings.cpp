@@ -118,6 +118,7 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.max_chunks_per_refresh =
         legacyIntValue(source, "max_chunks_per_refresh", "max_tiles_per_refresh", settings.max_chunks_per_refresh);
     settings.upload_chunks = legacyBoolValue(source, "upload_chunks", "upload_tiles", settings.upload_chunks);
+    settings.auto_seed_chunks = boolValue(source, "auto_seed_chunks", settings.auto_seed_chunks);
     settings.upload_players = boolValue(source, "upload_players", settings.upload_players);
 
     settings.scan_radius_chunks = std::clamp(settings.scan_radius_chunks, 0, 16);
@@ -141,6 +142,7 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"player_push_seconds\": 1,\n"
         << "  \"max_chunks_per_refresh\": 32,\n"
         << "  \"upload_chunks\": true,\n"
+        << "  \"auto_seed_chunks\": false,\n"
         << "  \"upload_players\": true\n"
         << "}\n";
 }

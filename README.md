@@ -51,9 +51,9 @@ The current NAS Bedrock level name is `Bedrock level`, which is also the default
 
 The plugin accepts the current `chunk_*` keys and the legacy `tile_*` names used by older NAS configs. New configs should use `chunk_refresh_seconds`, `max_chunks_per_refresh`, and `upload_chunks`.
 
-For crash recovery or first smoke tests, start conservatively: `scan_radius_chunks` 1-2, `chunk_refresh_seconds` 30, and `max_chunks_per_refresh` 2-4. After the server stays stable with a player online and chunk uploads are visible in logs, increase the radius/batch gradually. The code clamps unsafe values, but production configs should still stay deliberate.
+For crash recovery or first smoke tests, keep `auto_seed_chunks` false and `upload_players` true. This preserves live player positions while preventing player login from automatically sampling terrain through Endstone's chunk APIs. If manual terrain sampling is needed, set `upload_chunks` true and use `/livemap render-near 0` or `/livemap render-chunk <chunkX> <chunkZ>` first; only enable `auto_seed_chunks` after the server stays stable with a player online. When automatic seeding is enabled, start conservatively: `scan_radius_chunks` 1-2, `chunk_refresh_seconds` 30, and `max_chunks_per_refresh` 2-4.
 
-The normal live-first path samples chunks around online players and uploads changed chunks later from block events. This lets player-loaded areas become the visible base map without waiting for an offline full import.
+The live player path is the primary safe production path. Terrain snapshots are still supported, but automatic player-near seeding is an explicit opt-in because Endstone/Bedrock can segfault inside scheduler tasks when chunk sampling is unsafe in a given server build.
 
 ### NAS plugin safety checks
 

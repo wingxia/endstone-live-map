@@ -113,6 +113,7 @@ void testSettingsLegacyKeys()
             << "  \"player_push_seconds\": 0,\n"
             << "  \"max_tiles_per_refresh\": 999,\n"
             << "  \"upload_tiles\": false,\n"
+            << "  \"auto_seed_chunks\": true,\n"
             << "  \"upload_players\": false\n"
             << "}\n";
     }
@@ -127,6 +128,7 @@ void testSettingsLegacyKeys()
     assert(settings.player_push_seconds == 1);
     assert(settings.max_chunks_per_refresh == 64);
     assert(!settings.upload_chunks);
+    assert(settings.auto_seed_chunks);
     assert(!settings.upload_players);
     std::filesystem::remove(path);
 }
@@ -142,7 +144,8 @@ void testSettingsNewKeysOverrideLegacyKeys()
             << "  \"max_chunks_per_refresh\": 4,\n"
             << "  \"max_tiles_per_refresh\": 64,\n"
             << "  \"upload_chunks\": true,\n"
-            << "  \"upload_tiles\": false\n"
+            << "  \"upload_tiles\": false,\n"
+            << "  \"auto_seed_chunks\": false\n"
             << "}\n";
     }
 
@@ -150,6 +153,7 @@ void testSettingsNewKeysOverrideLegacyKeys()
     assert(settings.chunk_refresh_seconds == 30);
     assert(settings.max_chunks_per_refresh == 4);
     assert(settings.upload_chunks);
+    assert(!settings.auto_seed_chunks);
     std::filesystem::remove(path);
 }
 

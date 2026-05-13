@@ -8,5 +8,6 @@
   "player_push_seconds": 1,
   "max_chunks_per_refresh": 32,
   "upload_chunks": true,
+  "auto_seed_chunks": false,
   "upload_players": true
 }

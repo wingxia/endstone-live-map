@@ -16,6 +16,7 @@ struct LiveMapSettings {
     int player_push_seconds = 1;
     int max_chunks_per_refresh = 32;
     bool upload_chunks = true;
+    bool auto_seed_chunks = false;
     bool upload_players = true;
 };
 

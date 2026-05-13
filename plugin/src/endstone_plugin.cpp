@@ -71,10 +71,11 @@ public:
                                                               chunk_ticks);
 
         getLogger().info(
-            "Endstone Live Map enabled for {} with uploads players={} chunks={} radius={} chunkRefresh={}s "
+            "Endstone Live Map enabled for {} with uploads players={} chunks={} autoSeedChunks={} radius={} chunkRefresh={}s "
             "maxChunksPerRefresh={} dimensions={}.",
-            settings_.worker_url, settings_.upload_players, settings_.upload_chunks, settings_.scan_radius_chunks,
-            settings_.chunk_refresh_seconds, settings_.max_chunks_per_refresh, settings_.dimensions.size());
+            settings_.worker_url, settings_.upload_players, settings_.upload_chunks, settings_.auto_seed_chunks,
+            settings_.scan_radius_chunks, settings_.chunk_refresh_seconds, settings_.max_chunks_per_refresh,
+            settings_.dimensions.size());
     }
 
     void onDisable() override
@@ -279,7 +280,7 @@ private:
 
     void seedAndPublishChunks()
     {
-        if (settings_.upload_chunks && !settings_.plugin_token.empty()) {
+        if (settings_.upload_chunks && settings_.auto_seed_chunks && !settings_.plugin_token.empty()) {
             const auto queued = seedChunksNearPlayers(settings_.scan_radius_chunks);
             if (queued > 0) {
                 getLogger().info("Queued {} live map base chunk(s) near online players.", queued);
