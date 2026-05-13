@@ -93,6 +93,23 @@ std::string serializeChunkSnapshot(const ChunkSnapshot &snapshot)
     return out.str();
 }
 
+std::string serializeBlockUpdateBatch(const BlockUpdateBatch &batch)
+{
+    std::ostringstream out;
+    out << "{\"world\":\"" << jsonEscape(batch.world) << "\",\"dimension\":\"" << jsonEscape(batch.dimension)
+        << "\",\"chunkX\":" << batch.chunk_x << ",\"chunkZ\":" << batch.chunk_z << ",\"updates\":[";
+    for (std::size_t i = 0; i < batch.updates.size(); ++i) {
+        const auto &update = batch.updates[i];
+        if (i != 0) {
+            out << ',';
+        }
+        out << "{\"localX\":" << update.local_x << ",\"localZ\":" << update.local_z << ",\"block\":\""
+            << jsonEscape(update.block) << "\",\"height\":" << update.height << '}';
+    }
+    out << "],\"updatedAt\":" << batch.updated_at_ms << '}';
+    return out.str();
+}
+
 std::string serializeChunkReady(const ChunkCoord &coord)
 {
     std::ostringstream out;

@@ -38,6 +38,23 @@ void testDirtyTracker()
     assert(tracker.empty());
 }
 
+void testDirtyBlockTracker()
+{
+    livemap::DirtyBlockTracker tracker;
+    assert(tracker.markBlock("world", "Overworld", 0, 63, 10));
+    assert(!tracker.markBlock("world", "Overworld", 0, 63, 8));
+    assert(!tracker.markBlock("world", "Overworld", 0, 63, 64));
+    assert(tracker.markBlock("world", "Overworld", 1, 63, 2));
+    assert(tracker.size() == 2);
+
+    const auto drained = tracker.drain(1);
+    assert(drained.size() == 1);
+    assert(drained[0].touched_y == 64);
+    assert(tracker.size() == 1);
+    tracker.clear();
+    assert(tracker.empty());
+}
+
 void testChunkMath()
 {
     const auto origin = livemap::chunkForBlock("world", "Overworld", 0, 0);
@@ -49,6 +66,9 @@ void testChunkMath()
     assert(negative.x == -1);
     assert(negative.z == -2);
     assert(livemap::localChunkCoord(-1, -1) == 15);
+    const auto column = livemap::columnForBlock("world", "Overworld", -1, -17);
+    assert(column.x == -1);
+    assert(column.z == -17);
 }
 
 void testProtocol()
@@ -88,6 +108,17 @@ void testProtocol()
     assert(chunk_json.find("\"chunkX\":-1") != std::string::npos);
     assert(chunk_json.find("\"palette\":[\"minecraft:grass_block\",\"minecraft:water\"]") != std::string::npos);
     assert(chunk_json.find("\"updatedAt\":99") != std::string::npos);
+
+    livemap::BlockUpdateBatch batch;
+    batch.world = "world";
+    batch.dimension = "Overworld";
+    batch.chunk_x = 0;
+    batch.chunk_z = 0;
+    batch.updates.push_back({1, 2, "minecraft:stone", 70});
+    batch.updated_at_ms = 100;
+    const auto update_json = livemap::serializeBlockUpdateBatch(batch);
+    assert(update_json.find("\"updates\":[{\"localX\":1,\"localZ\":2") != std::string::npos);
+    assert(update_json.find("\"block\":\"minecraft:stone\"") != std::string::npos);
 }
 
 void testBase64()
@@ -112,8 +143,15 @@ void testSettingsLegacyKeys()
             << "  \"tile_refresh_seconds\": 2,\n"
             << "  \"player_push_seconds\": 0,\n"
             << "  \"max_tiles_per_refresh\": 999,\n"
+            << "  \"player_seed_radius_chunks\": 99,\n"
+            << "  \"player_seed_interval_seconds\": 1,\n"
+            << "  \"max_seed_chunks_per_pulse\": 99,\n"
+            << "  \"seed_pulse_seconds\": 0,\n"
+            << "  \"dirty_block_push_seconds\": 0,\n"
+            << "  \"max_dirty_blocks_per_push\": 999,\n"
             << "  \"upload_tiles\": false,\n"
             << "  \"auto_seed_chunks\": true,\n"
+            << "  \"upload_dirty_blocks\": false,\n"
             << "  \"upload_players\": false\n"
             << "}\n";
     }
@@ -127,8 +165,15 @@ void testSettingsLegacyKeys()
     assert(settings.chunk_refresh_seconds == 5);
     assert(settings.player_push_seconds == 1);
     assert(settings.max_chunks_per_refresh == 64);
+    assert(settings.player_seed_radius_chunks == 8);
+    assert(settings.player_seed_interval_seconds == 30);
+    assert(settings.max_seed_chunks_per_pulse == 16);
+    assert(settings.seed_pulse_seconds == 1);
+    assert(settings.dirty_block_push_seconds == 1);
+    assert(settings.max_dirty_blocks_per_push == 512);
     assert(!settings.upload_chunks);
     assert(settings.auto_seed_chunks);
+    assert(!settings.upload_dirty_blocks);
     assert(!settings.upload_players);
     std::filesystem::remove(path);
 }
@@ -164,6 +209,7 @@ int main()
     testTileMath();
     testChunkMath();
     testDirtyTracker();
+    testDirtyBlockTracker();
     testProtocol();
     testBase64();
     testSettingsLegacyKeys();

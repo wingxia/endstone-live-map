@@ -4,6 +4,7 @@ import worker, {
   chunkRegionKey,
   chunkKey,
   diffChunkSnapshots,
+  normalizeBlockUpdateBatch,
   normalizeCleanupPayload,
   normalizeChunkBatchPayload,
   normalizeChunkSnapshot,
@@ -149,6 +150,15 @@ describe("worker helpers", () => {
     expect(normalizeChunkBatchPayload({ chunks: [createChunk()], storage: "region" })).toMatchObject({ storage: "region" });
     expect(chunkRegionKey("world", "Overworld", -1, 2)).toBe("chunk-regions/v1/world/Overworld/-1/2.json");
     expect(() => normalizeChunkBatchPayload({ chunks: [] })).toThrow(/chunks/);
+    expect(
+      normalizeBlockUpdateBatch({
+        world: "world",
+        dimension: "Overworld",
+        chunkX: 0,
+        chunkZ: 0,
+        updates: [{ localX: 1, localZ: 2, block: "minecraft:stone", height: 70 }],
+      }),
+    ).toMatchObject({ updates: [{ localX: 1, localZ: 2, block: "minecraft:stone", height: 70 }] });
   });
 
   it("detects block updates between chunk snapshots", () => {
@@ -259,6 +269,60 @@ describe("worker routes", () => {
     );
     expect(upload.status).toBe(200);
     expect(env.live.messages.some((message) => String(message).includes("block_updates"))).toBe(true);
+  });
+
+  it("applies authenticated dirty block updates to existing chunk snapshots", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk()), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const update = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/block-updates", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          world: "world",
+          dimension: "Overworld",
+          chunkX: 0,
+          chunkZ: 0,
+          updates: [{ localX: 2, localZ: 3, block: "minecraft:stone", height: 71 }],
+          updatedAt: 20,
+        }),
+      }),
+      env,
+      {},
+    );
+    expect(update.status).toBe(200);
+    expect(await update.json()).toMatchObject({ ok: true, missingBase: false, updates: 1 });
+    expect(env.live.messages.at(-1)).toContain("block_updates");
+    const stored = await env.MAP_DATA.objects.get("chunks/v1/world/Overworld/0/0.json").json();
+    const index = 3 * 16 + 2;
+    expect(stored.palette[stored.blocks[index]]).toBe("minecraft:stone");
+    expect(stored.heights[index]).toBe(71);
+  });
+
+  it("reports missing base chunks for dirty block updates", async () => {
+    const env = createEnv();
+    const update = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/block-updates", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          world: "world",
+          dimension: "Overworld",
+          chunkX: 0,
+          chunkZ: 0,
+          updates: [{ localX: 2, localZ: 3, block: "minecraft:stone", height: 71 }],
+          updatedAt: 20,
+        }),
+      }),
+      env,
+      {},
+    );
+    expect(update.status).toBe(200);
+    expect(await update.json()).toMatchObject({ ok: true, missingBase: true, updates: 0 });
+    expect(env.live.messages).toHaveLength(0);
   });
 
   it("accepts authenticated chunk batch uploads without broadcasting by default", async () => {

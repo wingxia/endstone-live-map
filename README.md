@@ -12,7 +12,7 @@ The project is a monorepo:
 
 - 2D top-down highest-block chunks, one native zoom layer for v1.
 - Player positions update independently from terrain chunks.
-- Online players seed nearby chunks as the live-first base map; terrain changes mark dirty chunks and are sampled/uploaded on the same timer.
+- Online players seed a radius-4 chunk area as the live-first base map; terrain changes update only affected top-map block columns.
 - Marker UI is currently hidden. The Worker API and NAS MySQL schema are retained dormant for later restoration.
 - Chunk snapshots and texture atlas files use the R2 `MAP_DATA` binding.
 - Marker storage uses NAS MySQL through Cloudflare Hyperdrive. D1 is not used.
@@ -49,11 +49,13 @@ Copy `plugin/config/live_map.json.example` to the plugin data folder as `live_ma
 For the NAS target in this environment, `mc.service` runs Endstone from `/vol1/1000`; the plugin directory is `/vol1/1000/bedrock_server/plugins`, and the data directory is `/vol1/1000/bedrock_server/plugins/live_map`.
 The current NAS Bedrock level name is `Bedrock level`, which is also the default frontend world filter.
 
-The plugin accepts the current `chunk_*` keys and the legacy `tile_*` names used by older NAS configs. New configs should use `chunk_refresh_seconds`, `max_chunks_per_refresh`, and `upload_chunks`.
+The plugin accepts the current `chunk_*` keys and the legacy `tile_*` names used by older NAS configs. New configs should use `upload_chunks`, `player_seed_radius_chunks`, `player_seed_interval_seconds`, `max_seed_chunks_per_pulse`, `seed_pulse_seconds`, `upload_dirty_blocks`, `dirty_block_push_seconds`, and `max_dirty_blocks_per_push`.
 
-For crash recovery or first smoke tests, keep `auto_seed_chunks` false and `upload_players` true. This preserves live player positions while preventing player login from automatically sampling terrain through Endstone's chunk APIs. If manual terrain sampling is needed, set `upload_chunks` true and use `/livemap render-near 0` or `/livemap render-chunk <chunkX> <chunkZ>` first; only enable `auto_seed_chunks` after the server stays stable with a player online. When automatic seeding is enabled, start conservatively: `scan_radius_chunks` 1-2, `chunk_refresh_seconds` 30, and `max_chunks_per_refresh` 2-4.
+Production defaults seed `player_seed_radius_chunks=4` around each online player, refresh the same player chunk center every `player_seed_interval_seconds=600`, and rate-limit base chunk sampling with `max_seed_chunks_per_pulse=1` every `seed_pulse_seconds=1`. If the player moves into a different chunk, that new radius-4 area is queued immediately rather than waiting for the 10-minute refresh.
 
-The live player path is the primary safe production path. Terrain snapshots are still supported, but automatic player-near seeding is an explicit opt-in because Endstone/Bedrock can segfault inside scheduler tasks when chunk sampling is unsafe in a given server build.
+Dirty block events are column-based: the plugin waits one tick, merges repeated changes for the same `(x,z)` column, and samples/uploads only when the changed block can affect the top-down map surface. Full chunk uploads are still available through `/livemap render-near` and `/livemap render-chunk` for manual repair.
+
+If a server build still crashes while sampling terrain, treat `upload_chunks=false` only as emergency isolation. The required fix is to replace or narrow the sampling backend until player-radius seeding and top-column dirty updates are stable.
 
 ### NAS plugin safety checks
 

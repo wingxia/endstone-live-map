@@ -119,6 +119,14 @@ export default {
         return handleChunkBatchUpload(request, env);
       }
 
+      if (url.pathname === "/api/plugin/block-updates") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleBlockUpdatesUpload(request, env);
+      }
+
       if (url.pathname === "/api/plugin/world-meta") {
         const auth = requirePluginAuth(request, env);
         if (auth) {
@@ -285,6 +293,45 @@ async function handleChunkBatchUpload(request, env) {
     keys: results.map((result) => result.key),
     updates: results.reduce((sum, result) => sum + result.updates, 0),
   });
+}
+
+async function handleBlockUpdatesUpload(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
+  const payload = normalizeBlockUpdateBatch(await request.json());
+  const key = chunkKey(payload.world, payload.dimension, payload.chunkX, payload.chunkZ);
+  const existing = await readR2Json(await bucket.get(key));
+  if (!existing) {
+    return json({ ok: true, missingBase: true, key, updates: 0 });
+  }
+
+  const chunk = normalizeChunkSnapshot(existing);
+  const applied = applyBlockUpdatesToChunk(chunk, payload.updates);
+  chunk.updatedAt = payload.updatedAt;
+  await bucket.put(key, JSON.stringify(chunk), {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+    customMetadata: { world: chunk.world, dimension: chunk.dimension },
+  });
+
+  if (applied.length > 0) {
+    await broadcastLive(
+      env,
+      JSON.stringify({
+        type: "block_updates",
+        world: chunk.world,
+        dimension: chunk.dimension,
+        chunkX: chunk.chunkX,
+        chunkZ: chunk.chunkZ,
+        updates: applied,
+        updatedAt: chunk.updatedAt,
+      }),
+    );
+  }
+
+  return json({ ok: true, missingBase: false, key, updates: applied.length });
 }
 
 async function putChunkSnapshot(bucket, snapshot, options) {
@@ -689,6 +736,35 @@ export function normalizeChunkBatchPayload(payload) {
   return { chunks, broadcast: payload.broadcast === true, storage };
 }
 
+export function normalizeBlockUpdateBatch(payload) {
+  const updates = Array.isArray(payload.updates) ? payload.updates.map((update) => normalizeBlockUpdate(update)) : [];
+  if (updates.length < 1 || updates.length > CHUNK_BLOCK_COUNT) {
+    throw new Error("updates must contain 1-256 entries");
+  }
+  return {
+    world: cleanSegment(payload.world || "world"),
+    dimension: cleanSegment(payload.dimension || "Overworld"),
+    chunkX: numberOrThrow(payload.chunkX, "chunkX"),
+    chunkZ: numberOrThrow(payload.chunkZ, "chunkZ"),
+    updates,
+    updatedAt: numberOrThrow(payload.updatedAt ?? Date.now(), "updatedAt"),
+  };
+}
+
+function normalizeBlockUpdate(update) {
+  const localX = numberOrThrow(update.localX, "updates.localX");
+  const localZ = numberOrThrow(update.localZ, "updates.localZ");
+  if (localX < 0 || localX >= 16 || localZ < 0 || localZ >= 16) {
+    throw new Error("block update local coordinates out of range");
+  }
+  return {
+    localX,
+    localZ,
+    block: cleanBlockId(update.block || "minecraft:air"),
+    height: numberOrThrow(update.height, "updates.height"),
+  };
+}
+
 export function normalizeWorldMeta(payload) {
   const world = cleanSegment(payload.world || "world");
   const dimension = cleanSegment(payload.dimension || "Overworld");
@@ -888,6 +964,27 @@ function coordKey(chunkX, chunkZ) {
 
 function floorDiv(value, divisor) {
   return Math.floor(value / divisor);
+}
+
+function applyBlockUpdatesToChunk(chunk, updates) {
+  const applied = [];
+  for (const update of updates) {
+    let paletteIndex = chunk.palette.indexOf(update.block);
+    if (paletteIndex === -1) {
+      if (chunk.palette.length >= CHUNK_BLOCK_COUNT) {
+        throw new Error("chunk palette is full");
+      }
+      paletteIndex = chunk.palette.push(update.block) - 1;
+    }
+    const index = update.localZ * 16 + update.localX;
+    if (chunk.blocks[index] === paletteIndex && chunk.heights[index] === update.height) {
+      continue;
+    }
+    chunk.blocks[index] = paletteIndex;
+    chunk.heights[index] = update.height;
+    applied.push(update);
+  }
+  return applied;
 }
 
 async function mapWithConcurrency(items, concurrency, fn) {

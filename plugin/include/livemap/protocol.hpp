@@ -24,6 +24,7 @@ struct PlayerState {
 std::string jsonEscape(std::string_view value);
 std::string serializePlayerSnapshot(const std::vector<PlayerState> &players);
 std::string serializeChunkSnapshot(const ChunkSnapshot &snapshot);
+std::string serializeBlockUpdateBatch(const BlockUpdateBatch &batch);
 std::string serializeChunkReady(const ChunkCoord &coord);
 std::string serializeHeartbeat(std::string_view server_id, std::int64_t now_ms);
 

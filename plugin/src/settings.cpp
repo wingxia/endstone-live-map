@@ -117,14 +117,28 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.player_push_seconds = intValue(source, "player_push_seconds", settings.player_push_seconds);
     settings.max_chunks_per_refresh =
         legacyIntValue(source, "max_chunks_per_refresh", "max_tiles_per_refresh", settings.max_chunks_per_refresh);
+    settings.player_seed_radius_chunks = intValue(source, "player_seed_radius_chunks", settings.player_seed_radius_chunks);
+    settings.player_seed_interval_seconds =
+        intValue(source, "player_seed_interval_seconds", settings.player_seed_interval_seconds);
+    settings.max_seed_chunks_per_pulse = intValue(source, "max_seed_chunks_per_pulse", settings.max_seed_chunks_per_pulse);
+    settings.seed_pulse_seconds = intValue(source, "seed_pulse_seconds", settings.seed_pulse_seconds);
+    settings.dirty_block_push_seconds = intValue(source, "dirty_block_push_seconds", settings.dirty_block_push_seconds);
+    settings.max_dirty_blocks_per_push = intValue(source, "max_dirty_blocks_per_push", settings.max_dirty_blocks_per_push);
     settings.upload_chunks = legacyBoolValue(source, "upload_chunks", "upload_tiles", settings.upload_chunks);
     settings.auto_seed_chunks = boolValue(source, "auto_seed_chunks", settings.auto_seed_chunks);
+    settings.upload_dirty_blocks = boolValue(source, "upload_dirty_blocks", settings.upload_dirty_blocks);
     settings.upload_players = boolValue(source, "upload_players", settings.upload_players);
 
     settings.scan_radius_chunks = std::clamp(settings.scan_radius_chunks, 0, 16);
     settings.chunk_refresh_seconds = std::clamp(settings.chunk_refresh_seconds, 5, 3600);
     settings.player_push_seconds = std::clamp(settings.player_push_seconds, 1, 300);
     settings.max_chunks_per_refresh = std::clamp(settings.max_chunks_per_refresh, 1, 64);
+    settings.player_seed_radius_chunks = std::clamp(settings.player_seed_radius_chunks, 0, 8);
+    settings.player_seed_interval_seconds = std::clamp(settings.player_seed_interval_seconds, 30, 7200);
+    settings.max_seed_chunks_per_pulse = std::clamp(settings.max_seed_chunks_per_pulse, 1, 16);
+    settings.seed_pulse_seconds = std::clamp(settings.seed_pulse_seconds, 1, 60);
+    settings.dirty_block_push_seconds = std::clamp(settings.dirty_block_push_seconds, 1, 60);
+    settings.max_dirty_blocks_per_push = std::clamp(settings.max_dirty_blocks_per_push, 1, 512);
     return settings;
 }
 
@@ -141,8 +155,15 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"chunk_refresh_seconds\": 20,\n"
         << "  \"player_push_seconds\": 1,\n"
         << "  \"max_chunks_per_refresh\": 32,\n"
+        << "  \"player_seed_radius_chunks\": 4,\n"
+        << "  \"player_seed_interval_seconds\": 600,\n"
+        << "  \"max_seed_chunks_per_pulse\": 1,\n"
+        << "  \"seed_pulse_seconds\": 1,\n"
+        << "  \"dirty_block_push_seconds\": 1,\n"
+        << "  \"max_dirty_blocks_per_push\": 64,\n"
         << "  \"upload_chunks\": true,\n"
         << "  \"auto_seed_chunks\": false,\n"
+        << "  \"upload_dirty_blocks\": true,\n"
         << "  \"upload_players\": true\n"
         << "}\n";
 }
