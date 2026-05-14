@@ -4,6 +4,7 @@ const PLANT_EXACT_BLOCKS = new Set([
   "minecraft:bamboo_sapling",
   "minecraft:big_dripleaf",
   "minecraft:brown_mushroom",
+  "minecraft:bush",
   "minecraft:cactus_flower",
   "minecraft:crimson_fungus",
   "minecraft:deadbush",
@@ -63,20 +64,30 @@ const PLANT_TOKENS = [
 ];
 
 const CUTOUT_SURFACE_TOKENS = [
+  "amethyst_cluster",
   "banner",
+  "bell",
+  "brewing_stand",
   "button",
+  "campfire",
   "candle",
+  "carpet",
   "chain",
   "cobweb",
+  "conduit",
   "copper_grate",
+  "coral",
   "door",
   "fence",
   "fence_gate",
+  "flower_pot",
   "grate",
   "bars",
+  "head",
   "iron_bars",
   "ladder",
   "lantern",
+  "leaf_litter",
   "lever",
   "pane",
   "pressure_plate",
@@ -84,12 +95,21 @@ const CUTOUT_SURFACE_TOKENS = [
   "redstone_torch",
   "redstone_wire",
   "scaffolding",
+  "sea_pickle",
   "sign",
+  "skull",
+  "snow_layer",
   "torch",
   "trapdoor",
   "tripwire",
+  "tripwire_hook",
+  "turtle_egg",
   "web",
 ];
+
+const CUTOUT_SURFACE_EXACT_EXCLUSIONS = new Set(["minecraft:jack_o_lantern", "minecraft:sea_lantern"]);
+
+const CUTOUT_SURFACE_SUFFIX_EXCLUSIONS = ["_coral_block"];
 
 export function isPlantBlock(blockId: string) {
   const id = normalizeBlockId(blockId);
@@ -101,6 +121,9 @@ export function isPlantBlock(blockId: string) {
 
 export function isMapDecorationBlock(blockId: string) {
   const id = normalizeBlockId(blockId);
+  if (CUTOUT_SURFACE_EXACT_EXCLUSIONS.has(id) || CUTOUT_SURFACE_SUFFIX_EXCLUSIONS.some((suffix) => id.endsWith(suffix))) {
+    return false;
+  }
   return isPlantBlock(id) || CUTOUT_SURFACE_TOKENS.some((token) => id.includes(token));
 }
 

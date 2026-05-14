@@ -14,6 +14,14 @@ function layerWithBlocks(entries) {
     5: block("minecraft:glass_pane"),
     6: block("minecraft:glass"),
     7: block("minecraft:grass_path"),
+    8: block("minecraft:lantern"),
+    9: block("minecraft:tube_coral_fan"),
+    10: block("minecraft:tube_coral_block"),
+    11: block("minecraft:bush"),
+    12: block("minecraft:leaf_litter"),
+    13: block("minecraft:horn_coral"),
+    14: block("minecraft:sea_pickle"),
+    15: block("minecraft:cherry_leaves"),
   };
   for (const entry of entries) {
     block_indices[offsetToSubchunkIndex(entry.x, entry.y, entry.z)] = entry.paletteIndex;
@@ -133,6 +141,72 @@ describe("chunk snapshot importer helpers", () => {
     expect(snapshot.overlayHeights[3 * 16 + 3]).toBe(-64);
     expect(snapshot.palette[snapshot.blocks[4 * 16 + 4]]).toBe("minecraft:grass_path");
     expect(snapshot.heights[4 * 16 + 4]).toBe(6);
+  });
+
+  it("keeps small and flat decoration blocks as overlays above the supporting surface", () => {
+    const snapshot = buildChunkSnapshot({
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkX: 0,
+      chunkZ: 0,
+      subchunks: [
+        {
+          y: 0,
+          layers: [
+            layerWithBlocks([
+              { x: 1, y: 5, z: 1, paletteIndex: 8 },
+              { x: 1, y: 4, z: 1, paletteIndex: 2 },
+              { x: 2, y: 6, z: 2, paletteIndex: 9 },
+              { x: 2, y: 3, z: 2, paletteIndex: 1 },
+              { x: 3, y: 7, z: 3, paletteIndex: 10 },
+              { x: 3, y: 2, z: 3, paletteIndex: 1 },
+              { x: 4, y: 8, z: 4, paletteIndex: 11 },
+              { x: 4, y: 4, z: 4, paletteIndex: 2 },
+              { x: 5, y: 9, z: 5, paletteIndex: 12 },
+              { x: 5, y: 4, z: 5, paletteIndex: 1 },
+              { x: 6, y: 10, z: 6, paletteIndex: 13 },
+              { x: 6, y: 4, z: 6, paletteIndex: 1 },
+              { x: 7, y: 11, z: 7, paletteIndex: 14 },
+              { x: 7, y: 4, z: 7, paletteIndex: 2 },
+              { x: 8, y: 12, z: 8, paletteIndex: 15 },
+              { x: 8, y: 4, z: 8, paletteIndex: 2 },
+            ]),
+          ],
+        },
+      ],
+      updatedAt: 100,
+    });
+
+    expect(snapshot.palette[snapshot.blocks[1 * 16 + 1]]).toBe("minecraft:grass_block");
+    expect(snapshot.heights[1 * 16 + 1]).toBe(4);
+    expect(snapshot.palette[snapshot.overlayBlocks[1 * 16 + 1]]).toBe("minecraft:lantern");
+    expect(snapshot.overlayHeights[1 * 16 + 1]).toBe(5);
+    expect(snapshot.palette[snapshot.blocks[2 * 16 + 2]]).toBe("minecraft:stone");
+    expect(snapshot.heights[2 * 16 + 2]).toBe(3);
+    expect(snapshot.palette[snapshot.overlayBlocks[2 * 16 + 2]]).toBe("minecraft:tube_coral_fan");
+    expect(snapshot.overlayHeights[2 * 16 + 2]).toBe(6);
+    expect(snapshot.palette[snapshot.blocks[3 * 16 + 3]]).toBe("minecraft:tube_coral_block");
+    expect(snapshot.heights[3 * 16 + 3]).toBe(7);
+    expect(snapshot.palette[snapshot.overlayBlocks[3 * 16 + 3]]).toBe("minecraft:air");
+    expect(snapshot.palette[snapshot.blocks[4 * 16 + 4]]).toBe("minecraft:grass_block");
+    expect(snapshot.heights[4 * 16 + 4]).toBe(4);
+    expect(snapshot.palette[snapshot.overlayBlocks[4 * 16 + 4]]).toBe("minecraft:bush");
+    expect(snapshot.overlayHeights[4 * 16 + 4]).toBe(8);
+    expect(snapshot.palette[snapshot.blocks[5 * 16 + 5]]).toBe("minecraft:stone");
+    expect(snapshot.heights[5 * 16 + 5]).toBe(4);
+    expect(snapshot.palette[snapshot.overlayBlocks[5 * 16 + 5]]).toBe("minecraft:leaf_litter");
+    expect(snapshot.overlayHeights[5 * 16 + 5]).toBe(9);
+    expect(snapshot.palette[snapshot.blocks[6 * 16 + 6]]).toBe("minecraft:stone");
+    expect(snapshot.heights[6 * 16 + 6]).toBe(4);
+    expect(snapshot.palette[snapshot.overlayBlocks[6 * 16 + 6]]).toBe("minecraft:horn_coral");
+    expect(snapshot.overlayHeights[6 * 16 + 6]).toBe(10);
+    expect(snapshot.palette[snapshot.blocks[7 * 16 + 7]]).toBe("minecraft:grass_block");
+    expect(snapshot.heights[7 * 16 + 7]).toBe(4);
+    expect(snapshot.palette[snapshot.overlayBlocks[7 * 16 + 7]]).toBe("minecraft:sea_pickle");
+    expect(snapshot.overlayHeights[7 * 16 + 7]).toBe(11);
+    expect(snapshot.palette[snapshot.blocks[8 * 16 + 8]]).toBe("minecraft:cherry_leaves");
+    expect(snapshot.heights[8 * 16 + 8]).toBe(12);
+    expect(snapshot.palette[snapshot.overlayBlocks[8 * 16 + 8]]).toBe("minecraft:air");
   });
 
   it("summarizes and merges world metadata", () => {

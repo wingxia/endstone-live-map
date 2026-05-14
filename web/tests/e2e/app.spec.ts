@@ -184,11 +184,48 @@ test("renders plant and cutout overlays without dark tile holes", async ({ page 
     dimension: "Overworld",
     chunkX: 0,
     chunkZ: 0,
-    palette: ["minecraft:grass_block", "minecraft:air", "minecraft:poppy", "minecraft:glass_pane"],
+    palette: [
+      "minecraft:grass_block",
+      "minecraft:air",
+      "minecraft:poppy",
+      "minecraft:glass_pane",
+      "minecraft:lantern",
+      "minecraft:tube_coral_fan",
+      "minecraft:sea_pickle",
+      "minecraft:bush",
+      "minecraft:leaf_litter",
+      "minecraft:horn_coral",
+    ],
     blocks: Array.from({ length: 256 }, () => 0),
     heights: Array.from({ length: 256 }, () => 64),
-    overlayBlocks: Array.from({ length: 256 }, (_, index) => (index === 0 ? 2 : index === 1 ? 3 : 1)),
-    overlayHeights: Array.from({ length: 256 }, (_, index) => (index === 0 || index === 1 ? 65 : -64)),
+    overlayBlocks: Array.from({ length: 256 }, (_, index) => {
+      if (index === 0) {
+        return 2;
+      }
+      if (index === 1) {
+        return 3;
+      }
+      if (index === 2) {
+        return 4;
+      }
+      if (index === 3) {
+        return 5;
+      }
+      if (index === 4) {
+        return 6;
+      }
+      if (index === 5) {
+        return 7;
+      }
+      if (index === 6) {
+        return 8;
+      }
+      if (index === 7) {
+        return 9;
+      }
+      return 1;
+    }),
+    overlayHeights: Array.from({ length: 256 }, (_, index) => (index >= 0 && index <= 7 ? 65 : -64)),
     updatedAt: 1,
   };
 
@@ -238,8 +275,28 @@ test("renders plant and cutout overlays without dark tile holes", async ({ page 
   await expect.poll(() => firstChunkTileHasNoDarkHoles(page)).toBe(true);
 });
 
-test("renders land claims, point claims, and teleport markers", async ({ page }) => {
+test("renders cherry leaves from the atlas and flat overlays over the base block", async ({ page }) => {
+  const atlasPng = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAADAAAAAQCAYAAABQrvyxAAACQUlEQVR4AcXBIY4ehhmE4Xf/GPcoPoHvMcSkfELmBPUFPjQ4UiUXDCwqKKpkUmDQvUFAQGhhpGoTWEUKSGxpn+fpv3/794tvNMI3GuEbjfCNRvhGI3yjEb7RCN948me+xF///K8nvsDDNxrhG43wjUb4RiN8oxG+0QjfaIRvNOK1PRrhG43wjUb4RiN8oxG+0QjfaIRvNMI3Xtsb32iEbzTCNxrhG43wjUb4RiN8oxG+0Yhvf/rM1/Dp/dsXfod3H5+f+MWbRvhGI3yjEb7RCN9ohG80wjca4RuN8I0n81W8+/j8xB/w8I1G+EYjfKMRvtEI32iEbzTCNxrhG4342j69f/vCb/j0/u0Lv/JohG80wjca4RuN8I1G+EYjfKMRvtEI33htD99ohG80wjca4RuN8I1G+EYjfKMRvtGI1/ZohG80wjca4RuN8I1G+EYjfKMRvtEI33htD99ohG80wjca4RuN8I1G+EYjfKMRvtGI1/ZohG80wjca4RuN8I1G+EYjfKMRvtEI33ht3/zw/Z/+0gjfaIRvNMI3GuEbjfCNRvhGI3yjEf/43z/5Ev/5+/cf+D/fPf/4gd/w3fOPH/iVN43wjUb4RiN8oxG+0QjfaIRvNMI3GuEbT+ar+PT+7Qu/w7uPz0/84o1vNMI3GuEbjfCNRvhGI3yjEb7RCN9oxLc/feZrePfx+Yk/4NEI32iEbzTCNxrhG43wjUb4RiN8oxG+8doevtEI32iEbzTCNxrhG43wjUb4RiN8oxGv7Wc7VaYyEqiKFQAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  const targetChunk = {
+    world: "Bedrock level",
+    dimension: "Overworld",
+    chunkX: 0,
+    chunkZ: 0,
+    palette: ["minecraft:cherry_leaves", "minecraft:grass_block", "minecraft:leaf_litter", "minecraft:air"],
+    blocks: Array.from({ length: 256 }, (_, index) => (index === 0 ? 0 : 1)),
+    heights: Array.from({ length: 256 }, () => 64),
+    overlayBlocks: Array.from({ length: 256 }, (_, index) => (index === 1 ? 2 : 3)),
+    overlayHeights: Array.from({ length: 256 }, (_, index) => (index === 1 ? 65 : -64)),
+    updatedAt: 1,
+  };
+
   await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
   await page.route("**/api/worlds", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -254,84 +311,51 @@ test("renders land claims, point claims, and teleport markers", async ({ page })
             importedAt: 1,
             updatedAt: 1,
             bounds: {
-              minChunkX: -24,
-              maxChunkX: -14,
-              minChunkZ: -38,
-              maxChunkZ: -28,
-              minBlockX: -384,
-              maxBlockX: -209,
-              minBlockZ: -608,
-              maxBlockZ: -449,
+              minChunkX: 0,
+              maxChunkX: 0,
+              minChunkZ: 0,
+              maxChunkZ: 0,
+              minBlockX: 0,
+              maxBlockX: 15,
+              minBlockZ: 0,
+              maxBlockZ: 15,
             },
-            topBlocks: { "minecraft:grass_block": 256 },
+            topBlocks: { "minecraft:cherry_leaves": 1, "minecraft:grass_block": 255 },
           },
         ],
       }),
     });
   });
   await page.route("**/api/chunks?**", async (route) => {
-    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [targetChunk], missing: [] }) });
   });
   await page.route("**/api/textures/manifest", async (route) => {
-    await route.fulfill({ status: 404, body: "texture manifest not found" });
-  });
-  await page.route("**/api/lands?**", async (route) => {
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
         version: 1,
-        world: "Bedrock_level",
-        dimension: "Overworld",
-        updatedAt: 123,
-        claims: [
-          {
-            id: "GieZi8670:主城区:Overworld",
-            owner: "GieZi8670",
-            name: "主城区",
-            world: "Bedrock_level",
-            dimension: "Overworld",
-            minX: -375,
-            maxX: -227,
-            minY: 70,
-            maxY: 300,
-            minZ: -580,
-            maxZ: -473,
-            teleport: { x: -352, y: 70, z: -479 },
-            members: ["wingxia"],
-            parent: "",
-            children: ["猪人塔"],
-            nested: false,
-            updatedAt: 123,
-          },
-          {
-            id: "GieZi8670:白色青蛙:Overworld",
-            owner: "GieZi8670",
-            name: "白色青蛙",
-            world: "Bedrock_level",
-            dimension: "Overworld",
-            minX: -330,
-            maxX: -330,
-            minY: 63,
-            maxY: 63,
-            minZ: -540,
-            maxZ: -540,
-            teleport: { x: -330, y: 63, z: -540 },
-            members: [],
-            parent: "",
-            children: [],
-            nested: false,
-            updatedAt: 123,
-          },
-        ],
+        tileSize: 16,
+        atlas: "/textures/atlas.png",
+        blocks: {
+          "minecraft:cherry_leaves": { x: 0, y: 0, w: 16, h: 16 },
+          cherry_leaves: { x: 0, y: 0, w: 16, h: 16 },
+          "minecraft:grass_block": { x: 16, y: 0, w: 16, h: 16 },
+          grass_block: { x: 16, y: 0, w: 16, h: 16 },
+          "minecraft:leaf_litter": { x: 32, y: 0, w: 16, h: 16 },
+          leaf_litter: { x: 32, y: 0, w: 16, h: 16 },
+        },
       }),
     });
   });
+  await page.route("**/textures/atlas.png", async (route) => {
+    await route.fulfill({ contentType: "image/png", body: atlasPng });
+  });
 
   await page.goto("/");
-  await expect(page.getByText("主城区")).toBeVisible();
-  await expect(page.getByText("白色青蛙")).toBeVisible();
-  await expect(page.getByLabel("地图状态")).toContainText("2");
-  await expect.poll(() => page.locator(".leaflet-interactive").count()).toBeGreaterThanOrEqual(3);
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => firstChunkTileHasColor(page, [94, 51, 114])).toBe(true);
+  await expect.poll(() => firstChunkTileHasColor(page, [95, 159, 63])).toBe(true);
+  await expect.poll(() => firstChunkTileHasColor(page, [196, 92, 46])).toBe(true);
 });
 
 test("requests live player chunks before a world import exists", async ({ page }) => {
@@ -484,6 +508,102 @@ test("does not reset user zoom on live player refresh", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Zoom out" })).toBeEnabled();
 });
 
+test("renders land claims, point claims, and teleport markers", async ({ page }) => {
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        worlds: [
+          {
+            version: 1,
+            world: "Bedrock level",
+            dimension: "Overworld",
+            status: "complete",
+            chunkCount: 1,
+            importedAt: 1,
+            updatedAt: 1,
+            bounds: {
+              minChunkX: -24,
+              maxChunkX: -14,
+              minChunkZ: -38,
+              maxChunkZ: -28,
+              minBlockX: -384,
+              maxBlockX: -209,
+              minBlockZ: -608,
+              maxBlockZ: -449,
+            },
+            topBlocks: { "minecraft:grass_block": 256 },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({ status: 404, body: "texture manifest not found" });
+  });
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        world: "Bedrock_level",
+        dimension: "Overworld",
+        updatedAt: 123,
+        claims: [
+          {
+            id: "GieZi8670:主城区:Overworld",
+            owner: "GieZi8670",
+            name: "主城区",
+            world: "Bedrock_level",
+            dimension: "Overworld",
+            minX: -375,
+            maxX: -227,
+            minY: 70,
+            maxY: 300,
+            minZ: -580,
+            maxZ: -473,
+            teleport: { x: -352, y: 70, z: -479 },
+            members: ["wingxia"],
+            parent: "",
+            children: ["猪人塔"],
+            nested: false,
+            updatedAt: 123,
+          },
+          {
+            id: "GieZi8670:白色青蛙:Overworld",
+            owner: "GieZi8670",
+            name: "白色青蛙",
+            world: "Bedrock_level",
+            dimension: "Overworld",
+            minX: -330,
+            maxX: -330,
+            minY: 63,
+            maxY: 63,
+            minZ: -540,
+            maxZ: -540,
+            teleport: { x: -330, y: 63, z: -540 },
+            members: [],
+            parent: "",
+            children: [],
+            nested: false,
+            updatedAt: 123,
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("主城区")).toBeVisible();
+  await expect(page.getByText("白色青蛙")).toBeVisible();
+  await expect(page.getByLabel("地图状态")).toContainText("2");
+  await expect.poll(() => page.locator(".leaflet-interactive").count()).toBeGreaterThanOrEqual(3);
+});
+
 async function pageHasGrassPixels(page: Page) {
   return page.evaluate(() => {
     const grass = [95, 159, 63];
@@ -537,4 +657,22 @@ async function firstChunkTileHasNoDarkHoles(page: Page) {
     }
     return false;
   });
+}
+
+async function firstChunkTileHasColor(page: Page, color: [number, number, number]) {
+  return page.evaluate(([r, g, b]) => {
+    for (const canvas of document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")) {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        continue;
+      }
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      for (let index = 0; index < data.length; index += 4) {
+        if (data[index] === r && data[index + 1] === g && data[index + 2] === b && data[index + 3] === 255) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }, color);
 }

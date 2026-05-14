@@ -83,13 +83,30 @@ void testMapBlockClassification()
     assert(!livemap::isMapSurfaceBlock("minecraft:oak_trapdoor"));
     assert(livemap::isMapSurfaceBlock("minecraft:grass_block"));
     assert(livemap::isMapSurfaceBlock("minecraft:oak_leaves"));
+    assert(livemap::isMapSurfaceBlock("minecraft:cherry_leaves"));
+    assert(!livemap::isMapSurfaceBlock("minecraft:bush"));
+    assert(!livemap::isMapSurfaceBlock("minecraft:leaf_litter"));
     assert(livemap::isMapSurfaceBlock("minecraft:water"));
     assert(!livemap::isMapSurfaceBlock("minecraft:water", false));
     assert(livemap::isPlantBlock("minecraft:tall_grass"));
+    assert(livemap::isPlantBlock("minecraft:bush"));
     assert(!livemap::isPlantBlock("minecraft:grass_block"));
     assert(!livemap::isPlantBlock("minecraft:grass_path"));
     assert(!livemap::isPlantBlock("minecraft:dirt_with_roots"));
     assert(livemap::isMapDecorationBlock("minecraft:iron_bars"));
+    assert(livemap::isMapDecorationBlock("minecraft:lantern"));
+    assert(livemap::isMapDecorationBlock("minecraft:soul_lantern"));
+    assert(!livemap::isMapDecorationBlock("minecraft:sea_lantern"));
+    assert(!livemap::isMapDecorationBlock("minecraft:jack_o_lantern"));
+    assert(livemap::isMapDecorationBlock("minecraft:tube_coral"));
+    assert(livemap::isMapDecorationBlock("minecraft:tube_coral_fan"));
+    assert(livemap::isMapDecorationBlock("minecraft:horn_coral"));
+    assert(!livemap::isMapDecorationBlock("minecraft:tube_coral_block"));
+    assert(!livemap::isMapDecorationBlock("minecraft:dead_tube_coral_block"));
+    assert(livemap::isMapDecorationBlock("minecraft:sea_pickle"));
+    assert(livemap::isMapDecorationBlock("minecraft:bush"));
+    assert(livemap::isMapDecorationBlock("minecraft:leaf_litter"));
+    assert(!livemap::isMapDecorationBlock("minecraft:cherry_leaves"));
     assert(!livemap::isMapDecorationBlock("minecraft:glass"));
 }
 

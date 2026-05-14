@@ -415,11 +415,11 @@ function drawDecorationBlock(ctx: CanvasRenderingContext2D, atlas: AtlasResource
   }
   const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
   if (atlas.image && entry) {
-    const inset = layer === "overlay" ? decorationInset(blockId, size) : 0;
+    const inset = layer === "overlay" ? decorationInset(blockId, size) : baseDecorationInset(blockId, size);
     drawAtlasEntry(ctx, atlas.image, entry, x + inset, y + inset, Math.max(1, size - inset * 2));
     return;
   }
-  drawDecorationGlyph(ctx, blockId, x, y, size);
+  drawDecorationGlyph(ctx, blockId, x, y, size, layer);
 }
 
 function overlayBlockAt(chunk: ChunkSnapshot, index: number) {
@@ -445,8 +445,28 @@ function airPaletteIndex(chunk: ChunkSnapshot) {
   return chunk.palette.push("minecraft:air") - 1;
 }
 
+function baseDecorationInset(blockId: string, size: number) {
+  const id = blockId.toLowerCase();
+  if (isFlatDecorationBlock(id)) {
+    return 0;
+  }
+  if (isSmallDecorationBlock(id)) {
+    return decorationInset(blockId, size);
+  }
+  return 0;
+}
+
 function decorationInset(blockId: string, size: number) {
   const id = blockId.toLowerCase();
+  if (isFlatDecorationBlock(id)) {
+    return 0;
+  }
+  if (isTinyDecorationBlock(id)) {
+    return Math.max(1, Math.floor(size * 0.36));
+  }
+  if (isSmallDecorationBlock(id)) {
+    return Math.max(1, Math.floor(size * 0.3));
+  }
   if (id.includes("pane") || id.includes("bars") || id.includes("fence") || id.includes("rail") || id.includes("chain")) {
     return Math.max(1, Math.floor(size * 0.28));
   }
@@ -456,8 +476,47 @@ function decorationInset(blockId: string, size: number) {
   return Math.max(1, Math.floor(size * 0.18));
 }
 
-function drawDecorationGlyph(ctx: CanvasRenderingContext2D, blockId: string, x: number, y: number, size: number) {
-  const inset = decorationInset(blockId, size);
+function isTinyDecorationBlock(id: string) {
+  return (
+    id.includes("button") ||
+    id.includes("candle") ||
+    id.includes("flower_pot") ||
+    id.includes("sea_pickle") ||
+    id.includes("torch") ||
+    id.includes("tripwire_hook") ||
+    id.includes("turtle_egg")
+  );
+}
+
+function isFlatDecorationBlock(id: string) {
+  return id.includes("leaf_litter") || id.includes("carpet") || id.includes("snow_layer");
+}
+
+function isSmallDecorationBlock(id: string) {
+  return (
+    isTinyDecorationBlock(id) ||
+    id.includes("amethyst_cluster") ||
+    id.includes("bell") ||
+    id.includes("brewing_stand") ||
+    id.includes("conduit") ||
+    id.includes("coral") ||
+    id.includes("head") ||
+    id.includes("lantern") ||
+    id.includes("skull")
+  );
+}
+
+function drawDecorationGlyph(ctx: CanvasRenderingContext2D, blockId: string, x: number, y: number, size: number, layer: "base" | "overlay") {
+  const inset = layer === "overlay" ? decorationInset(blockId, size) : baseDecorationInset(blockId, size);
+  if (layer === "overlay" && isFlatDecorationBlock(blockId.toLowerCase())) {
+    const band = Math.max(1, Math.floor(size * 0.18));
+    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillRect(x, y, size, band);
+    ctx.fillRect(x, y + Math.max(0, size - band), size, band);
+    ctx.fillRect(x, y, band, size);
+    ctx.fillRect(x + Math.max(0, size - band), y, band, size);
+    return;
+  }
   ctx.fillStyle = fallbackTextureColor(blockId);
   ctx.fillRect(x + inset, y + inset, Math.max(1, size - inset * 2), Math.max(1, size - inset * 2));
 }
@@ -560,7 +619,6 @@ export function usesMapTint(blockId: string) {
     id.includes("short_grass") ||
     id.includes("tall_grass") ||
     id.includes("fern") ||
-    id.includes("leaves") ||
     id.includes("vine")
   );
 }
