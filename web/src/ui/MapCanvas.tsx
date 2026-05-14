@@ -4,7 +4,6 @@ import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type Land
 import { blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "./coords";
 import { createChunkGridLayer, INITIAL_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
-const MAX_INITIAL_CHUNKS = 96;
 const LIVE_PLAYER_PADDING_BLOCKS = 96;
 
 interface CoordinateState {
@@ -112,8 +111,8 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
     if (!state || !mapReady) {
       return;
     }
-    const meta = isWorldMetaForMap(worldMeta, world, dimension) ? worldMeta : null;
     const playerBounds = players.length > 0 ? boundsForPlayers(players) : null;
+    const meta = isWorldMetaForMap(worldMeta, world, dimension) ? worldMeta : null;
     const autoFitKey = autoFitKeyFor(world, dimension, meta, playerBounds);
     if (!meta && !playerBounds) {
       state.chunkLayer.setActive(false);
@@ -127,7 +126,7 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
     if (autoFitKeyRef.current === autoFitKey) {
       return;
     }
-    if (!meta && playerBounds) {
+    if (playerBounds) {
       state.map.fitBounds(
         [
           minecraftToLeaflet(playerBounds.minX, playerBounds.maxZ),
@@ -138,37 +137,8 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
       autoFitKeyRef.current = autoFitKey;
       return;
     }
-    if (!meta) {
-      return;
-    }
-    const bounds = meta.bounds;
-    const widthChunks = bounds.maxChunkX - bounds.minChunkX + 1;
-    const heightChunks = bounds.maxChunkZ - bounds.minChunkZ + 1;
-    if (widthChunks > MAX_INITIAL_CHUNKS || heightChunks > MAX_INITIAL_CHUNKS) {
-      const centerChunkX = clampChunk(0, bounds.minChunkX, bounds.maxChunkX);
-      const centerChunkZ = clampChunk(0, bounds.minChunkZ, bounds.maxChunkZ);
-      const half = Math.floor(MAX_INITIAL_CHUNKS / 2);
-      const minChunkX = clampChunk(centerChunkX - half, bounds.minChunkX, bounds.maxChunkX);
-      const maxChunkX = clampChunk(centerChunkX + half, bounds.minChunkX, bounds.maxChunkX);
-      const minChunkZ = clampChunk(centerChunkZ - half, bounds.minChunkZ, bounds.maxChunkZ);
-      const maxChunkZ = clampChunk(centerChunkZ + half, bounds.minChunkZ, bounds.maxChunkZ);
-      state.map.fitBounds(
-        [
-          minecraftToLeaflet(minChunkX * 16, maxChunkZ * 16 + 15),
-          minecraftToLeaflet(maxChunkX * 16 + 15, minChunkZ * 16),
-        ],
-        { animate: false, padding: [24, 24] },
-      );
-      autoFitKeyRef.current = autoFitKey;
-      return;
-    }
-    state.map.fitBounds(
-      [
-        minecraftToLeaflet(bounds.minBlockX, bounds.maxBlockZ),
-        minecraftToLeaflet(bounds.maxBlockX, bounds.minBlockZ),
-      ],
-      { animate: false, padding: [24, 24] },
-    );
+    const initialCenter = meta ? initialCenterForBounds(meta.bounds) : { x: 0, z: 0 };
+    state.map.setView(minecraftToLeaflet(initialCenter.x, initialCenter.z), INITIAL_MAP_ZOOM, { animate: false });
     autoFitKeyRef.current = autoFitKey;
   }, [dimension, mapReady, players, world, worldMeta]);
 
@@ -330,7 +300,14 @@ function isWorldMetaForMap(worldMeta: WorldMeta | null, world: string, dimension
   return Boolean(worldMeta && worldMeta.dimension === dimension && segmentKey(worldMeta.world) === segmentKey(world));
 }
 
-function clampChunk(value: number, min: number, max: number) {
+function initialCenterForBounds(bounds: WorldMeta["bounds"]) {
+  return {
+    x: clampNumber(0, bounds.minBlockX, bounds.maxBlockX),
+    z: clampNumber(0, bounds.minBlockZ, bounds.maxBlockZ),
+  };
+}
+
+function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
