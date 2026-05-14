@@ -284,6 +284,84 @@ test("keeps loaded chunks cached when panning away and back", async ({ page }) =
   expect(chunkRequests.get("0,0") || 0).toBe(1);
 });
 
+test("renders visible chunks progressively before slow distant chunk requests finish", async ({ page }) => {
+  let slowRequestCount = 0;
+  const grassChunk = {
+    world: "Bedrock level",
+    dimension: "Overworld",
+    chunkX: 0,
+    chunkZ: 0,
+    palette: ["minecraft:grass_block"],
+    blocks: Array.from({ length: 256 }, () => 0),
+    heights: Array.from({ length: 256 }, () => 64),
+    updatedAt: 1,
+  };
+
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        worlds: [
+          {
+            version: 1,
+            world: "Bedrock level",
+            dimension: "Overworld",
+            status: "complete",
+            chunkCount: 257,
+            importedAt: 1,
+            updatedAt: 1,
+            bounds: {
+              minChunkX: 0,
+              maxChunkX: 16,
+              minChunkZ: 0,
+              maxChunkZ: 16,
+              minBlockX: 0,
+              maxBlockX: 271,
+              minBlockZ: 0,
+              maxBlockZ: 271,
+            },
+            topBlocks: { "minecraft:grass_block": 256 },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    const url = new URL(route.request().url());
+    const minChunkX = Number(url.searchParams.get("minChunkX"));
+    const maxChunkX = Number(url.searchParams.get("maxChunkX"));
+    const minChunkZ = Number(url.searchParams.get("minChunkZ"));
+    const maxChunkZ = Number(url.searchParams.get("maxChunkZ"));
+    const includesGrass = minChunkX <= 0 && maxChunkX >= 0 && minChunkZ <= 0 && maxChunkZ >= 0;
+    if (!includesGrass && minChunkX >= 16) {
+      slowRequestCount += 1;
+      await new Promise((resolve) => setTimeout(resolve, 30_000));
+    }
+    const chunks = includesGrass ? [grassChunk] : [];
+    const missing: Array<{ chunkX: number; chunkZ: number }> = [];
+    for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
+      for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
+        if (!chunks.some((chunk) => chunk.chunkX === chunkX && chunk.chunkZ === chunkZ)) {
+          missing.push({ chunkX, chunkZ });
+        }
+      }
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks, missing }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({ status: 404, body: "texture manifest not found" });
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => slowRequestCount).toBeGreaterThan(0);
+  await expect.poll(() => pageHasGrassPixels(page), { timeout: 2_000 }).toBe(true);
+});
+
 test("renders plant and cutout overlays without dark tile holes", async ({ page }) => {
   const targetChunk = {
     world: "Bedrock level",
