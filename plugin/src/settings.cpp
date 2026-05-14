@@ -130,6 +130,7 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.chunk_upload_batch_size = intValue(source, "chunk_upload_batch_size", settings.chunk_upload_batch_size);
     settings.chunk_upload_flush_seconds =
         intValue(source, "chunk_upload_flush_seconds", settings.chunk_upload_flush_seconds);
+    settings.http_timeout_seconds = intValue(source, "http_timeout_seconds", settings.http_timeout_seconds);
     settings.dirty_block_push_seconds = intValue(source, "dirty_block_push_seconds", settings.dirty_block_push_seconds);
     settings.land_push_seconds = intValue(source, "land_push_seconds", settings.land_push_seconds);
     settings.max_dirty_blocks_per_push = intValue(source, "max_dirty_blocks_per_push", settings.max_dirty_blocks_per_push);
@@ -151,6 +152,7 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.player_seed_join_delay_seconds = std::clamp(settings.player_seed_join_delay_seconds, 0, 300);
     settings.chunk_upload_batch_size = std::clamp(settings.chunk_upload_batch_size, 1, 128);
     settings.chunk_upload_flush_seconds = std::clamp(settings.chunk_upload_flush_seconds, 1, 60);
+    settings.http_timeout_seconds = std::clamp(settings.http_timeout_seconds, 5, 120);
     settings.dirty_block_push_seconds = std::clamp(settings.dirty_block_push_seconds, 1, 60);
     settings.land_push_seconds = std::clamp(settings.land_push_seconds, 10, 3600);
     settings.max_dirty_blocks_per_push = std::clamp(settings.max_dirty_blocks_per_push, 1, 512);
@@ -179,8 +181,9 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"max_seed_chunks_per_pulse\": 1,\n"
         << "  \"seed_pulse_seconds\": 1,\n"
         << "  \"player_seed_join_delay_seconds\": 10,\n"
-        << "  \"chunk_upload_batch_size\": 32,\n"
+        << "  \"chunk_upload_batch_size\": 8,\n"
         << "  \"chunk_upload_flush_seconds\": 10,\n"
+        << "  \"http_timeout_seconds\": 30,\n"
         << "  \"dirty_block_push_seconds\": 1,\n"
         << "  \"land_push_seconds\": 60,\n"
         << "  \"max_dirty_blocks_per_push\": 64,\n"

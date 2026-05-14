@@ -68,6 +68,8 @@ struct ChunkUploadMeta {
     std::int64_t updated_at_ms{};
 };
 
+constexpr std::int64_t kChunkBatchRetryDelayMs = 30000;
+
 std::string chunkName(const livemap::ChunkCoord &coord)
 {
     return coord.world + "/" + coord.dimension + "/" + std::to_string(coord.x) + "/" + std::to_string(coord.z);
@@ -370,7 +372,8 @@ public:
             settings_.max_seed_chunks_per_pulse, " seedPulse=", settings_.seed_pulse_seconds,
             "s playerSeedJoinDelay=", settings_.player_seed_join_delay_seconds, "s chunkUploadBatch=",
             settings_.chunk_upload_batch_size, " chunkUploadFlush=", settings_.chunk_upload_flush_seconds,
-            "s dirtyBlockPush=", settings_.dirty_block_push_seconds, "s maxDirtyBlocks=",
+            "s httpTimeout=", settings_.http_timeout_seconds, "s dirtyBlockPush=", settings_.dirty_block_push_seconds,
+            "s maxDirtyBlocks=",
             settings_.max_dirty_blocks_per_push, " maxUploadQueue=", settings_.max_upload_queue_size,
             " uploadLands=", settings_.upload_lands, " landPush=", settings_.land_push_seconds,
             "s landConfig=", settings_.land_config_file, " dimensions=", settings_.dimensions.size(), ".");
@@ -915,10 +918,30 @@ private:
             last_chunk_upload_flush_ms_ = nowMs();
         }
         for (std::size_t i = 0; i < snapshots.size(); ++i) {
+            auto existing = pending_chunk_fingerprints_.find(metas[i].coord);
+            if (existing != pending_chunk_fingerprints_.end() && existing->second != metas[i].fingerprint) {
+                continue;
+            }
             pending_chunk_fingerprints_[metas[i].coord] = metas[i].fingerprint;
+            auto pending = std::find_if(pending_chunk_metas_.begin(), pending_chunk_metas_.end(),
+                                        [&metas, i](const ChunkUploadMeta &meta) {
+                                            return meta.coord == metas[i].coord;
+                                        });
+            if (pending != pending_chunk_metas_.end()) {
+                const auto index = static_cast<std::size_t>(std::distance(pending_chunk_metas_.begin(), pending));
+                pending_chunk_uploads_[index] = std::move(snapshots[i]);
+                pending_chunk_metas_[index] = metas[i];
+                continue;
+            }
             pending_chunk_uploads_.push_back(std::move(snapshots[i]));
             pending_chunk_metas_.push_back(metas[i]);
         }
+    }
+
+    void delayChunkBatchRetry(std::int64_t retry_after_ms)
+    {
+        std::scoped_lock lock(state_mutex_);
+        chunk_upload_backoff_until_ms_ = std::max(chunk_upload_backoff_until_ms_, nowMs() + retry_after_ms);
     }
 
     bool flushPendingChunkUploads(bool force)
@@ -931,6 +954,9 @@ private:
         {
             std::scoped_lock lock(state_mutex_);
             if (pending_chunk_uploads_.empty()) {
+                return false;
+            }
+            if (current_ms < chunk_upload_backoff_until_ms_) {
                 return false;
             }
             if (!force && pending_chunk_uploads_.size() < max_batch_size &&
@@ -1036,6 +1062,11 @@ private:
         background_log_.info("Skipped ", skipped, " unchanged live map base chunk upload(s) from local baseline.");
     }
 
+    [[nodiscard]] static bool shouldBackoffChunkBatchRetry(const livemap::TransportResult &transport)
+    {
+        return transport.curl_code != 0 || transport.response_code == 0 || transport.response_code >= 500;
+    }
+
     void processUploadResults()
     {
         if (upload_dispatcher_ == nullptr) {
@@ -1102,6 +1133,13 @@ private:
                 getLogger().error("Failed to upload chunk batch {} chunk(s) HTTP {} curl {} error={}",
                                   result.chunks.size(), result.transport.response_code, result.transport.curl_code,
                                   result.transport.error);
+                if (active_ && shouldBackoffChunkBatchRetry(result.transport)) {
+                    restorePendingChunkUploads(std::move(result.snapshots), std::move(result.chunks));
+                    delayChunkBatchRetry(kChunkBatchRetryDelayMs);
+                    background_log_.warning("Delayed retry for failed live map chunk batch by ",
+                                            kChunkBatchRetryDelayMs / 1000, "s.");
+                    continue;
+                }
             }
             else {
                 const auto name = result.chunks.empty() ? std::string{"unknown"} : chunkName(result.chunks[0].coord);
@@ -1304,6 +1342,7 @@ private:
     std::filesystem::path baseline_index_path_;
     BackgroundLog background_log_;
     std::int64_t last_chunk_upload_flush_ms_ = 0;
+    std::int64_t chunk_upload_backoff_until_ms_ = 0;
     std::size_t skipped_cached_chunks_ = 0;
     std::int64_t last_chunk_cache_log_ms_ = 0;
 };

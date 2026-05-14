@@ -378,6 +378,7 @@ void testSettingsLegacyKeys()
             << "  \"player_seed_join_delay_seconds\": 999,\n"
             << "  \"chunk_upload_batch_size\": 999,\n"
             << "  \"chunk_upload_flush_seconds\": 0,\n"
+            << "  \"http_timeout_seconds\": 999,\n"
             << "  \"dirty_block_push_seconds\": 0,\n"
             << "  \"land_push_seconds\": 1,\n"
             << "  \"max_dirty_blocks_per_push\": 999,\n"
@@ -406,6 +407,7 @@ void testSettingsLegacyKeys()
     assert(settings.player_seed_join_delay_seconds == 300);
     assert(settings.chunk_upload_batch_size == 128);
     assert(settings.chunk_upload_flush_seconds == 1);
+    assert(settings.http_timeout_seconds == 120);
     assert(settings.dirty_block_push_seconds == 1);
     assert(settings.land_push_seconds == 10);
     assert(settings.max_dirty_blocks_per_push == 512);
@@ -428,6 +430,7 @@ void testSettingsNewKeysOverrideLegacyKeys()
             << "  \"tile_refresh_seconds\": 5,\n"
             << "  \"max_chunks_per_refresh\": 4,\n"
             << "  \"max_tiles_per_refresh\": 64,\n"
+            << "  \"http_timeout_seconds\": 2,\n"
             << "  \"land_config_file\": \"/tmp/land.json\",\n"
             << "  \"land_push_seconds\": 120,\n"
             << "  \"upload_chunks\": true,\n"
@@ -440,6 +443,8 @@ void testSettingsNewKeysOverrideLegacyKeys()
     const auto settings = livemap::loadSettings(path);
     assert(settings.chunk_refresh_seconds == 30);
     assert(settings.max_chunks_per_refresh == 4);
+    assert(settings.chunk_upload_batch_size == 8);
+    assert(settings.http_timeout_seconds == 5);
     assert(settings.land_config_file == "/tmp/land.json");
     assert(settings.land_push_seconds == 120);
     assert(settings.upload_chunks);
