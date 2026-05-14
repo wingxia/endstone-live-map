@@ -131,7 +131,16 @@ export function isMapDecorationBlock(blockId: string) {
 
 export function isLikelyTransparentTextureBlock(blockId: string) {
   const id = normalizeBlockId(blockId);
-  return isMapDecorationBlock(id) || id.includes("leaves") || id.includes("water") || id.includes("ice");
+  return (
+    isMapDecorationBlock(id) ||
+    id.includes("leaves") ||
+    id.includes("water") ||
+    id.includes("ice") ||
+    id.includes("glass") ||
+    id.includes("bubble_column") ||
+    id.includes("copper_grate") ||
+    id.includes("grate")
+  );
 }
 
 function normalizeBlockId(value: string) {

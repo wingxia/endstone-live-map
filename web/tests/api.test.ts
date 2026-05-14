@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { chunkUrl, landsUrl, segmentKey, textureAtlasUrl, type BlockUpdate, type ChunkSnapshot, type WorldMeta } from "../src/api";
 import { blockColumnIndex, blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "../src/ui/coords";
-import { chunkRangeForTile, fallbackTextureColor, usesMapTint } from "../src/ui/chunkLayer";
+import { chunkRangeForTile, fallbackTextureColor, usesMapTint, usesTransparentTextureUnderlay } from "../src/ui/chunkLayer";
 import { isMapDecorationBlock, isPlantBlock } from "../src/ui/mapBlocks";
 
 describe("api helpers", () => {
@@ -31,6 +31,13 @@ describe("api helpers", () => {
     expect(usesMapTint("minecraft:grass_block")).toBe(true);
     expect(usesMapTint("minecraft:oak_leaves")).toBe(false);
     expect(usesMapTint("minecraft:cherry_leaves")).toBe(false);
+    expect(usesMapTint("minecraft:acacia_leaves")).toBe(false);
+    expect(usesTransparentTextureUnderlay("minecraft:acacia_leaves")).toBe(true);
+    expect(usesTransparentTextureUnderlay("minecraft:oak_leaves")).toBe(true);
+    expect(usesTransparentTextureUnderlay("minecraft:glass")).toBe(true);
+    expect(usesTransparentTextureUnderlay("minecraft:ice")).toBe(true);
+    expect(usesTransparentTextureUnderlay("minecraft:copper_grate")).toBe(true);
+    expect(usesTransparentTextureUnderlay("minecraft:stone")).toBe(false);
     expect(usesMapTint("minecraft:stone")).toBe(false);
     expect(isPlantBlock("minecraft:poppy")).toBe(true);
     expect(isPlantBlock("minecraft:bush")).toBe(true);
@@ -54,6 +61,7 @@ describe("api helpers", () => {
     expect(isMapDecorationBlock("minecraft:bush")).toBe(true);
     expect(isMapDecorationBlock("minecraft:leaf_litter")).toBe(true);
     expect(isMapDecorationBlock("minecraft:cherry_leaves")).toBe(false);
+    expect(isMapDecorationBlock("minecraft:acacia_leaves")).toBe(false);
     expect(isMapDecorationBlock("minecraft:stone")).toBe(false);
     expect(isMapDecorationBlock("minecraft:glass")).toBe(false);
     expect(segmentKey("Bedrock level")).toBe("Bedrock_level");

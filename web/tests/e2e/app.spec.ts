@@ -178,6 +178,112 @@ test("keeps negative-z chunks rendered across zoom changes", async ({ page }) =>
   expect(chunkQueries.some((query) => query.minChunkX <= 0 && query.maxChunkX >= 0 && query.minChunkZ <= -1 && query.maxChunkZ >= -1)).toBe(true);
 });
 
+test("keeps loaded chunks cached when panning away and back", async ({ page }) => {
+  const chunkRequests = new Map<string, number>();
+  const chunks = [
+    {
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkX: 0,
+      chunkZ: 0,
+      palette: ["minecraft:grass_block"],
+      blocks: Array.from({ length: 256 }, () => 0),
+      heights: Array.from({ length: 256 }, () => 64),
+      updatedAt: 1,
+    },
+    {
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkX: 8,
+      chunkZ: 0,
+      palette: ["minecraft:sand"],
+      blocks: Array.from({ length: 256 }, () => 0),
+      heights: Array.from({ length: 256 }, () => 64),
+      updatedAt: 1,
+    },
+  ];
+
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        worlds: [
+          {
+            version: 1,
+            world: "Bedrock level",
+            dimension: "Overworld",
+            status: "complete",
+            chunkCount: 2,
+            importedAt: 1,
+            updatedAt: 1,
+            bounds: {
+              minChunkX: 0,
+              maxChunkX: 8,
+              minChunkZ: 0,
+              maxChunkZ: 0,
+              minBlockX: 0,
+              maxBlockX: 143,
+              minBlockZ: 0,
+              maxBlockZ: 15,
+            },
+            topBlocks: { "minecraft:grass_block": 256, "minecraft:sand": 256 },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    const url = new URL(route.request().url());
+    const query = {
+      minChunkX: Number(url.searchParams.get("minChunkX")),
+      maxChunkX: Number(url.searchParams.get("maxChunkX")),
+      minChunkZ: Number(url.searchParams.get("minChunkZ")),
+      maxChunkZ: Number(url.searchParams.get("maxChunkZ")),
+    };
+    for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
+      for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
+        const key = `${chunkX},${chunkZ}`;
+        chunkRequests.set(key, (chunkRequests.get(key) || 0) + 1);
+      }
+    }
+    const responseChunks = chunks.filter(
+      (chunk) =>
+        chunk.chunkX >= query.minChunkX &&
+        chunk.chunkX <= query.maxChunkX &&
+        chunk.chunkZ >= query.minChunkZ &&
+        chunk.chunkZ <= query.maxChunkZ,
+    );
+    const missing: Array<{ chunkX: number; chunkZ: number }> = [];
+    for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
+      for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
+        if (!responseChunks.some((chunk) => chunk.chunkX === chunkX && chunk.chunkZ === chunkZ)) {
+          missing.push({ chunkX, chunkZ });
+        }
+      }
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: responseChunks, missing }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({ status: 404, body: "texture manifest not found" });
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => chunkRequests.get("0,0") || 0).toBe(1);
+  await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
+
+  await dragMap(page, 700, 300, 150, 300);
+  await expect.poll(() => chunkRequests.get("8,0") || 0).toBeGreaterThan(0);
+  await dragMap(page, 150, 300, 700, 300);
+  await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
+  await page.waitForTimeout(500);
+  expect(chunkRequests.get("0,0") || 0).toBe(1);
+});
+
 test("renders plant and cutout overlays without dark tile holes", async ({ page }) => {
   const targetChunk = {
     world: "Bedrock level",
@@ -356,6 +462,85 @@ test("renders cherry leaves from the atlas and flat overlays over the base block
   await expect.poll(() => firstChunkTileHasColor(page, [94, 51, 114])).toBe(true);
   await expect.poll(() => firstChunkTileHasColor(page, [95, 159, 63])).toBe(true);
   await expect.poll(() => firstChunkTileHasColor(page, [196, 92, 46])).toBe(true);
+});
+
+test("renders transparent leaf atlas pixels over a solid fallback underlay", async ({ page }) => {
+  const atlasPng = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAACAAAAAQCAYAAAB3AH1ZAAAAUUlEQVR4AcXBQRGAIABFwccfE1iABHTwYAvymcgEJsEC3HB8u6X2NlhwnDsrgizIgizINiae6y5M1N4GHwuyIAuyIAuyjYna2+AnQRZkQRZkLx8MCAYYGug7AAAAAElFTkSuQmCC",
+    "base64",
+  );
+  const targetChunk = {
+    world: "Bedrock level",
+    dimension: "Overworld",
+    chunkX: 0,
+    chunkZ: 0,
+    palette: ["minecraft:acacia_leaves", "minecraft:grass_block"],
+    blocks: Array.from({ length: 256 }, (_, index) => (index === 0 ? 0 : 1)),
+    heights: Array.from({ length: 256 }, () => 64),
+    updatedAt: 1,
+  };
+
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        worlds: [
+          {
+            version: 1,
+            world: "Bedrock level",
+            dimension: "Overworld",
+            status: "complete",
+            chunkCount: 1,
+            importedAt: 1,
+            updatedAt: 1,
+            bounds: {
+              minChunkX: 0,
+              maxChunkX: 0,
+              minChunkZ: 0,
+              maxChunkZ: 0,
+              minBlockX: 0,
+              maxBlockX: 15,
+              minBlockZ: 0,
+              maxBlockZ: 15,
+            },
+            topBlocks: { "minecraft:acacia_leaves": 1, "minecraft:grass_block": 255 },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [targetChunk], missing: [] }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        tileSize: 16,
+        atlas: "/textures/acacia-atlas.png",
+        blocks: {
+          "minecraft:acacia_leaves": { x: 0, y: 0, w: 16, h: 16 },
+          acacia_leaves: { x: 0, y: 0, w: 16, h: 16 },
+          "minecraft:grass_block": { x: 16, y: 0, w: 16, h: 16 },
+          grass_block: { x: 16, y: 0, w: 16, h: 16 },
+        },
+      }),
+    });
+  });
+  await page.route("**/textures/acacia-atlas.png", async (route) => {
+    await route.fulfill({ contentType: "image/png", body: atlasPng });
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => firstChunkTileHasColor(page, [31, 91, 45])).toBe(true);
+  await expect.poll(() => firstChunkTileHasColor(page, [63, 127, 56])).toBe(true);
+  await expect.poll(() => leafBlockHasSolidFallbackUnderlay(page)).toBe(true);
 });
 
 test("renders stateful partial blocks without dark base holes", async ({ page }) => {
@@ -697,6 +882,13 @@ async function pageHasGrassPixels(page: Page) {
   });
 }
 
+async function dragMap(page: Page, fromX: number, fromY: number, toX: number, toY: number) {
+  await page.mouse.move(fromX, fromY);
+  await page.mouse.down();
+  await page.mouse.move(toX, toY, { steps: 12 });
+  await page.mouse.up();
+}
+
 async function firstChunkTileHasNoDarkHoles(page: Page) {
   return page.evaluate(() => {
     const dark = [23, 32, 42];
@@ -725,6 +917,47 @@ async function firstChunkTileHasNoDarkHoles(page: Page) {
           }
           if (grassPixels > 180 && darkPixels === 0) {
             return true;
+          }
+        }
+      }
+    }
+    return false;
+  });
+}
+
+async function leafBlockHasSolidFallbackUnderlay(page: Page) {
+  return page.evaluate(() => {
+    const dark = [23, 32, 42];
+    const atlas = [31, 91, 45];
+    const fallback = [63, 127, 56];
+    for (const canvas of document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")) {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        continue;
+      }
+      for (let y = 0; y <= canvas.height - 16; y += 16) {
+        for (let x = 0; x <= canvas.width - 16; x += 16) {
+          const data = ctx.getImageData(x, y, 16, 16).data;
+          let atlasPixels = 0;
+          let fallbackPixels = 0;
+          let darkOrTransparentPixels = 0;
+          for (let index = 0; index < data.length; index += 4) {
+            if (data[index + 3] !== 255) {
+              darkOrTransparentPixels += 1;
+              continue;
+            }
+            if (data[index] === dark[0] && data[index + 1] === dark[1] && data[index + 2] === dark[2]) {
+              darkOrTransparentPixels += 1;
+            }
+            if (data[index] === atlas[0] && data[index + 1] === atlas[1] && data[index + 2] === atlas[2]) {
+              atlasPixels += 1;
+            }
+            if (data[index] === fallback[0] && data[index + 1] === fallback[1] && data[index + 2] === fallback[2]) {
+              fallbackPixels += 1;
+            }
+          }
+          if (atlasPixels > 0 && fallbackPixels > 0) {
+            return darkOrTransparentPixels === 0;
           }
         }
       }
