@@ -108,6 +108,10 @@ void testProtocol()
     assert(chunk_json.find("\"chunkX\":-1") != std::string::npos);
     assert(chunk_json.find("\"palette\":[\"minecraft:grass_block\",\"minecraft:water\"]") != std::string::npos);
     assert(chunk_json.find("\"updatedAt\":99") != std::string::npos);
+    const auto chunk_batch_json = livemap::serializeChunkBatch({snapshot}, true);
+    assert(chunk_batch_json.find("\"broadcast\":true") != std::string::npos);
+    assert(chunk_batch_json.find("\"storage\":\"chunk\"") != std::string::npos);
+    assert(chunk_batch_json.find("\"chunks\":[{\"world\":\"world\"") != std::string::npos);
 
     livemap::BlockUpdateBatch batch;
     batch.world = "world";
@@ -148,6 +152,8 @@ void testSettingsLegacyKeys()
             << "  \"max_seed_chunks_per_pulse\": 99,\n"
             << "  \"seed_pulse_seconds\": 0,\n"
             << "  \"player_seed_join_delay_seconds\": 999,\n"
+            << "  \"chunk_upload_batch_size\": 999,\n"
+            << "  \"chunk_upload_flush_seconds\": 0,\n"
             << "  \"dirty_block_push_seconds\": 0,\n"
             << "  \"max_dirty_blocks_per_push\": 999,\n"
             << "  \"max_upload_queue_size\": 99999,\n"
@@ -172,6 +178,8 @@ void testSettingsLegacyKeys()
     assert(settings.max_seed_chunks_per_pulse == 16);
     assert(settings.seed_pulse_seconds == 1);
     assert(settings.player_seed_join_delay_seconds == 300);
+    assert(settings.chunk_upload_batch_size == 128);
+    assert(settings.chunk_upload_flush_seconds == 1);
     assert(settings.dirty_block_push_seconds == 1);
     assert(settings.max_dirty_blocks_per_push == 512);
     assert(settings.max_upload_queue_size == 4096);

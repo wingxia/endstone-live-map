@@ -29,6 +29,8 @@ cat > "$DATA_DIR/live_map.json" <<JSON
   "max_seed_chunks_per_pulse": 1,
   "seed_pulse_seconds": 1,
   "player_seed_join_delay_seconds": 10,
+  "chunk_upload_batch_size": 32,
+  "chunk_upload_flush_seconds": 10,
   "dirty_block_push_seconds": 1,
   "max_dirty_blocks_per_push": 64,
   "max_upload_queue_size": 256,

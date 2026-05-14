@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <iostream>
@@ -21,6 +22,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -49,23 +51,79 @@ struct QueuedSeed {
     std::int64_t queued_at_ms{};
 };
 
+struct ChunkUploadMeta {
+    livemap::ChunkCoord coord;
+    std::uint64_t fingerprint{};
+};
+
+std::string chunkName(const livemap::ChunkCoord &coord)
+{
+    return coord.world + "/" + coord.dimension + "/" + std::to_string(coord.x) + "/" + std::to_string(coord.z);
+}
+
+livemap::ChunkCoord chunkCoordForSnapshot(const livemap::ChunkSnapshot &snapshot)
+{
+    return {snapshot.world, snapshot.dimension, snapshot.chunk_x, snapshot.chunk_z};
+}
+
+void mixFingerprintByte(std::uint64_t &hash, std::uint8_t value)
+{
+    hash ^= value;
+    hash *= 1099511628211ULL;
+}
+
+void mixFingerprintUint64(std::uint64_t &hash, std::uint64_t value)
+{
+    for (int shift = 0; shift < 64; shift += 8) {
+        mixFingerprintByte(hash, static_cast<std::uint8_t>((value >> shift) & 0xFFU));
+    }
+}
+
+void mixFingerprintString(std::uint64_t &hash, std::string_view value)
+{
+    mixFingerprintUint64(hash, static_cast<std::uint64_t>(value.size()));
+    for (const auto ch : value) {
+        mixFingerprintByte(hash, static_cast<std::uint8_t>(ch));
+    }
+}
+
+std::uint64_t fingerprintChunkSnapshot(const livemap::ChunkSnapshot &snapshot)
+{
+    std::uint64_t hash = 14695981039346656037ULL;
+    mixFingerprintString(hash, snapshot.world);
+    mixFingerprintString(hash, snapshot.dimension);
+    mixFingerprintUint64(hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(snapshot.chunk_x)));
+    mixFingerprintUint64(hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(snapshot.chunk_z)));
+    mixFingerprintUint64(hash, static_cast<std::uint64_t>(snapshot.palette.size()));
+    for (const auto &block : snapshot.palette) {
+        mixFingerprintString(hash, block);
+    }
+    for (const auto block : snapshot.blocks) {
+        mixFingerprintUint64(hash, static_cast<std::uint64_t>(block));
+    }
+    for (const auto height : snapshot.heights) {
+        mixFingerprintUint64(hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(height)));
+    }
+    return hash;
+}
+
 struct UploadJob {
     enum class Kind {
         PlayerSnapshot,
-        ChunkSnapshot,
+        ChunkBatch,
         BlockUpdates,
     };
 
     Kind kind{};
     std::string path;
     std::string json;
-    livemap::ChunkCoord coord;
+    std::vector<ChunkUploadMeta> chunks;
     std::size_t update_count{};
 };
 
 struct UploadResult {
     UploadJob::Kind kind{};
-    livemap::ChunkCoord coord;
+    std::vector<ChunkUploadMeta> chunks;
     std::size_t update_count{};
     livemap::TransportResult transport;
 };
@@ -151,7 +209,7 @@ private:
             auto transport = livemap::postPluginJson(settings_, job.path, job.json);
             {
                 std::scoped_lock lock(mutex_);
-                results_.push_back({job.kind, job.coord, job.update_count, std::move(transport)});
+                results_.push_back({job.kind, std::move(job.chunks), job.update_count, std::move(transport)});
             }
         }
     }
@@ -216,12 +274,14 @@ public:
         getLogger().info(
             "Endstone Live Map enabled for {} with uploads players={} chunks={} dirtyBlocks={} autoSeedChunks={} "
             "legacyRadius={} playerSeedRadius={} playerSeedInterval={}s maxSeedPerPulse={} seedPulse={}s "
-            "playerSeedJoinDelay={}s dirtyBlockPush={}s maxDirtyBlocks={} maxUploadQueue={} dimensions={}.",
+            "playerSeedJoinDelay={}s chunkUploadBatch={} chunkUploadFlush={}s dirtyBlockPush={}s maxDirtyBlocks={} "
+            "maxUploadQueue={} dimensions={}.",
             settings_.worker_url, settings_.upload_players, settings_.upload_chunks, settings_.upload_dirty_blocks,
             settings_.auto_seed_chunks, settings_.scan_radius_chunks, settings_.player_seed_radius_chunks,
             settings_.player_seed_interval_seconds, settings_.max_seed_chunks_per_pulse, settings_.seed_pulse_seconds,
-            settings_.player_seed_join_delay_seconds, settings_.dirty_block_push_seconds,
-            settings_.max_dirty_blocks_per_push, settings_.max_upload_queue_size, settings_.dimensions.size());
+            settings_.player_seed_join_delay_seconds, settings_.chunk_upload_batch_size,
+            settings_.chunk_upload_flush_seconds, settings_.dirty_block_push_seconds, settings_.max_dirty_blocks_per_push,
+            settings_.max_upload_queue_size, settings_.dimensions.size());
     }
 
     void onDisable() override
@@ -599,6 +659,130 @@ private:
         return true;
     }
 
+    bool queuePendingChunkUpload(livemap::ChunkSnapshot snapshot)
+    {
+        const auto coord = chunkCoordForSnapshot(snapshot);
+        const auto fingerprint = fingerprintChunkSnapshot(snapshot);
+        std::scoped_lock lock(state_mutex_);
+
+        const auto confirmed = chunk_fingerprints_.find(coord);
+        if (confirmed != chunk_fingerprints_.end() && confirmed->second == fingerprint) {
+            ++skipped_cached_chunks_;
+            return false;
+        }
+
+        const auto pending = pending_chunk_fingerprints_.find(coord);
+        if (pending != pending_chunk_fingerprints_.end() && pending->second == fingerprint) {
+            ++skipped_cached_chunks_;
+            return false;
+        }
+
+        const auto meta = ChunkUploadMeta{coord, fingerprint};
+        pending_chunk_fingerprints_[coord] = fingerprint;
+        for (std::size_t i = 0; i < pending_chunk_uploads_.size(); ++i) {
+            if (pending_chunk_metas_[i].coord == coord) {
+                pending_chunk_uploads_[i] = std::move(snapshot);
+                pending_chunk_metas_[i] = meta;
+                return true;
+            }
+        }
+
+        if (pending_chunk_uploads_.empty()) {
+            last_chunk_upload_flush_ms_ = nowMs();
+        }
+        pending_chunk_uploads_.push_back(std::move(snapshot));
+        pending_chunk_metas_.push_back(meta);
+        return true;
+    }
+
+    void restorePendingChunkUploads(std::vector<livemap::ChunkSnapshot> snapshots, std::vector<ChunkUploadMeta> metas)
+    {
+        if (snapshots.empty()) {
+            return;
+        }
+
+        std::scoped_lock lock(state_mutex_);
+        if (pending_chunk_uploads_.empty()) {
+            last_chunk_upload_flush_ms_ = nowMs();
+        }
+        for (std::size_t i = 0; i < snapshots.size(); ++i) {
+            pending_chunk_fingerprints_[metas[i].coord] = metas[i].fingerprint;
+            pending_chunk_uploads_.push_back(std::move(snapshots[i]));
+            pending_chunk_metas_.push_back(metas[i]);
+        }
+    }
+
+    bool flushPendingChunkUploads(bool force)
+    {
+        std::vector<livemap::ChunkSnapshot> snapshots;
+        std::vector<ChunkUploadMeta> metas;
+        const auto current_ms = nowMs();
+        const auto max_batch_size = static_cast<std::size_t>(std::max(1, settings_.chunk_upload_batch_size));
+        const auto flush_ms = static_cast<std::int64_t>(std::max(1, settings_.chunk_upload_flush_seconds)) * 1000;
+        {
+            std::scoped_lock lock(state_mutex_);
+            if (pending_chunk_uploads_.empty()) {
+                return false;
+            }
+            if (!force && pending_chunk_uploads_.size() < max_batch_size &&
+                current_ms - last_chunk_upload_flush_ms_ < flush_ms) {
+                return false;
+            }
+
+            const auto count = std::min(max_batch_size, pending_chunk_uploads_.size());
+            snapshots.reserve(count);
+            metas.reserve(count);
+            for (std::size_t i = 0; i < count; ++i) {
+                snapshots.push_back(std::move(pending_chunk_uploads_[i]));
+                metas.push_back(pending_chunk_metas_[i]);
+                pending_chunk_fingerprints_.erase(pending_chunk_metas_[i].coord);
+            }
+            pending_chunk_uploads_.erase(pending_chunk_uploads_.begin(), pending_chunk_uploads_.begin() + count);
+            pending_chunk_metas_.erase(pending_chunk_metas_.begin(), pending_chunk_metas_.begin() + count);
+            last_chunk_upload_flush_ms_ = current_ms;
+        }
+
+        if (snapshots.empty()) {
+            return false;
+        }
+
+        if (!enqueueUpload({UploadJob::Kind::ChunkBatch, "/api/plugin/chunks/batch",
+                            livemap::serializeChunkBatch(snapshots, true), metas, snapshots.size()})) {
+            restorePendingChunkUploads(std::move(snapshots), metas);
+            getLogger().warning("Delayed live map chunk batch upload because upload queue is full.");
+            return false;
+        }
+        return true;
+    }
+
+    void confirmUploadedChunkBatch(const std::vector<ChunkUploadMeta> &chunks)
+    {
+        std::scoped_lock lock(state_mutex_);
+        for (const auto &chunk : chunks) {
+            chunk_fingerprints_[chunk.coord] = chunk.fingerprint;
+        }
+    }
+
+    void logCachedChunkSkips(bool force)
+    {
+        std::size_t skipped = 0;
+        const auto current_ms = nowMs();
+        {
+            std::scoped_lock lock(state_mutex_);
+            if (skipped_cached_chunks_ == 0) {
+                return;
+            }
+            if (!force && skipped_cached_chunks_ < 32 &&
+                current_ms - last_chunk_cache_log_ms_ < 60000) {
+                return;
+            }
+            skipped = skipped_cached_chunks_;
+            skipped_cached_chunks_ = 0;
+            last_chunk_cache_log_ms_ = current_ms;
+        }
+        getLogger().info("Skipped {} unchanged live map base chunk upload(s) from local cache.", skipped);
+    }
+
     void processUploadResults()
     {
         if (upload_dispatcher_ == nullptr) {
@@ -606,16 +790,16 @@ private:
         }
 
         for (auto &result : upload_dispatcher_->drainResults()) {
-            const auto chunk_name = result.coord.world + "/" + result.coord.dimension + "/" +
-                                    std::to_string(result.coord.x) + "/" + std::to_string(result.coord.z);
             if (result.transport.ok && !result.transport.missing_base) {
-                if (result.kind == UploadJob::Kind::ChunkSnapshot) {
-                    std::cout << "[LiveMap] Uploaded chunk " << chunk_name << " HTTP "
+                if (result.kind == UploadJob::Kind::ChunkBatch) {
+                    confirmUploadedChunkBatch(result.chunks);
+                    std::cout << "[LiveMap] Uploaded chunk batch " << result.chunks.size() << " chunk(s) HTTP "
                               << result.transport.response_code << std::endl;
                 }
                 else if (result.kind == UploadJob::Kind::BlockUpdates) {
+                    const auto name = result.chunks.empty() ? std::string{"unknown"} : chunkName(result.chunks[0].coord);
                     std::cout << "[LiveMap] Uploaded " << result.update_count << " dirty block update(s) for "
-                              << chunk_name << " HTTP " << result.transport.response_code << std::endl;
+                              << name << " HTTP " << result.transport.response_code << std::endl;
                 }
                 continue;
             }
@@ -631,20 +815,24 @@ private:
             }
 
             if (result.kind == UploadJob::Kind::BlockUpdates && result.transport.missing_base) {
-                std::cerr << "[LiveMap] Dirty block update missing base chunk " << chunk_name
-                          << "; queued base resample" << std::endl;
+                const auto name = result.chunks.empty() ? std::string{"unknown"} : chunkName(result.chunks[0].coord);
+                std::cerr << "[LiveMap] Dirty block update missing base chunk " << name << "; queued base resample"
+                          << std::endl;
                 if (active_) {
-                    enqueueSeedChunk(result.coord, false);
+                    for (const auto &chunk : result.chunks) {
+                        enqueueSeedChunk(chunk.coord, false);
+                    }
                 }
                 continue;
             }
 
-            if (result.kind == UploadJob::Kind::ChunkSnapshot) {
-                std::cerr << "[LiveMap] Failed to upload chunk " << chunk_name << " HTTP "
+            if (result.kind == UploadJob::Kind::ChunkBatch) {
+                std::cerr << "[LiveMap] Failed to upload chunk batch " << result.chunks.size() << " chunk(s) HTTP "
                           << result.transport.response_code << " curl " << result.transport.curl_code;
             }
             else {
-                std::cerr << "[LiveMap] Failed to upload dirty block updates for " << chunk_name << " HTTP "
+                const auto name = result.chunks.empty() ? std::string{"unknown"} : chunkName(result.chunks[0].coord);
+                std::cerr << "[LiveMap] Failed to upload dirty block updates for " << name << " HTTP "
                           << result.transport.response_code << " curl " << result.transport.curl_code;
             }
             if (!result.transport.error.empty()) {
@@ -652,9 +840,13 @@ private:
             }
             std::cerr << std::endl;
             if (active_) {
-                enqueueSeedChunk(result.coord, false);
+                for (const auto &chunk : result.chunks) {
+                    enqueueSeedChunk(chunk.coord, false);
+                }
             }
         }
+        flushPendingChunkUploads(false);
+        logCachedChunkSkips(false);
     }
 
     void pulsePlayerSeedQueue()
@@ -670,9 +862,9 @@ private:
 
         const auto chunks = drainSeedChunks(static_cast<std::size_t>(std::max(1, settings_.max_seed_chunks_per_pulse)));
         if (chunks.empty()) {
+            flushPendingChunkUploads(false);
             return;
         }
-        getLogger().info("Sampling {} queued live map base chunk(s).", chunks.size());
 
         auto *level = getServer().getLevel();
         if (level == nullptr) {
@@ -691,15 +883,9 @@ private:
             }
             cacheChunkSnapshot(*snapshot);
 
-            const auto chunk_coord = livemap::ChunkCoord{snapshot->world, snapshot->dimension, snapshot->chunk_x,
-                                                         snapshot->chunk_z};
-            if (!enqueueUpload({UploadJob::Kind::ChunkSnapshot, "/api/plugin/chunks",
-                                livemap::serializeChunkSnapshot(*snapshot), chunk_coord, 0})) {
-                enqueueSeedChunk(chunk_coord, false);
-                getLogger().warning("Requeued live map base chunk {}/{}/{} because upload queue is full.",
-                                    chunk_coord.world, chunk_coord.x, chunk_coord.z);
-            }
+            queuePendingChunkUpload(std::move(*snapshot));
         }
+        flushPendingChunkUploads(false);
     }
 
     void publishDirtyBlocks()
@@ -779,7 +965,7 @@ private:
             batch.updates = updates;
             batch.updated_at_ms = nowMs();
             if (!enqueueUpload({UploadJob::Kind::BlockUpdates, "/api/plugin/block-updates",
-                                livemap::serializeBlockUpdateBatch(batch), coord, updates.size()})) {
+                                livemap::serializeBlockUpdateBatch(batch), {{coord, 0}}, updates.size()})) {
                 enqueueSeedChunk(coord, false);
                 getLogger().warning("Queued base resample for {}/{}/{} because upload queue is full.", coord.world,
                                     coord.x, coord.z);
@@ -803,6 +989,13 @@ private:
     std::unordered_map<std::string, std::int64_t> player_first_seen_ms_;
     std::unordered_map<std::string, std::string> player_last_seed_center_;
     std::unordered_map<livemap::BlockColumnCoord, ColumnTop, livemap::BlockColumnCoordHash> top_cache_;
+    std::vector<livemap::ChunkSnapshot> pending_chunk_uploads_;
+    std::vector<ChunkUploadMeta> pending_chunk_metas_;
+    std::unordered_map<livemap::ChunkCoord, std::uint64_t, livemap::ChunkCoordHash> pending_chunk_fingerprints_;
+    std::unordered_map<livemap::ChunkCoord, std::uint64_t, livemap::ChunkCoordHash> chunk_fingerprints_;
+    std::int64_t last_chunk_upload_flush_ms_ = 0;
+    std::size_t skipped_cached_chunks_ = 0;
+    std::int64_t last_chunk_cache_log_ms_ = 0;
 };
 
 void LiveMapListener::onBlockPlace(endstone::BlockPlaceEvent &event)
