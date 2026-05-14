@@ -38,6 +38,7 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
   const [coordinate, setCoordinate] = useState<CoordinateState>(() => buildCoordinateState(0, 0, null, false));
   const [mapReady, setMapReady] = useState(false);
   const lockedRef = useRef(false);
+  const autoFitKeyRef = useRef("");
 
   useEffect(() => {
     let cancelled = false;
@@ -100,12 +101,19 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
     }
     const meta = isWorldMetaForMap(worldMeta, world, dimension) ? worldMeta : null;
     const playerBounds = players.length > 0 ? boundsForPlayers(players) : null;
+    const autoFitKey = autoFitKeyFor(world, dimension, meta, playerBounds);
     if (!meta && !playerBounds) {
       state.chunkLayer.setActive(false);
-      state.map.setView([0, 0], INITIAL_MAP_ZOOM, { animate: false });
+      if (autoFitKeyRef.current !== autoFitKey) {
+        state.map.setView([0, 0], INITIAL_MAP_ZOOM, { animate: false });
+        autoFitKeyRef.current = autoFitKey;
+      }
       return;
     }
     state.chunkLayer.setActive(true);
+    if (autoFitKeyRef.current === autoFitKey) {
+      return;
+    }
     if (!meta && playerBounds) {
       state.map.fitBounds(
         [
@@ -114,6 +122,7 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
         ],
         { animate: false, padding: [24, 24], maxZoom: INITIAL_MAP_ZOOM },
       );
+      autoFitKeyRef.current = autoFitKey;
       return;
     }
     if (!meta) {
@@ -137,6 +146,7 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
         ],
         { animate: false, padding: [24, 24] },
       );
+      autoFitKeyRef.current = autoFitKey;
       return;
     }
     state.map.fitBounds(
@@ -146,6 +156,7 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
       ],
       { animate: false, padding: [24, 24] },
     );
+    autoFitKeyRef.current = autoFitKey;
   }, [dimension, mapReady, players, world, worldMeta]);
 
   useEffect(() => {
@@ -253,6 +264,29 @@ function isWorldMetaForMap(worldMeta: WorldMeta | null, world: string, dimension
 
 function clampChunk(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function autoFitKeyFor(world: string, dimension: string, meta: WorldMeta | null, playerBounds: ReturnType<typeof boundsForPlayers> | null) {
+  const prefix = `${segmentKey(world)}/${segmentKey(dimension)}`;
+  if (meta) {
+    const bounds = meta.bounds;
+    return [
+      prefix,
+      "meta",
+      bounds.minChunkX,
+      bounds.maxChunkX,
+      bounds.minChunkZ,
+      bounds.maxChunkZ,
+      bounds.minBlockX,
+      bounds.maxBlockX,
+      bounds.minBlockZ,
+      bounds.maxBlockZ,
+    ].join("/");
+  }
+  if (playerBounds) {
+    return `${prefix}/live`;
+  }
+  return `${prefix}/empty`;
 }
 
 function boundsForPlayers(players: PlayerState[]) {

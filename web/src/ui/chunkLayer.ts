@@ -342,13 +342,37 @@ function stripNamespace(blockId: string) {
 
 export function usesMapTint(blockId: string) {
   const id = blockId.toLowerCase();
-  return id.includes("water") || id.includes("bubble_column");
+  return (
+    id.includes("water") ||
+    id.includes("bubble_column") ||
+    id.includes("grass_block") ||
+    id.includes("short_grass") ||
+    id.includes("tall_grass") ||
+    id.includes("fern") ||
+    id.includes("leaves") ||
+    id.includes("vine")
+  );
 }
 
 export function fallbackTextureColor(blockId: string) {
   const id = blockId.toLowerCase();
   if (id.includes("water") || id.includes("bubble_column")) {
     return "#2563b8";
+  }
+  if (id.includes("cherry_leaves")) {
+    return "#f2a5c9";
+  }
+  if (id.includes("azalea_leaves")) {
+    return "#5f9f4a";
+  }
+  if (id.includes("grass_block")) {
+    return "#5f9f3f";
+  }
+  if (id.includes("short_grass") || id.includes("tall_grass") || id.includes("fern") || id.includes("vine")) {
+    return "#4f8f35";
+  }
+  if (id.includes("leaves")) {
+    return "#3f7f38";
   }
   if (id.includes("sand")) {
     return "#d7c47a";

@@ -159,3 +159,77 @@ test("requests live player chunks before a world import exists", async ({ page }
   await expect(page.getByTestId("map-empty-state")).toHaveCount(0);
   await expect.poll(() => chunkRequests).toBeGreaterThan(0);
 });
+
+test("does not reset user zoom on live player refresh", async ({ page }) => {
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.addInitScript(() => {
+    class MockWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = MockWebSocket.OPEN;
+      url: string;
+
+      constructor(url: string) {
+        super();
+        this.url = url;
+        setTimeout(() => {
+          this.dispatchEvent(new Event("open"));
+          const sendSnapshot = (x: number) => {
+            this.dispatchEvent(
+              new MessageEvent("message", {
+                data: JSON.stringify({
+                  type: "player_snapshot",
+                  players: [
+                    {
+                      id: "wing",
+                      name: "Wing",
+                      world: "Bedrock level",
+                      dimension: "Overworld",
+                      x,
+                      y: 64,
+                      z: 0,
+                      yaw: 0,
+                      pitch: 0,
+                      updatedAt: Date.now(),
+                    },
+                  ],
+                }),
+              }),
+            );
+          };
+          (window as unknown as { __sendLiveSnapshot?: (x: number) => void }).__sendLiveSnapshot = sendSnapshot;
+          sendSnapshot(0);
+        }, 50);
+      }
+
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.dispatchEvent(new Event("close"));
+      }
+
+      send() {}
+    }
+
+    Object.assign(MockWebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+    window.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+  });
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ worlds: [] }) });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({ status: 404, body: "texture manifest not found" });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("Wing")).toBeVisible();
+  await page.getByRole("button", { name: "Zoom in" }).click();
+  await expect(page.getByRole("button", { name: "Zoom out" })).toBeEnabled();
+  await page.evaluate(() => (window as unknown as { __sendLiveSnapshot?: (x: number) => void }).__sendLiveSnapshot?.(32));
+  await page.waitForTimeout(300);
+  await expect(page.getByRole("button", { name: "Zoom out" })).toBeEnabled();
+});

@@ -22,6 +22,9 @@ describe("api helpers", () => {
     expect(textureAtlasUrl({ version: 1, tileSize: 16, atlas: "/textures/atlas.png", blocks: {} })).toBe("/textures/atlas.png");
     expect(fallbackTextureColor("minecraft:water")).toBe("#2563b8");
     expect(usesMapTint("minecraft:water")).toBe(true);
+    expect(fallbackTextureColor("minecraft:grass_block")).toBe("#5f9f3f");
+    expect(usesMapTint("minecraft:grass_block")).toBe(true);
+    expect(usesMapTint("minecraft:oak_leaves")).toBe(true);
     expect(usesMapTint("minecraft:stone")).toBe(false);
     expect(segmentKey("Bedrock level")).toBe("Bedrock_level");
   });
