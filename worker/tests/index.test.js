@@ -364,6 +364,15 @@ describe("worker routes", () => {
     expect(body).toMatchObject({ ok: true, chunks: 2 });
     expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(true);
     expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/1/0.json")).toBe(true);
+    const meta = await env.MAP_DATA.objects.get("meta/v1/world/Overworld.json").json();
+    expect(meta).toMatchObject({
+      world: "world",
+      dimension: "Overworld",
+      status: "live",
+      chunkCount: 2,
+      bounds: { minChunkX: 0, maxChunkX: 1, minChunkZ: 0, maxChunkZ: 0, minBlockX: 0, maxBlockX: 31 },
+      topBlocks: { "minecraft:grass_block": 512 },
+    });
     expect(env.live.messages).toHaveLength(0);
   });
 
@@ -400,6 +409,11 @@ describe("worker routes", () => {
     expect(uploadBody).toMatchObject({ storage: "region", chunks: 3 });
     expect(env.MAP_DATA.objects.has("chunk-regions/v1/world/Overworld/-1/-1.json")).toBe(true);
     expect(env.MAP_DATA.objects.has("chunk-regions/v1/world/Overworld/0/0.json")).toBe(true);
+    const meta = await env.MAP_DATA.objects.get("meta/v1/world/Overworld.json").json();
+    expect(meta).toMatchObject({
+      chunkCount: 3,
+      bounds: { minChunkX: -1, maxChunkX: 15, minChunkZ: -1, maxChunkZ: 15 },
+    });
 
     const chunks = await worker.fetch(
       new Request("https://map.buhe.li/api/chunks?world=world&dimension=Overworld&minChunkX=-1&maxChunkX=0&minChunkZ=-1&maxChunkZ=0"),
@@ -409,6 +423,83 @@ describe("worker routes", () => {
     const body = await chunks.json();
     expect(body.chunks).toHaveLength(2);
     expect(body.missing).toHaveLength(2);
+  });
+
+  it("extends existing world metadata when live chunk uploads expand bounds", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put(
+      "meta/v1/world/Overworld.json",
+      JSON.stringify(
+        normalizeWorldMeta({
+          world: "world",
+          dimension: "Overworld",
+          status: "live",
+          chunkCount: 1,
+          bounds: { minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0 },
+          topBlocks: { "minecraft:grass_block": 256 },
+          importedAt: 10,
+          updatedAt: 10,
+        }),
+      ),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(createChunk({ chunkX: -1, chunkZ: 2, updatedAt: 20 })),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    const meta = await env.MAP_DATA.objects.get("meta/v1/world/Overworld.json").json();
+    expect(meta).toMatchObject({
+      chunkCount: 2,
+      importedAt: 10,
+      bounds: { minChunkX: -1, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 2, minBlockX: -16, maxBlockX: 15, minBlockZ: 0, maxBlockZ: 47 },
+      topBlocks: { "minecraft:grass_block": 512 },
+    });
+    expect(meta.updatedAt).toBeGreaterThanOrEqual(20);
+  });
+
+  it("does not double count world metadata when a live chunk is reuploaded inside existing bounds", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put(
+      "meta/v1/world/Overworld.json",
+      JSON.stringify(
+        normalizeWorldMeta({
+          world: "world",
+          dimension: "Overworld",
+          status: "live",
+          chunkCount: 1,
+          bounds: { minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0 },
+          topBlocks: { "minecraft:grass_block": 256 },
+          importedAt: 10,
+          updatedAt: 10,
+        }),
+      ),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(createChunk({ chunkX: 0, chunkZ: 0, updatedAt: 20 })),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    const meta = await env.MAP_DATA.objects.get("meta/v1/world/Overworld.json").json();
+    expect(meta).toMatchObject({
+      chunkCount: 1,
+      topBlocks: { "minecraft:grass_block": 256 },
+    });
   });
 
   it("stores and serves imported world metadata", async () => {

@@ -21,7 +21,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <queue>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -57,6 +56,7 @@ struct ColumnSample {
 struct QueuedSeed {
     livemap::ChunkCoord coord;
     std::int64_t queued_at_ms{};
+    bool force{};
 };
 
 struct ChunkUploadMeta {
@@ -478,7 +478,7 @@ private:
         if (!queued_seed_chunks_.insert(coord).second) {
             return 0;
         }
-        seed_queue_.push({coord, nowMs()});
+        seed_queue_.push_back({coord, nowMs(), force});
         return 1;
     }
 
@@ -572,15 +572,15 @@ private:
         return queued;
     }
 
-    std::vector<livemap::ChunkCoord> drainSeedChunks(std::size_t limit)
+    std::vector<QueuedSeed> drainSeedChunks(std::size_t limit)
     {
-        std::vector<livemap::ChunkCoord> chunks;
+        std::vector<QueuedSeed> chunks;
         std::scoped_lock lock(state_mutex_);
         while (!seed_queue_.empty() && chunks.size() < limit) {
             const auto queued = seed_queue_.front();
-            seed_queue_.pop();
+            seed_queue_.pop_front();
             queued_seed_chunks_.erase(queued.coord);
-            chunks.push_back(queued.coord);
+            chunks.push_back(queued);
         }
         return chunks;
     }
@@ -802,21 +802,21 @@ private:
         return true;
     }
 
-    bool queuePendingChunkUpload(livemap::ChunkSnapshot snapshot)
+    bool queuePendingChunkUpload(livemap::ChunkSnapshot snapshot, bool force = false)
     {
         const auto coord = chunkCoordForSnapshot(snapshot);
         const auto fingerprint = livemap::fingerprintChunkSnapshot(snapshot);
         std::scoped_lock lock(state_mutex_);
 
         const auto confirmed = chunk_baselines_.find(coord);
-        if (confirmed != chunk_baselines_.end() && confirmed->second.fingerprint == fingerprint) {
+        if (!force && confirmed != chunk_baselines_.end() && confirmed->second.fingerprint == fingerprint) {
             confirmed_chunk_snapshots_[coord] = std::move(snapshot);
             ++skipped_cached_chunks_;
             return false;
         }
 
         const auto pending = pending_chunk_fingerprints_.find(coord);
-        if (pending != pending_chunk_fingerprints_.end() && pending->second == fingerprint) {
+        if (!force && pending != pending_chunk_fingerprints_.end() && pending->second == fingerprint) {
             ++skipped_cached_chunks_;
             return false;
         }
@@ -1065,7 +1065,9 @@ private:
             return;
         }
 
-        for (const auto &coord : chunks) {
+        bool force_flush = false;
+        for (const auto &queued : chunks) {
+            const auto &coord = queued.coord;
             auto *dimension = level->getDimension(coord.dimension);
             if (dimension == nullptr) {
                 continue;
@@ -1077,9 +1079,10 @@ private:
             }
             cacheChunkSnapshot(*snapshot);
 
-            queuePendingChunkUpload(std::move(*snapshot));
+            force_flush = force_flush || queued.force;
+            queuePendingChunkUpload(std::move(*snapshot), queued.force);
         }
-        flushPendingChunkUploads(false);
+        flushPendingChunkUploads(force_flush);
     }
 
     void publishDirtyBlocks()
@@ -1207,7 +1210,7 @@ private:
     mutable std::mutex state_mutex_;
     std::atomic_bool active_{false};
     livemap::DirtyBlockTracker dirty_blocks_;
-    std::queue<QueuedSeed> seed_queue_;
+    std::deque<QueuedSeed> seed_queue_;
     std::unordered_set<livemap::ChunkCoord, livemap::ChunkCoordHash> queued_seed_chunks_;
     std::unordered_map<std::string, std::int64_t> player_next_seed_ms_;
     std::unordered_map<std::string, std::int64_t> player_first_seen_ms_;

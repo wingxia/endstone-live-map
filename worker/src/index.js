@@ -255,6 +255,7 @@ async function handleChunkUpload(request, env) {
 
   const snapshot = normalizeChunkSnapshot(await request.json());
   const result = await putChunkSnapshot(bucket, snapshot, { env, broadcast: true, diffForViewers: true });
+  await updateWorldMetaForChunks(bucket, [snapshot]);
   return json({ ok: true, key: result.key, updates: result.updates });
 }
 
@@ -276,6 +277,7 @@ async function handleChunkBatchUpload(request, env) {
 
   if (storage === "region" && !broadcast) {
     const results = await putChunkRegionSnapshots(bucket, snapshots);
+    await updateWorldMetaForChunks(bucket, snapshots);
     return json({
       ok: true,
       storage,
@@ -286,6 +288,7 @@ async function handleChunkBatchUpload(request, env) {
   }
 
   const results = await mapWithConcurrency(snapshots, BATCH_WRITE_CONCURRENCY, (snapshot) => putChunkSnapshot(bucket, snapshot, { env, broadcast, diffForViewers: broadcast }));
+  await updateWorldMetaForChunks(bucket, snapshots);
 
   return json({
     ok: true,
@@ -518,6 +521,51 @@ async function handleWorldMetaUpload(request, env) {
     customMetadata: { world: meta.world, dimension: meta.dimension },
   });
   return json({ ok: true, key });
+}
+
+async function updateWorldMetaForChunks(bucket, snapshots) {
+  const groups = new Map();
+  for (const snapshot of snapshots) {
+    const key = `${snapshot.world}/${snapshot.dimension}`;
+    if (!groups.has(key)) {
+      groups.set(key, { world: snapshot.world, dimension: snapshot.dimension, chunks: new Map() });
+    }
+    groups.get(key).chunks.set(coordKey(snapshot.chunkX, snapshot.chunkZ), snapshot);
+  }
+
+  await Promise.all(
+    [...groups.values()].map(async (group) => {
+      const chunks = [...group.chunks.values()];
+      if (chunks.length === 0) {
+        return;
+      }
+
+      const key = worldMetaKey(group.world, group.dimension);
+      const existing = normalizeOptionalWorldMeta(await readR2Json(await bucket.get(key)));
+      const previousBounds = existing?.bounds || null;
+      const bounds = expandWorldBounds(previousBounds, chunks);
+      const newChunks = previousBounds ? chunks.filter((chunk) => !chunkWithinBounds(chunk, previousBounds)) : chunks;
+      const importedAt = existing?.importedAt ?? Math.min(...chunks.map((chunk) => chunk.updatedAt));
+      const updatedAt = Math.max(existing?.updatedAt ?? 0, ...chunks.map((chunk) => chunk.updatedAt), Date.now());
+      const topBlocks = mergeTopBlockCounts(existing?.topBlocks || {}, summarizeChunkTopBlocks(previousBounds ? newChunks : chunks));
+      const meta = {
+        version: existing?.version ?? 1,
+        world: group.world,
+        dimension: group.dimension,
+        status: existing?.status || "live",
+        chunkCount: (existing?.chunkCount ?? 0) + (previousBounds ? newChunks.length : chunks.length),
+        importedAt,
+        updatedAt,
+        bounds,
+        topBlocks,
+      };
+
+      await bucket.put(key, JSON.stringify(meta), {
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        customMetadata: { world: meta.world, dimension: meta.dimension },
+      });
+    }),
+  );
 }
 
 async function handleWorldsGet(env) {
@@ -805,6 +853,17 @@ export function normalizeWorldMeta(payload) {
     throw new Error("invalid world bounds");
   }
   return normalized;
+}
+
+function normalizeOptionalWorldMeta(value) {
+  if (!value) {
+    return null;
+  }
+  try {
+    return normalizeWorldMeta(value);
+  } catch {
+    return null;
+  }
 }
 
 export function normalizeChunkQuery(params) {
@@ -1117,6 +1176,48 @@ function normalizeTopBlocks(value) {
     result[cleanBlockId(key)] = numberOrThrow(count, `topBlocks.${key}`);
   }
   return result;
+}
+
+function expandWorldBounds(previousBounds, chunks) {
+  const chunkXs = chunks.map((chunk) => chunk.chunkX);
+  const chunkZs = chunks.map((chunk) => chunk.chunkZ);
+  const minChunkX = Math.min(previousBounds?.minChunkX ?? Infinity, ...chunkXs);
+  const maxChunkX = Math.max(previousBounds?.maxChunkX ?? -Infinity, ...chunkXs);
+  const minChunkZ = Math.min(previousBounds?.minChunkZ ?? Infinity, ...chunkZs);
+  const maxChunkZ = Math.max(previousBounds?.maxChunkZ ?? -Infinity, ...chunkZs);
+  return {
+    minChunkX,
+    maxChunkX,
+    minChunkZ,
+    maxChunkZ,
+    minBlockX: minChunkX * 16,
+    maxBlockX: maxChunkX * 16 + 15,
+    minBlockZ: minChunkZ * 16,
+    maxBlockZ: maxChunkZ * 16 + 15,
+  };
+}
+
+function chunkWithinBounds(chunk, bounds) {
+  return chunk.chunkX >= bounds.minChunkX && chunk.chunkX <= bounds.maxChunkX && chunk.chunkZ >= bounds.minChunkZ && chunk.chunkZ <= bounds.maxChunkZ;
+}
+
+function summarizeChunkTopBlocks(chunks) {
+  const counts = {};
+  for (const chunk of chunks) {
+    for (const paletteIndex of chunk.blocks) {
+      const block = chunk.palette[paletteIndex] || "minecraft:air";
+      counts[block] = (counts[block] || 0) + 1;
+    }
+  }
+  return counts;
+}
+
+function mergeTopBlockCounts(previous, next) {
+  const merged = { ...previous };
+  for (const [block, count] of Object.entries(next)) {
+    merged[block] = (merged[block] || 0) + count;
+  }
+  return merged;
 }
 
 function normalizeTextureJson(value, field) {
