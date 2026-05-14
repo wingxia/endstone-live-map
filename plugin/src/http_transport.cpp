@@ -87,6 +87,11 @@ TransportResult postLiveJson(const LiveMapSettings &settings, std::string_view j
     return CurlTransport(settings).postJson("/api/plugin/live", json);
 }
 
+TransportResult postPluginJson(const LiveMapSettings &settings, std::string_view path, std::string_view json)
+{
+    return CurlTransport(settings).postJson(path, json);
+}
+
 TransportResult uploadChunkSnapshot(const LiveMapSettings &settings, const ChunkSnapshot &snapshot)
 {
     return CurlTransport(settings).postJson("/api/plugin/chunks", serializeChunkSnapshot(snapshot));

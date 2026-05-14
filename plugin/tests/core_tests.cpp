@@ -147,8 +147,10 @@ void testSettingsLegacyKeys()
             << "  \"player_seed_interval_seconds\": 1,\n"
             << "  \"max_seed_chunks_per_pulse\": 99,\n"
             << "  \"seed_pulse_seconds\": 0,\n"
+            << "  \"player_seed_join_delay_seconds\": 999,\n"
             << "  \"dirty_block_push_seconds\": 0,\n"
             << "  \"max_dirty_blocks_per_push\": 999,\n"
+            << "  \"max_upload_queue_size\": 99999,\n"
             << "  \"upload_tiles\": false,\n"
             << "  \"auto_seed_chunks\": true,\n"
             << "  \"upload_dirty_blocks\": false,\n"
@@ -169,8 +171,10 @@ void testSettingsLegacyKeys()
     assert(settings.player_seed_interval_seconds == 30);
     assert(settings.max_seed_chunks_per_pulse == 16);
     assert(settings.seed_pulse_seconds == 1);
+    assert(settings.player_seed_join_delay_seconds == 300);
     assert(settings.dirty_block_push_seconds == 1);
     assert(settings.max_dirty_blocks_per_push == 512);
+    assert(settings.max_upload_queue_size == 4096);
     assert(!settings.upload_chunks);
     assert(settings.auto_seed_chunks);
     assert(!settings.upload_dirty_blocks);

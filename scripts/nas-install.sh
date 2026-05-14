@@ -24,7 +24,17 @@ cat > "$DATA_DIR/live_map.json" <<JSON
   "chunk_refresh_seconds": 20,
   "player_push_seconds": 1,
   "max_chunks_per_refresh": 32,
+  "player_seed_radius_chunks": 4,
+  "player_seed_interval_seconds": 600,
+  "max_seed_chunks_per_pulse": 1,
+  "seed_pulse_seconds": 1,
+  "player_seed_join_delay_seconds": 10,
+  "dirty_block_push_seconds": 1,
+  "max_dirty_blocks_per_push": 64,
+  "max_upload_queue_size": 256,
   "upload_chunks": true,
+  "auto_seed_chunks": false,
+  "upload_dirty_blocks": true,
   "upload_players": true
 }
 JSON

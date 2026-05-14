@@ -122,8 +122,11 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
         intValue(source, "player_seed_interval_seconds", settings.player_seed_interval_seconds);
     settings.max_seed_chunks_per_pulse = intValue(source, "max_seed_chunks_per_pulse", settings.max_seed_chunks_per_pulse);
     settings.seed_pulse_seconds = intValue(source, "seed_pulse_seconds", settings.seed_pulse_seconds);
+    settings.player_seed_join_delay_seconds =
+        intValue(source, "player_seed_join_delay_seconds", settings.player_seed_join_delay_seconds);
     settings.dirty_block_push_seconds = intValue(source, "dirty_block_push_seconds", settings.dirty_block_push_seconds);
     settings.max_dirty_blocks_per_push = intValue(source, "max_dirty_blocks_per_push", settings.max_dirty_blocks_per_push);
+    settings.max_upload_queue_size = intValue(source, "max_upload_queue_size", settings.max_upload_queue_size);
     settings.upload_chunks = legacyBoolValue(source, "upload_chunks", "upload_tiles", settings.upload_chunks);
     settings.auto_seed_chunks = boolValue(source, "auto_seed_chunks", settings.auto_seed_chunks);
     settings.upload_dirty_blocks = boolValue(source, "upload_dirty_blocks", settings.upload_dirty_blocks);
@@ -137,8 +140,10 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.player_seed_interval_seconds = std::clamp(settings.player_seed_interval_seconds, 30, 7200);
     settings.max_seed_chunks_per_pulse = std::clamp(settings.max_seed_chunks_per_pulse, 1, 16);
     settings.seed_pulse_seconds = std::clamp(settings.seed_pulse_seconds, 1, 60);
+    settings.player_seed_join_delay_seconds = std::clamp(settings.player_seed_join_delay_seconds, 0, 300);
     settings.dirty_block_push_seconds = std::clamp(settings.dirty_block_push_seconds, 1, 60);
     settings.max_dirty_blocks_per_push = std::clamp(settings.max_dirty_blocks_per_push, 1, 512);
+    settings.max_upload_queue_size = std::clamp(settings.max_upload_queue_size, 1, 4096);
     return settings;
 }
 
@@ -159,8 +164,10 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"player_seed_interval_seconds\": 600,\n"
         << "  \"max_seed_chunks_per_pulse\": 1,\n"
         << "  \"seed_pulse_seconds\": 1,\n"
+        << "  \"player_seed_join_delay_seconds\": 10,\n"
         << "  \"dirty_block_push_seconds\": 1,\n"
         << "  \"max_dirty_blocks_per_push\": 64,\n"
+        << "  \"max_upload_queue_size\": 256,\n"
         << "  \"upload_chunks\": true,\n"
         << "  \"auto_seed_chunks\": false,\n"
         << "  \"upload_dirty_blocks\": true,\n"

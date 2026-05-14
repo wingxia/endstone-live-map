@@ -49,9 +49,11 @@ Copy `plugin/config/live_map.json.example` to the plugin data folder as `live_ma
 For the NAS target in this environment, `mc.service` runs Endstone from `/vol1/1000`; the plugin directory is `/vol1/1000/bedrock_server/plugins`, and the data directory is `/vol1/1000/bedrock_server/plugins/live_map`.
 The current NAS Bedrock level name is `Bedrock level`, which is also the default frontend world filter.
 
-The plugin accepts the current `chunk_*` keys and the legacy `tile_*` names used by older NAS configs. New configs should use `upload_chunks`, `player_seed_radius_chunks`, `player_seed_interval_seconds`, `max_seed_chunks_per_pulse`, `seed_pulse_seconds`, `upload_dirty_blocks`, `dirty_block_push_seconds`, and `max_dirty_blocks_per_push`.
+The plugin accepts the current `chunk_*` keys and the legacy `tile_*` names used by older NAS configs. New configs should use `upload_chunks`, `player_seed_radius_chunks`, `player_seed_interval_seconds`, `max_seed_chunks_per_pulse`, `seed_pulse_seconds`, `player_seed_join_delay_seconds`, `upload_dirty_blocks`, `dirty_block_push_seconds`, `max_dirty_blocks_per_push`, and `max_upload_queue_size`.
 
-Production defaults seed `player_seed_radius_chunks=4` around each online player, refresh the same player chunk center every `player_seed_interval_seconds=600`, and rate-limit base chunk sampling with `max_seed_chunks_per_pulse=1` every `seed_pulse_seconds=1`. If the player moves into a different chunk, that new radius-4 area is queued immediately rather than waiting for the 10-minute refresh.
+Production defaults seed `player_seed_radius_chunks=4` around each online player, refresh the same player chunk center every `player_seed_interval_seconds=600`, and rate-limit base chunk sampling with `max_seed_chunks_per_pulse=1` every `seed_pulse_seconds=1`. New joins wait `player_seed_join_delay_seconds=10` before terrain sampling so the player login path can settle; player positions can still upload during that delay. If the player moves into a different chunk after the delay, that new radius-4 area is queued immediately rather than waiting for the 10-minute refresh.
+
+Plugin HTTP uploads use an internal worker thread and bounded queue (`max_upload_queue_size=256`) instead of Endstone async scheduler tasks. The worker thread only performs curl requests and never touches Endstone world/player/block APIs.
 
 Dirty block events are column-based: the plugin waits one tick, merges repeated changes for the same `(x,z)` column, and samples/uploads only when the changed block can affect the top-down map surface. Full chunk uploads are still available through `/livemap render-near` and `/livemap render-chunk` for manual repair.
 
@@ -60,6 +62,8 @@ If a server build still crashes while sampling terrain, treat `upload_chunks=fal
 ### NAS plugin safety checks
 
 Only one active shared object with plugin name `live_map` should be present under `/vol1/1000/bedrock_server/plugins`. If Endstone logs `Ambiguous plugin name 'live_map'`, keep the canonical `endstone_live_map.so` and rename older duplicates such as `endstone_endstone_live_map.so` to a disabled backup name before restarting `mc.service`.
+
+`mc.service` may still run Endstone inside `screen`, but screen must not be the only log sink. Keep systemd restart behavior intact and use a reversible override that enables `screen -L -Logfile /vol1/1000/bedrock_server/logs/mc-screen.log` plus appended stdout/stderr logs such as `/vol1/1000/bedrock_server/logs/mc-service.log`. If Endstone crashes, the screen session may disappear; the persistent logs should retain the last console output.
 
 ## Texture atlas
 
