@@ -1028,6 +1028,7 @@ function normalizeLandClaim(payload, index) {
     parent: cleanText(payload.parent || "", 120, false),
     children: normalizeStringArray(payload.children, `claims[${index}].children`, 120),
     nested: payload.nested === true || Boolean(payload.parent),
+    publicTeleport: payload.publicTeleport === true,
     updatedAt: numberOrThrow(payload.updatedAt ?? Date.now(), `claims[${index}].updatedAt`),
   };
 }

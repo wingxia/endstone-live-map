@@ -966,6 +966,27 @@ test("renders land claims, point claims, and teleport markers", async ({ page })
   await page.route("**/api/textures/manifest", async (route) => {
     await route.fulfill({ status: 404, body: "texture manifest not found" });
   });
+  const publicClaims = Array.from({ length: 13 }, (_, index) => ({
+    id: `GieZi8670:公开${index}:Overworld`,
+    owner: "GieZi8670",
+    name: `公开${index}`,
+    world: "Bedrock_level",
+    dimension: "Overworld",
+    minX: -375 + index,
+    maxX: -227 + index,
+    minY: 70,
+    maxY: 300,
+    minZ: -580 + index,
+    maxZ: -473 + index,
+    teleport: { x: -352 + index, y: 70, z: -479 + index },
+    publicTeleport: true,
+    members: ["wingxia"],
+    parent: "",
+    children: [],
+    nested: false,
+    updatedAt: 123,
+  }));
+
   await page.route("**/api/lands?**", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -988,9 +1009,30 @@ test("renders land claims, point claims, and teleport markers", async ({ page })
             minZ: -580,
             maxZ: -473,
             teleport: { x: -352, y: 70, z: -479 },
+            publicTeleport: true,
             members: ["wingxia"],
             parent: "",
             children: ["猪人塔"],
+            nested: false,
+            updatedAt: 123,
+          },
+          {
+            id: "GieZi8670:私有领地:Overworld",
+            owner: "GieZi8670",
+            name: "私有领地",
+            world: "Bedrock_level",
+            dimension: "Overworld",
+            minX: -300,
+            maxX: -290,
+            minY: 63,
+            maxY: 70,
+            minZ: -500,
+            maxZ: -490,
+            teleport: { x: -295, y: 63, z: -495 },
+            publicTeleport: false,
+            members: [],
+            parent: "",
+            children: [],
             nested: false,
             updatedAt: 123,
           },
@@ -1007,7 +1049,147 @@ test("renders land claims, point claims, and teleport markers", async ({ page })
             minZ: -540,
             maxZ: -540,
             teleport: { x: -330, y: 63, z: -540 },
+            publicTeleport: true,
             members: [],
+            parent: "",
+            children: [],
+            nested: false,
+            updatedAt: 123,
+          },
+          ...publicClaims,
+        ],
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("主城区")).toBeVisible();
+  await expect(page.getByText("白色青蛙")).toBeVisible();
+  await expect(page.getByText("公开12")).toBeVisible();
+  await expect(page.getByText("私有领地")).toHaveCount(0);
+  await expect(page.getByText(/还有/)).toHaveCount(0);
+  await expect(page.getByLabel("地图状态")).toContainText("15");
+  await expect.poll(() => page.locator(".leaflet-interactive").count()).toBeGreaterThanOrEqual(17);
+});
+
+test("centers the map on clicked players and public land teleports", async ({ page }) => {
+  const chunkQueries: Array<{ minChunkX: number; maxChunkX: number; minChunkZ: number; maxChunkZ: number }> = [];
+
+  await page.addInitScript(() => {
+    class MockWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = MockWebSocket.OPEN;
+      url: string;
+
+      constructor(url: string) {
+        super();
+        this.url = url;
+        setTimeout(() => {
+          this.dispatchEvent(new Event("open"));
+          this.dispatchEvent(
+            new MessageEvent("message", {
+              data: JSON.stringify({
+                type: "player_snapshot",
+                players: [
+                  {
+                    id: "wing",
+                    name: "Wing",
+                    world: "Bedrock level",
+                    dimension: "Overworld",
+                    x: 512,
+                    y: 64,
+                    z: -256,
+                    yaw: 0,
+                    pitch: 0,
+                    updatedAt: 1,
+                  },
+                ],
+              }),
+            }),
+          );
+        }, 50);
+      }
+
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.dispatchEvent(new Event("close"));
+      }
+
+      send() {}
+    }
+
+    Object.assign(MockWebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+    window.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+  });
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        worlds: [
+          {
+            version: 1,
+            world: "Bedrock level",
+            dimension: "Overworld",
+            status: "complete",
+            chunkCount: 256,
+            importedAt: 1,
+            updatedAt: 1,
+            bounds: {
+              minChunkX: -80,
+              maxChunkX: 80,
+              minChunkZ: -80,
+              maxChunkZ: 80,
+              minBlockX: -1280,
+              maxBlockX: 1295,
+              minBlockZ: -1280,
+              maxBlockZ: 1295,
+            },
+            topBlocks: { "minecraft:grass_block": 256 },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    const url = new URL(route.request().url());
+    chunkQueries.push({
+      minChunkX: Number(url.searchParams.get("minChunkX")),
+      maxChunkX: Number(url.searchParams.get("maxChunkX")),
+      minChunkZ: Number(url.searchParams.get("minChunkZ")),
+      maxChunkZ: Number(url.searchParams.get("maxChunkZ")),
+    });
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({ status: 404, body: "texture manifest not found" });
+  });
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        world: "Bedrock_level",
+        dimension: "Overworld",
+        updatedAt: 123,
+        claims: [
+          {
+            id: "GieZi8670:主城区:Overworld",
+            owner: "GieZi8670",
+            name: "主城区",
+            world: "Bedrock_level",
+            dimension: "Overworld",
+            minX: -375,
+            maxX: -227,
+            minY: 70,
+            maxY: 300,
+            minZ: -580,
+            maxZ: -473,
+            teleport: { x: -352, y: 70, z: -479 },
+            publicTeleport: true,
+            members: ["wingxia"],
             parent: "",
             children: [],
             nested: false,
@@ -1019,10 +1201,14 @@ test("renders land claims, point claims, and teleport markers", async ({ page })
   });
 
   await page.goto("/");
+  await expect(page.getByText("Wing")).toBeVisible();
   await expect(page.getByText("主城区")).toBeVisible();
-  await expect(page.getByText("白色青蛙")).toBeVisible();
-  await expect(page.getByLabel("地图状态")).toContainText("2");
-  await expect.poll(() => page.locator(".leaflet-interactive").count()).toBeGreaterThanOrEqual(3);
+
+  await page.getByRole("button", { name: /Wing/ }).click();
+  await expect.poll(() => chunkQueries.some((query) => queryIncludesChunk(query, 32, -16))).toBe(true);
+
+  await page.getByRole("button", { name: /主城区/ }).click();
+  await expect.poll(() => chunkQueries.some((query) => queryIncludesChunk(query, -22, -30))).toBe(true);
 });
 
 async function pageHasGrassPixels(page: Page) {
@@ -1049,6 +1235,14 @@ async function dragMap(page: Page, fromX: number, fromY: number, toX: number, to
   await page.mouse.down();
   await page.mouse.move(toX, toY, { steps: 12 });
   await page.mouse.up();
+}
+
+function queryIncludesChunk(
+  query: { minChunkX: number; maxChunkX: number; minChunkZ: number; maxChunkZ: number },
+  chunkX: number,
+  chunkZ: number,
+) {
+  return query.minChunkX <= chunkX && query.maxChunkX >= chunkX && query.minChunkZ <= chunkZ && query.maxChunkZ >= chunkZ;
 }
 
 async function firstChunkTileHasNoDarkHoles(page: Page) {

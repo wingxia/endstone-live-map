@@ -26,9 +26,10 @@ interface MapCanvasProps {
   worldMeta: WorldMeta | null;
   chunkReady: ChunkReadyMessage | null;
   blockUpdates: BlockUpdatesMessage | null;
+  focusTarget: { x: number; z: number; nonce: number } | null;
 }
 
-export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkReady, blockUpdates }: MapCanvasProps) {
+export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkReady, blockUpdates, focusTarget }: MapCanvasProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const stateRef = useRef<{
     map: import("leaflet").Map;
@@ -153,6 +154,14 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
       stateRef.current?.chunkLayer.applyBlockUpdates(blockUpdates);
     }
   }, [blockUpdates]);
+
+  useEffect(() => {
+    const state = stateRef.current;
+    if (!state || !mapReady || !focusTarget) {
+      return;
+    }
+    state.map.setView(minecraftToLeaflet(focusTarget.x, focusTarget.z), state.map.getZoom(), { animate: true });
+  }, [focusTarget, mapReady]);
 
   useEffect(() => {
     let cancelled = false;

@@ -59,6 +59,7 @@ export const mockLands: LandClaim[] = [
     parent: "",
     children: ["猪人塔", "交易所/刷铁机"],
     nested: false,
+    publicTeleport: true,
     updatedAt: Date.now(),
   },
   {
@@ -78,6 +79,7 @@ export const mockLands: LandClaim[] = [
     parent: "",
     children: [],
     nested: false,
+    publicTeleport: false,
     updatedAt: Date.now(),
   },
 ];

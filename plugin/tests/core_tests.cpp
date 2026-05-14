@@ -128,6 +128,7 @@ void testLandConfigParsing()
             "tpposx": "-352",
             "tpposy": "70",
             "tpposz": "-479",
+            "tppublic": true,
             "in": false,
             "son": ["猪人塔"]
           }
@@ -141,6 +142,7 @@ void testLandConfigParsing()
             "tpposx": "-317",
             "tpposy": "75",
             "tpposz": "-534",
+            "tppublic": false,
             "in": true,
             "father": "主城区",
             "son": []
@@ -188,8 +190,11 @@ void testLandConfigParsing()
     assert(parsed.claims[0].members.size() == 2);
     assert(parsed.claims[0].children.size() == 1);
     assert(!parsed.claims[0].nested);
+    assert(parsed.claims[0].public_teleport);
     assert(parsed.claims[1].parent == "主城区");
     assert(parsed.claims[1].nested);
+    assert(!parsed.claims[1].public_teleport);
+    assert(!parsed.claims[2].public_teleport);
     assert(parsed.claims[2].min_x == parsed.claims[2].max_x);
     assert(parsed.claims[2].min_z == parsed.claims[2].max_z);
 
@@ -198,6 +203,8 @@ void testLandConfigParsing()
     assert(serialized.find("\"owner\":\"GieZi8670\"") != std::string::npos);
     assert(serialized.find("\"name\":\"主城区\"") != std::string::npos);
     assert(serialized.find("\"teleport\":{\"x\":-352,\"y\":70,\"z\":-479}") != std::string::npos);
+    assert(serialized.find("\"publicTeleport\":true") != std::string::npos);
+    assert(serialized.find("\"publicTeleport\":false") != std::string::npos);
     assert(serialized.find("\"nested\":true") != std::string::npos);
 }
 

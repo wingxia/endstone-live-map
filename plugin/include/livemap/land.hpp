@@ -30,6 +30,7 @@ struct LandClaim {
     std::string parent;
     std::vector<std::string> children;
     bool nested = false;
+    bool public_teleport = false;
     std::int64_t updated_at_ms{};
 };
 

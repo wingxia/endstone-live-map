@@ -304,6 +304,7 @@ describe("worker helpers", () => {
           minZ: -580,
           maxZ: -473,
           teleport: { x: -352, y: 70, z: -479 },
+          publicTeleport: true,
           members: ["wingxia"],
           children: ["猪人塔"],
           updatedAt: 123,
@@ -319,7 +320,27 @@ describe("worker helpers", () => {
       maxZ: -473,
       teleport: { x: -352, y: 70, z: -479 },
       nested: false,
+      publicTeleport: true,
     });
+    const privatePayload = normalizeLandPayload({
+      claims: [
+        {
+          owner: "GieZi8670",
+          name: "未公开",
+          world: "Bedrock level",
+          dimension: "Overworld",
+          minX: 0,
+          maxX: 1,
+          minY: 60,
+          maxY: 70,
+          minZ: 0,
+          maxZ: 1,
+          teleport: { x: 0, y: 64, z: 0 },
+          updatedAt: 124,
+        },
+      ],
+    });
+    expect(privatePayload.claims[0]).toMatchObject({ publicTeleport: false });
     expect(landKey("Bedrock level", "Overworld")).toBe("lands/v1/Bedrock_level/Overworld.json");
     expect(() => normalizeLandPayload({ claims: [{ owner: "x", name: "bad", minX: 1, maxX: 0, minY: 0, maxY: 0, minZ: 0, maxZ: 0, teleport: { x: 0, y: 0, z: 0 } }] })).toThrow(/bounds/);
   });
@@ -771,6 +792,7 @@ describe("worker routes", () => {
               minZ: -580,
               maxZ: -473,
               teleport: { x: -352, y: 70, z: -479 },
+              publicTeleport: true,
               members: ["wingxia"],
               parent: "",
               children: ["猪人塔"],
@@ -818,7 +840,7 @@ describe("worker routes", () => {
 
     const lands = await worker.fetch(new Request("https://map.buhe.li/api/lands?world=Bedrock%20level&dimension=Overworld"), env, {});
     expect(lands.status).toBe(200);
-    expect(await lands.json()).toMatchObject({ world: "Bedrock_level", dimension: "Overworld", claims: [{ name: "主城区" }] });
+    expect(await lands.json()).toMatchObject({ world: "Bedrock_level", dimension: "Overworld", claims: [{ name: "主城区", publicTeleport: true }] });
 
     const empty = await worker.fetch(new Request("https://map.buhe.li/api/lands?world=Bedrock%20level&dimension=Nether"), env, {});
     expect(await empty.json()).toMatchObject({ world: "Bedrock_level", dimension: "Nether", claims: [] });

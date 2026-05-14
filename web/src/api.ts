@@ -101,6 +101,7 @@ export interface LandClaim {
   parent: string;
   children: string[];
   nested: boolean;
+  publicTeleport: boolean;
   updatedAt: number;
 }
 

@@ -406,6 +406,7 @@ std::optional<LandClaim> parseClaim(const std::string &owner, const std::string 
     claim.parent = stringField(config, "father");
     claim.children = stringArrayField(config, "son");
     claim.nested = boolField(config, "in") || !claim.parent.empty();
+    claim.public_teleport = boolField(config, "tppublic");
     claim.updated_at_ms = updated_at_ms;
     return claim;
 }
@@ -488,8 +489,9 @@ std::string serializeLandBatch(const std::vector<LandClaim> &claims)
             }
             out << '"' << jsonEscape(claim.children[child_index]) << '"';
         }
-        out << "],\"nested\":" << (claim.nested ? "true" : "false") << ",\"updatedAt\":"
-            << claim.updated_at_ms << '}';
+        out << "],\"nested\":" << (claim.nested ? "true" : "false")
+            << ",\"publicTeleport\":" << (claim.public_teleport ? "true" : "false")
+            << ",\"updatedAt\":" << claim.updated_at_ms << '}';
     }
     out << "]}";
     return out.str();

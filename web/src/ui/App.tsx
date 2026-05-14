@@ -1,5 +1,5 @@
 import { LandPlot, Layers, LocateFixed, RadioTower } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { fetchLands, listWorlds, segmentKey, type LandClaim, type WorldMeta } from "../api";
 import { useLivePlayers } from "../hooks/useLivePlayers";
@@ -10,6 +10,12 @@ import { PlayerList } from "./PlayerList";
 const DEFAULT_WORLD = "Bedrock level";
 const DEFAULT_DIMENSION = "Overworld";
 
+interface MapFocusTarget {
+  x: number;
+  z: number;
+  nonce: number;
+}
+
 export function App() {
   const live = useLivePlayers();
   const [worlds, setWorlds] = useState<WorldMeta[]>([]);
@@ -17,6 +23,7 @@ export function App() {
   const [selectedDimension, setSelectedDimension] = useState(DEFAULT_DIMENSION);
   const [error, setError] = useState("");
   const [landError, setLandError] = useState("");
+  const [focusTarget, setFocusTarget] = useState<MapFocusTarget | null>(null);
 
   useEffect(() => {
     listWorlds()
@@ -55,6 +62,7 @@ export function App() {
 
   const selectedWorldMeta = worlds.find((world) => world.dimension === selectedDimension && segmentKey(world.world) === segmentKey(DEFAULT_WORLD)) || null;
   const selectedPlayers = live.players.filter((player) => player.dimension === selectedDimension);
+  const publicLands = useMemo(() => lands.filter((land) => land.publicTeleport === true), [lands]);
 
   return (
     <main className="app-shell">
@@ -63,10 +71,11 @@ export function App() {
           world={DEFAULT_WORLD}
           dimension={selectedDimension}
           players={selectedPlayers}
-          lands={lands}
+          lands={publicLands}
           worldMeta={selectedWorldMeta}
           chunkReady={live.chunkReady}
           blockUpdates={live.blockUpdates}
+          focusTarget={focusTarget}
         />
         <div className="map-hud" aria-label="地图状态">
           <span>{selectedDimension}</span>
@@ -74,7 +83,7 @@ export function App() {
           <span>区块</span>
           <strong>{selectedPlayers.length}</strong>
           <span>在线</span>
-          <strong>{lands.length}</strong>
+          <strong>{publicLands.length}</strong>
           <span>领地</span>
         </div>
       </section>
@@ -112,7 +121,10 @@ export function App() {
             <LocateFixed size={17} aria-hidden="true" />
             在线玩家
           </h2>
-          <PlayerList players={selectedPlayers} />
+          <PlayerList
+            players={selectedPlayers}
+            onSelectPlayer={(player) => setFocusTarget({ x: player.x, z: player.z, nonce: Date.now() })}
+          />
         </section>
 
         <section aria-labelledby="lands-title">
@@ -121,7 +133,10 @@ export function App() {
             领地标注
           </h2>
           {landError ? <p className="error-banner">{landError}</p> : null}
-          <LandList lands={lands} />
+          <LandList
+            lands={publicLands}
+            onSelectLand={(land) => setFocusTarget({ x: land.teleport.x, z: land.teleport.z, nonce: Date.now() })}
+          />
         </section>
       </aside>
     </main>

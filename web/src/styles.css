@@ -211,15 +211,41 @@ h2 {
 }
 
 .item-list li {
+  min-height: 52px;
+}
+
+.item-action {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
+  width: 100%;
   min-height: 52px;
   padding: 10px;
   border: 1px solid #283541;
   border-radius: 8px;
   background: #1a232c;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    transform 160ms ease;
+}
+
+.item-action:hover {
+  border-color: #3d5060;
+  background: #202c36;
+}
+
+.item-action:focus-visible {
+  outline: 2px solid #58d39c;
+  outline-offset: 2px;
+}
+
+.item-action:active {
+  transform: translateY(1px);
 }
 
 .item-list strong,
@@ -269,10 +295,6 @@ h2 {
   max-height: 420px;
   overflow: auto;
   padding-right: 2px;
-}
-
-.list-more {
-  color: #9badbc;
 }
 
 .trailing-icon {
