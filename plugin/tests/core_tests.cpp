@@ -1,3 +1,4 @@
+#include "livemap/baseline.hpp"
 #include "livemap/base64.hpp"
 #include "livemap/chunk.hpp"
 #include "livemap/protocol.hpp"
@@ -133,6 +134,70 @@ void testBase64()
     assert(livemap::base64Encode(one) == "TQ==");
 }
 
+
+livemap::ChunkSnapshot makeBaselineTestSnapshot()
+{
+    livemap::ChunkSnapshot snapshot;
+    snapshot.world = "world";
+    snapshot.dimension = "Overworld";
+    snapshot.chunk_x = -1;
+    snapshot.chunk_z = 2;
+    snapshot.palette = {"minecraft:grass_block", "minecraft:water"};
+    snapshot.blocks.fill(0);
+    snapshot.heights.fill(64);
+    snapshot.blocks[3] = 1;
+    snapshot.heights[3] = 62;
+    snapshot.updated_at_ms = 99;
+    return snapshot;
+}
+
+void testChunkSnapshotFingerprint()
+{
+    auto first = makeBaselineTestSnapshot();
+    auto second = makeBaselineTestSnapshot();
+    assert(livemap::fingerprintChunkSnapshot(first) == livemap::fingerprintChunkSnapshot(second));
+
+    livemap::applyBlockUpdatesToSnapshot(second, {{3, 0, "minecraft:stone", 70}}, 100);
+    assert(livemap::fingerprintChunkSnapshot(first) != livemap::fingerprintChunkSnapshot(second));
+    assert(second.updated_at_ms == 100);
+}
+
+void testChunkBaselineIndex()
+{
+    const auto path = std::filesystem::temp_directory_path() / "live_map_chunk_baselines_test.tsv";
+    std::filesystem::remove(path);
+
+    auto snapshot = makeBaselineTestSnapshot();
+    const auto coord = livemap::ChunkCoord{snapshot.world, snapshot.dimension, snapshot.chunk_x, snapshot.chunk_z};
+    livemap::ChunkBaselineMap baselines;
+    baselines[coord] = {coord, livemap::fingerprintChunkSnapshot(snapshot), snapshot.updated_at_ms};
+
+    std::string error;
+    assert(livemap::saveChunkBaselineIndexAtomic(path, baselines, &error));
+
+    auto loaded = livemap::loadChunkBaselineIndex(path);
+    assert(loaded.skipped_lines == 0);
+    assert(loaded.baselines.size() == 1);
+    assert(loaded.baselines.at(coord).fingerprint == baselines.at(coord).fingerprint);
+    assert(loaded.baselines.at(coord).updated_at_ms == 99);
+
+    livemap::applyBlockUpdatesToSnapshot(snapshot, {{1, 1, "minecraft:stone", 71}}, 101);
+    baselines[coord] = {coord, livemap::fingerprintChunkSnapshot(snapshot), snapshot.updated_at_ms};
+    assert(livemap::saveChunkBaselineIndexAtomic(path, baselines, &error));
+    loaded = livemap::loadChunkBaselineIndex(path);
+    assert(loaded.baselines.size() == 1);
+    assert(loaded.baselines.at(coord).updated_at_ms == 101);
+
+    {
+        std::ofstream out(path, std::ios::app);
+        out << "bad\tline\n";
+    }
+    loaded = livemap::loadChunkBaselineIndex(path);
+    assert(loaded.skipped_lines == 1);
+    assert(loaded.baselines.size() == 1);
+    std::filesystem::remove(path);
+}
+
 void testSettingsLegacyKeys()
 {
     const auto path = std::filesystem::temp_directory_path() / "live_map_legacy_settings_test.json";
@@ -224,6 +289,8 @@ int main()
     testDirtyBlockTracker();
     testProtocol();
     testBase64();
+    testChunkSnapshotFingerprint();
+    testChunkBaselineIndex();
     testSettingsLegacyKeys();
     testSettingsNewKeysOverrideLegacyKeys();
     std::cout << "livemap core tests passed\n";

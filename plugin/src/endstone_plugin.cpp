@@ -1,3 +1,4 @@
+#include "livemap/baseline.hpp"
 #include "livemap/chunk.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -46,6 +48,7 @@ struct ColumnTop {
     int height = -64;
 };
 
+
 struct QueuedSeed {
     livemap::ChunkCoord coord;
     std::int64_t queued_at_ms{};
@@ -54,6 +57,7 @@ struct QueuedSeed {
 struct ChunkUploadMeta {
     livemap::ChunkCoord coord;
     std::uint64_t fingerprint{};
+    std::int64_t updated_at_ms{};
 };
 
 std::string chunkName(const livemap::ChunkCoord &coord)
@@ -64,47 +68,6 @@ std::string chunkName(const livemap::ChunkCoord &coord)
 livemap::ChunkCoord chunkCoordForSnapshot(const livemap::ChunkSnapshot &snapshot)
 {
     return {snapshot.world, snapshot.dimension, snapshot.chunk_x, snapshot.chunk_z};
-}
-
-void mixFingerprintByte(std::uint64_t &hash, std::uint8_t value)
-{
-    hash ^= value;
-    hash *= 1099511628211ULL;
-}
-
-void mixFingerprintUint64(std::uint64_t &hash, std::uint64_t value)
-{
-    for (int shift = 0; shift < 64; shift += 8) {
-        mixFingerprintByte(hash, static_cast<std::uint8_t>((value >> shift) & 0xFFU));
-    }
-}
-
-void mixFingerprintString(std::uint64_t &hash, std::string_view value)
-{
-    mixFingerprintUint64(hash, static_cast<std::uint64_t>(value.size()));
-    for (const auto ch : value) {
-        mixFingerprintByte(hash, static_cast<std::uint8_t>(ch));
-    }
-}
-
-std::uint64_t fingerprintChunkSnapshot(const livemap::ChunkSnapshot &snapshot)
-{
-    std::uint64_t hash = 14695981039346656037ULL;
-    mixFingerprintString(hash, snapshot.world);
-    mixFingerprintString(hash, snapshot.dimension);
-    mixFingerprintUint64(hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(snapshot.chunk_x)));
-    mixFingerprintUint64(hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(snapshot.chunk_z)));
-    mixFingerprintUint64(hash, static_cast<std::uint64_t>(snapshot.palette.size()));
-    for (const auto &block : snapshot.palette) {
-        mixFingerprintString(hash, block);
-    }
-    for (const auto block : snapshot.blocks) {
-        mixFingerprintUint64(hash, static_cast<std::uint64_t>(block));
-    }
-    for (const auto height : snapshot.heights) {
-        mixFingerprintUint64(hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(height)));
-    }
-    return hash;
 }
 
 struct UploadJob {
@@ -118,14 +81,86 @@ struct UploadJob {
     std::string path;
     std::string json;
     std::vector<ChunkUploadMeta> chunks;
+    std::vector<livemap::ChunkSnapshot> snapshots;
     std::size_t update_count{};
+    bool resample_after_success{};
 };
 
 struct UploadResult {
     UploadJob::Kind kind{};
     std::vector<ChunkUploadMeta> chunks;
+    std::vector<livemap::ChunkSnapshot> snapshots;
     std::size_t update_count{};
+    bool resample_after_success{};
     livemap::TransportResult transport;
+};
+
+class BackgroundLog {
+public:
+    bool open(const std::filesystem::path &path, std::string *error = nullptr)
+    {
+        try {
+            std::scoped_lock lock(mutex_);
+            path_ = path;
+            std::filesystem::create_directories(path.parent_path());
+            out_.open(path, std::ios::app);
+            if (!out_) {
+                if (error != nullptr) {
+                    *error = "failed to open background log";
+                }
+                return false;
+            }
+            return true;
+        }
+        catch (const std::exception &exception) {
+            if (error != nullptr) {
+                *error = exception.what();
+            }
+            return false;
+        }
+        catch (...) {
+            if (error != nullptr) {
+                *error = "unknown error";
+            }
+            return false;
+        }
+    }
+
+    void close()
+    {
+        std::scoped_lock lock(mutex_);
+        out_.close();
+    }
+
+    template <typename... Values>
+    void info(const Values &...values)
+    {
+        write("INFO", values...);
+    }
+
+    template <typename... Values>
+    void warning(const Values &...values)
+    {
+        write("WARN", values...);
+    }
+
+private:
+    template <typename... Values>
+    void write(std::string_view level, const Values &...values)
+    {
+        std::scoped_lock lock(mutex_);
+        if (!out_) {
+            return;
+        }
+        out_ << nowMs() << '\t' << level << '\t';
+        (out_ << ... << values);
+        out_ << '\n';
+        out_.flush();
+    }
+
+    std::mutex mutex_;
+    std::filesystem::path path_;
+    std::ofstream out_;
 };
 
 class UploadDispatcher {
@@ -209,7 +244,8 @@ private:
             auto transport = livemap::postPluginJson(settings_, job.path, job.json);
             {
                 std::scoped_lock lock(mutex_);
-                results_.push_back({job.kind, std::move(job.chunks), job.update_count, std::move(transport)});
+                results_.push_back({job.kind, std::move(job.chunks), std::move(job.snapshots), job.update_count,
+                                    job.resample_after_success, std::move(transport)});
             }
         }
     }
@@ -244,12 +280,24 @@ public:
     void onEnable() override
     {
         const auto config_path = getDataFolder() / "live_map.json";
+        bool created_config = false;
         if (!std::filesystem::exists(config_path)) {
             livemap::writeExampleSettings(config_path);
-            getLogger().warning("Created {}, set plugin_token before enabling uploads.", config_path.string());
+            created_config = true;
         }
 
         settings_ = livemap::loadSettings(config_path);
+        background_log_path_ = resolveDataPath(settings_.background_log_file);
+        baseline_index_path_ = resolveDataPath(settings_.baseline_index_file);
+        std::string background_log_error;
+        if (!background_log_.open(background_log_path_, &background_log_error)) {
+            getLogger().error("Failed to open live map background log {}: {}", background_log_path_.string(),
+                              background_log_error);
+        }
+        if (created_config) {
+            background_log_.warning("Created ", config_path.string(), ", set plugin_token before enabling uploads.");
+        }
+        loadChunkBaselines();
         upload_dispatcher_ =
             std::make_unique<UploadDispatcher>(settings_, static_cast<std::size_t>(settings_.max_upload_queue_size));
         active_ = true;
@@ -271,17 +319,18 @@ public:
         upload_result_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { processUploadResults(); }, 20,
                                                                       20);
 
-        getLogger().info(
-            "Endstone Live Map enabled for {} with uploads players={} chunks={} dirtyBlocks={} autoSeedChunks={} "
-            "legacyRadius={} playerSeedRadius={} playerSeedInterval={}s maxSeedPerPulse={} seedPulse={}s "
-            "playerSeedJoinDelay={}s chunkUploadBatch={} chunkUploadFlush={}s dirtyBlockPush={}s maxDirtyBlocks={} "
-            "maxUploadQueue={} dimensions={}.",
-            settings_.worker_url, settings_.upload_players, settings_.upload_chunks, settings_.upload_dirty_blocks,
-            settings_.auto_seed_chunks, settings_.scan_radius_chunks, settings_.player_seed_radius_chunks,
-            settings_.player_seed_interval_seconds, settings_.max_seed_chunks_per_pulse, settings_.seed_pulse_seconds,
-            settings_.player_seed_join_delay_seconds, settings_.chunk_upload_batch_size,
-            settings_.chunk_upload_flush_seconds, settings_.dirty_block_push_seconds, settings_.max_dirty_blocks_per_push,
-            settings_.max_upload_queue_size, settings_.dimensions.size());
+        background_log_.info(
+            "Endstone Live Map enabled for ", settings_.worker_url, " with uploads players=", settings_.upload_players,
+            " chunks=", settings_.upload_chunks, " dirtyBlocks=", settings_.upload_dirty_blocks,
+            " autoSeedChunks=", settings_.auto_seed_chunks, " legacyRadius=", settings_.scan_radius_chunks,
+            " playerSeedRadius=", settings_.player_seed_radius_chunks,
+            " playerSeedInterval=", settings_.player_seed_interval_seconds, "s maxSeedPerPulse=",
+            settings_.max_seed_chunks_per_pulse, " seedPulse=", settings_.seed_pulse_seconds,
+            "s playerSeedJoinDelay=", settings_.player_seed_join_delay_seconds, "s chunkUploadBatch=",
+            settings_.chunk_upload_batch_size, " chunkUploadFlush=", settings_.chunk_upload_flush_seconds,
+            "s dirtyBlockPush=", settings_.dirty_block_push_seconds, "s maxDirtyBlocks=",
+            settings_.max_dirty_blocks_per_push, " maxUploadQueue=", settings_.max_upload_queue_size,
+            " dimensions=", settings_.dimensions.size(), ".");
     }
 
     void onDisable() override
@@ -303,7 +352,9 @@ public:
         if (upload_dispatcher_ != nullptr) {
             upload_dispatcher_->stop();
         }
-        getLogger().info("Endstone Live Map disabled");
+        persistChunkBaselines();
+        background_log_.info("Endstone Live Map disabled");
+        background_log_.close();
     }
 
     bool onCommand(endstone::CommandSender &sender, const endstone::Command &command,
@@ -328,8 +379,8 @@ public:
                 }
                 const auto queued = enqueueSeedChunk({level->getName(), "Overworld", chunk_x, chunk_z}, true);
                 sender.sendMessage("Queued " + std::to_string(queued) + " chunk for live map base sampling.");
-                getLogger().info("Queued chunk {}/Overworld/{}/{} for live map sampling.", level->getName(), chunk_x,
-                                 chunk_z);
+                background_log_.info("Queued chunk ", level->getName(), "/Overworld/", chunk_x, "/", chunk_z,
+                                     " for live map sampling.");
             }
             catch (...) {
                 sender.sendMessage("Usage: /livemap render-chunk <chunkX> <chunkZ>");
@@ -350,7 +401,7 @@ public:
             }
             const auto queued = queueChunksNearPlayers(radius, true);
             sender.sendMessage("Queued " + std::to_string(queued) + " chunks for live map sampling.");
-            getLogger().info("Queued {} chunks for live map sampling with radius {}.", queued, radius);
+            background_log_.info("Queued ", queued, " chunks for live map sampling with radius ", radius, ".");
             return true;
         }
 
@@ -386,6 +437,15 @@ public:
     }
 
 private:
+    std::filesystem::path resolveDataPath(const std::string &configured_path) const
+    {
+        std::filesystem::path path(configured_path.empty() ? "." : configured_path);
+        if (path.is_relative()) {
+            path = getDataFolder() / path;
+        }
+        return path;
+    }
+
     [[nodiscard]] bool dimensionEnabled(const std::string &dimension) const
     {
         return std::find(settings_.dimensions.begin(), settings_.dimensions.end(), dimension) !=
@@ -551,8 +611,8 @@ private:
         }
 
         if (!enqueueUpload({UploadJob::Kind::PlayerSnapshot, "/api/plugin/live",
-                            livemap::serializePlayerSnapshot(players), {}, 0})) {
-            getLogger().warning("Dropped live map player snapshot because upload queue is full.");
+                            livemap::serializePlayerSnapshot(players), {}, {}, 0, false})) {
+            background_log_.warning("Dropped live map player snapshot because upload queue is full.");
         }
     }
 
@@ -651,6 +711,47 @@ private:
         dirty_blocks_.markColumn(column.coord, column.touched_y);
     }
 
+    void loadChunkBaselines()
+    {
+        const auto loaded = livemap::loadChunkBaselineIndex(baseline_index_path_);
+        {
+            std::scoped_lock lock(state_mutex_);
+            chunk_baselines_ = loaded.baselines;
+            baselines_dirty_ = false;
+        }
+        background_log_.info("Loaded ", loaded.baselines.size(), " live map chunk baseline(s) from ",
+                             baseline_index_path_.string(), ".");
+        if (loaded.skipped_lines > 0) {
+            background_log_.warning("Skipped ", loaded.skipped_lines, " invalid live map baseline line(s).");
+        }
+    }
+
+    void persistChunkBaselines()
+    {
+        livemap::ChunkBaselineMap baselines;
+        {
+            std::scoped_lock lock(state_mutex_);
+            if (!baselines_dirty_) {
+                return;
+            }
+            baselines = chunk_baselines_;
+            baselines_dirty_ = false;
+        }
+
+        std::string error;
+        if (!livemap::saveChunkBaselineIndexAtomic(baseline_index_path_, baselines, &error)) {
+            {
+                std::scoped_lock lock(state_mutex_);
+                baselines_dirty_ = true;
+            }
+            getLogger().error("Failed to persist live map chunk baseline index {}: {}", baseline_index_path_.string(),
+                              error);
+            return;
+        }
+        background_log_.info("Persisted ", baselines.size(), " live map chunk baseline(s) to ",
+                             baseline_index_path_.string(), ".");
+    }
+
     [[nodiscard]] bool enqueueUpload(UploadJob job)
     {
         if (upload_dispatcher_ == nullptr || !upload_dispatcher_->enqueue(std::move(job))) {
@@ -662,11 +763,12 @@ private:
     bool queuePendingChunkUpload(livemap::ChunkSnapshot snapshot)
     {
         const auto coord = chunkCoordForSnapshot(snapshot);
-        const auto fingerprint = fingerprintChunkSnapshot(snapshot);
+        const auto fingerprint = livemap::fingerprintChunkSnapshot(snapshot);
         std::scoped_lock lock(state_mutex_);
 
-        const auto confirmed = chunk_fingerprints_.find(coord);
-        if (confirmed != chunk_fingerprints_.end() && confirmed->second == fingerprint) {
+        const auto confirmed = chunk_baselines_.find(coord);
+        if (confirmed != chunk_baselines_.end() && confirmed->second.fingerprint == fingerprint) {
+            confirmed_chunk_snapshots_[coord] = std::move(snapshot);
             ++skipped_cached_chunks_;
             return false;
         }
@@ -677,7 +779,7 @@ private:
             return false;
         }
 
-        const auto meta = ChunkUploadMeta{coord, fingerprint};
+        const auto meta = ChunkUploadMeta{coord, fingerprint, snapshot.updated_at_ms};
         pending_chunk_fingerprints_[coord] = fingerprint;
         for (std::size_t i = 0; i < pending_chunk_uploads_.size(); ++i) {
             if (pending_chunk_metas_[i].coord == coord) {
@@ -746,10 +848,11 @@ private:
             return false;
         }
 
-        if (!enqueueUpload({UploadJob::Kind::ChunkBatch, "/api/plugin/chunks/batch",
-                            livemap::serializeChunkBatch(snapshots, true), metas, snapshots.size()})) {
+        const auto json = livemap::serializeChunkBatch(snapshots, true);
+        if (!enqueueUpload({UploadJob::Kind::ChunkBatch, "/api/plugin/chunks/batch", json, metas, snapshots,
+                            snapshots.size(), false})) {
             restorePendingChunkUploads(std::move(snapshots), metas);
-            getLogger().warning("Delayed live map chunk batch upload because upload queue is full.");
+            background_log_.warning("Delayed live map chunk batch upload because upload queue is full.");
             return false;
         }
         return true;
@@ -759,8 +862,51 @@ private:
     {
         std::scoped_lock lock(state_mutex_);
         for (const auto &chunk : chunks) {
-            chunk_fingerprints_[chunk.coord] = chunk.fingerprint;
+            chunk_baselines_[chunk.coord] = {chunk.coord, chunk.fingerprint, chunk.updated_at_ms};
+            baselines_dirty_ = true;
         }
+    }
+
+    void removeConfirmedChunkBaselines(const std::vector<ChunkUploadMeta> &chunks)
+    {
+        std::scoped_lock lock(state_mutex_);
+        for (const auto &chunk : chunks) {
+            chunk_baselines_.erase(chunk.coord);
+            confirmed_chunk_snapshots_.erase(chunk.coord);
+            baselines_dirty_ = true;
+        }
+    }
+
+    void confirmUploadedChunkSnapshots(const std::vector<livemap::ChunkSnapshot> &snapshots)
+    {
+        std::scoped_lock lock(state_mutex_);
+        for (const auto &snapshot : snapshots) {
+            confirmed_chunk_snapshots_[chunkCoordForSnapshot(snapshot)] = snapshot;
+        }
+    }
+
+    std::optional<ChunkUploadMeta> prepareDirtyBaselineMeta(
+        const livemap::ChunkCoord &coord, const std::vector<livemap::BlockColumnUpdate> &updates,
+        std::int64_t updated_at_ms, bool &resample_after_success,
+        std::vector<livemap::ChunkSnapshot> &updated_snapshots)
+    {
+        std::scoped_lock lock(state_mutex_);
+        const auto baseline = chunk_baselines_.find(coord);
+        if (baseline == chunk_baselines_.end()) {
+            return std::nullopt;
+        }
+
+        const auto snapshot = confirmed_chunk_snapshots_.find(coord);
+        if (snapshot == confirmed_chunk_snapshots_.end()) {
+            resample_after_success = true;
+            return ChunkUploadMeta{coord, baseline->second.fingerprint, baseline->second.updated_at_ms};
+        }
+
+        auto updated_snapshot = snapshot->second;
+        livemap::applyBlockUpdatesToSnapshot(updated_snapshot, updates, updated_at_ms);
+        const auto fingerprint = livemap::fingerprintChunkSnapshot(updated_snapshot);
+        updated_snapshots.push_back(std::move(updated_snapshot));
+        return ChunkUploadMeta{coord, fingerprint, updated_at_ms};
     }
 
     void logCachedChunkSkips(bool force)
@@ -780,7 +926,7 @@ private:
             skipped_cached_chunks_ = 0;
             last_chunk_cache_log_ms_ = current_ms;
         }
-        getLogger().info("Skipped {} unchanged live map base chunk upload(s) from local cache.", skipped);
+        background_log_.info("Skipped ", skipped, " unchanged live map base chunk upload(s) from local baseline.");
     }
 
     void processUploadResults()
@@ -793,31 +939,40 @@ private:
             if (result.transport.ok && !result.transport.missing_base) {
                 if (result.kind == UploadJob::Kind::ChunkBatch) {
                     confirmUploadedChunkBatch(result.chunks);
-                    std::cout << "[LiveMap] Uploaded chunk batch " << result.chunks.size() << " chunk(s) HTTP "
-                              << result.transport.response_code << std::endl;
+                    confirmUploadedChunkSnapshots(result.snapshots);
+                    background_log_.info("Uploaded chunk batch ", result.chunks.size(), " chunk(s) HTTP ",
+                                         result.transport.response_code, ".");
+                    persistChunkBaselines();
                 }
                 else if (result.kind == UploadJob::Kind::BlockUpdates) {
                     const auto name = result.chunks.empty() ? std::string{"unknown"} : chunkName(result.chunks[0].coord);
-                    std::cout << "[LiveMap] Uploaded " << result.update_count << " dirty block update(s) for "
-                              << name << " HTTP " << result.transport.response_code << std::endl;
+                    confirmUploadedChunkBatch(result.chunks);
+                    confirmUploadedChunkSnapshots(result.snapshots);
+                    background_log_.info("Uploaded ", result.update_count, " dirty block update(s) for ", name,
+                                         " HTTP ", result.transport.response_code, ".");
+                    if (result.resample_after_success && active_) {
+                        for (const auto &chunk : result.chunks) {
+                            enqueueSeedChunk(chunk.coord, true);
+                        }
+                        background_log_.info("Queued base resample after dirty update for ", name,
+                                             " because confirmed snapshot was not available.");
+                    }
+                    persistChunkBaselines();
                 }
                 continue;
             }
 
             if (result.kind == UploadJob::Kind::PlayerSnapshot) {
-                std::cerr << "[LiveMap] Failed to upload player snapshot HTTP " << result.transport.response_code
-                          << " curl " << result.transport.curl_code;
-                if (!result.transport.error.empty()) {
-                    std::cerr << " error=" << result.transport.error;
-                }
-                std::cerr << std::endl;
+                getLogger().error("Failed to upload player snapshot HTTP {} curl {} error={}",
+                                  result.transport.response_code, result.transport.curl_code, result.transport.error);
                 continue;
             }
 
             if (result.kind == UploadJob::Kind::BlockUpdates && result.transport.missing_base) {
                 const auto name = result.chunks.empty() ? std::string{"unknown"} : chunkName(result.chunks[0].coord);
-                std::cerr << "[LiveMap] Dirty block update missing base chunk " << name << "; queued base resample"
-                          << std::endl;
+                removeConfirmedChunkBaselines(result.chunks);
+                background_log_.warning("Dirty block update missing base chunk ", name, "; queued base resample.");
+                persistChunkBaselines();
                 if (active_) {
                     for (const auto &chunk : result.chunks) {
                         enqueueSeedChunk(chunk.coord, false);
@@ -827,18 +982,15 @@ private:
             }
 
             if (result.kind == UploadJob::Kind::ChunkBatch) {
-                std::cerr << "[LiveMap] Failed to upload chunk batch " << result.chunks.size() << " chunk(s) HTTP "
-                          << result.transport.response_code << " curl " << result.transport.curl_code;
+                getLogger().error("Failed to upload chunk batch {} chunk(s) HTTP {} curl {} error={}",
+                                  result.chunks.size(), result.transport.response_code, result.transport.curl_code,
+                                  result.transport.error);
             }
             else {
                 const auto name = result.chunks.empty() ? std::string{"unknown"} : chunkName(result.chunks[0].coord);
-                std::cerr << "[LiveMap] Failed to upload dirty block updates for " << name << " HTTP "
-                          << result.transport.response_code << " curl " << result.transport.curl_code;
+                getLogger().error("Failed to upload dirty block updates for {} HTTP {} curl {} error={}", name,
+                                  result.transport.response_code, result.transport.curl_code, result.transport.error);
             }
-            if (!result.transport.error.empty()) {
-                std::cerr << " error=" << result.transport.error;
-            }
-            std::cerr << std::endl;
             if (active_) {
                 for (const auto &chunk : result.chunks) {
                     enqueueSeedChunk(chunk.coord, false);
@@ -857,7 +1009,7 @@ private:
 
         const auto newly_queued = queuePlayerSeedAreas();
         if (newly_queued > 0) {
-            getLogger().info("Queued {} player-radius live map base chunk(s).", newly_queued);
+            background_log_.info("Queued ", newly_queued, " player-radius live map base chunk(s).");
         }
 
         const auto chunks = drainSeedChunks(static_cast<std::size_t>(std::max(1, settings_.max_seed_chunks_per_pulse)));
@@ -924,14 +1076,15 @@ private:
                 continue;
             }
 
+            const auto had_cached_column = cached.has_value();
             const auto current = sampleColumn(*dimension, dirty.coord.x, dirty.coord.z);
             if (!current.has_value()) {
                 requeueDirtyColumn(dirty);
                 continue;
             }
-            cacheColumn(dirty.coord, *current);
 
-            if (!cached.has_value() && current->height > dirty.touched_y) {
+            if (!had_cached_column && current->height > dirty.touched_y) {
+                cacheColumn(dirty.coord, *current);
                 ++skipped_below_top;
                 continue;
             }
@@ -939,6 +1092,7 @@ private:
                 continue;
             }
 
+            cacheColumn(dirty.coord, *current);
             grouped[chunk].push_back({
                 livemap::localChunkCoord(dirty.coord.x, chunk.x),
                 livemap::localChunkCoord(dirty.coord.z, chunk.z),
@@ -949,13 +1103,13 @@ private:
 
         if (grouped.empty()) {
             if (skipped_below_top > 0) {
-                getLogger().info("Skipped {} live map dirty block column(s) below cached top blocks.",
-                                 skipped_below_top);
+                background_log_.info("Skipped ", skipped_below_top,
+                                     " live map dirty block column(s) below cached top blocks.");
             }
             return;
         }
 
-        getLogger().info("Uploading live map dirty block updates for {} chunk(s).", grouped.size());
+        background_log_.info("Uploading live map dirty block updates for ", grouped.size(), " chunk(s).");
         for (const auto &[coord, updates] : grouped) {
             livemap::BlockUpdateBatch batch;
             batch.world = coord.world;
@@ -964,11 +1118,22 @@ private:
             batch.chunk_z = coord.z;
             batch.updates = updates;
             batch.updated_at_ms = nowMs();
-            if (!enqueueUpload({UploadJob::Kind::BlockUpdates, "/api/plugin/block-updates",
-                                livemap::serializeBlockUpdateBatch(batch), {{coord, 0}}, updates.size()})) {
+            bool resample_after_success = false;
+            std::vector<livemap::ChunkSnapshot> updated_snapshots;
+            const auto meta = prepareDirtyBaselineMeta(coord, updates, batch.updated_at_ms, resample_after_success,
+                                                       updated_snapshots);
+            if (!meta.has_value()) {
                 enqueueSeedChunk(coord, false);
-                getLogger().warning("Queued base resample for {}/{}/{} because upload queue is full.", coord.world,
-                                    coord.x, coord.z);
+                background_log_.warning("Queued base resample for ", chunkName(coord),
+                                        " because dirty update has no local baseline.");
+                continue;
+            }
+            if (!enqueueUpload({UploadJob::Kind::BlockUpdates, "/api/plugin/block-updates",
+                                livemap::serializeBlockUpdateBatch(batch), {*meta}, updated_snapshots, updates.size(),
+                                resample_after_success})) {
+                enqueueSeedChunk(coord, false);
+                background_log_.warning("Queued base resample for ", chunkName(coord),
+                                        " because upload queue is full.");
             }
         }
     }
@@ -992,7 +1157,12 @@ private:
     std::vector<livemap::ChunkSnapshot> pending_chunk_uploads_;
     std::vector<ChunkUploadMeta> pending_chunk_metas_;
     std::unordered_map<livemap::ChunkCoord, std::uint64_t, livemap::ChunkCoordHash> pending_chunk_fingerprints_;
-    std::unordered_map<livemap::ChunkCoord, std::uint64_t, livemap::ChunkCoordHash> chunk_fingerprints_;
+    livemap::ChunkBaselineMap chunk_baselines_;
+    std::unordered_map<livemap::ChunkCoord, livemap::ChunkSnapshot, livemap::ChunkCoordHash> confirmed_chunk_snapshots_;
+    bool baselines_dirty_ = false;
+    std::filesystem::path background_log_path_;
+    std::filesystem::path baseline_index_path_;
+    BackgroundLog background_log_;
     std::int64_t last_chunk_upload_flush_ms_ = 0;
     std::size_t skipped_cached_chunks_ = 0;
     std::int64_t last_chunk_cache_log_ms_ = 0;

@@ -110,6 +110,8 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.worker_url = stringValue(source, "worker_url", settings.worker_url);
     settings.plugin_token = stringValue(source, "plugin_token", settings.plugin_token);
     settings.server_id = stringValue(source, "server_id", settings.server_id);
+    settings.background_log_file = stringValue(source, "background_log_file", settings.background_log_file);
+    settings.baseline_index_file = stringValue(source, "baseline_index_file", settings.baseline_index_file);
     settings.dimensions = dimensionsValue(source, settings.dimensions);
     settings.scan_radius_chunks = intValue(source, "scan_radius_chunks", settings.scan_radius_chunks);
     settings.chunk_refresh_seconds =
@@ -160,6 +162,8 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"worker_url\": \"https://map.buhe.li\",\n"
         << "  \"plugin_token\": \"replace-with-cloudflare-secret\",\n"
         << "  \"server_id\": \"vvnas\",\n"
+        << "  \"background_log_file\": \"live_map.log\",\n"
+        << "  \"baseline_index_file\": \"chunk_baselines.tsv\",\n"
         << "  \"dimensions\": [\"Overworld\", \"Nether\", \"TheEnd\"],\n"
         << "  \"scan_radius_chunks\": 8,\n"
         << "  \"chunk_refresh_seconds\": 20,\n"

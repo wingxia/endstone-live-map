@@ -19,6 +19,8 @@ cat > "$DATA_DIR/live_map.json" <<JSON
   "worker_url": "https://map.buhe.li",
   "plugin_token": "$PLUGIN_TOKEN",
   "server_id": "vvnas",
+  "background_log_file": "live_map.log",
+  "baseline_index_file": "chunk_baselines.tsv",
   "dimensions": ["Overworld", "Nether", "TheEnd"],
   "scan_radius_chunks": 8,
   "chunk_refresh_seconds": 20,

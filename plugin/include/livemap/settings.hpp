@@ -10,6 +10,8 @@ struct LiveMapSettings {
     std::string worker_url = "https://map.buhe.li";
     std::string plugin_token;
     std::string server_id = "default";
+    std::string background_log_file = "live_map.log";
+    std::string baseline_index_file = "chunk_baselines.tsv";
     std::vector<std::string> dimensions = {"Overworld"};
     int scan_radius_chunks = 8;
     int chunk_refresh_seconds = 20;

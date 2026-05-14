@@ -10,6 +10,7 @@ option(LIVE_MAP_WITH_ENDSTONE "Build the Endstone plugin shared library" ON)
 set(ENDSTONE_API_VERSION "0.11.3" CACHE STRING "Endstone API version")
 
 add_library(livemap_core
+    src/baseline.cpp
     src/base64.cpp
     src/chunk.cpp
     src/protocol.cpp
