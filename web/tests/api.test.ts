@@ -54,30 +54,40 @@ describe("api helpers", () => {
     expect(chunkRangeForTile({ x: 0, y: 0, z: 4 })).toMatchObject({
       minBlockX: 0,
       maxBlockX: 15,
-      minBlockZ: -15,
-      maxBlockZ: 0,
+      minBlockZ: 0,
+      maxBlockZ: 15,
       minChunkX: 0,
       maxChunkX: 0,
-      minChunkZ: -1,
+      minChunkZ: 0,
       maxChunkZ: 0,
       scale: 16,
     });
     expect(chunkRangeForTile({ x: -1, y: -1, z: 4 })).toMatchObject({
       minBlockX: -16,
       maxBlockX: -1,
-      minBlockZ: 1,
-      maxBlockZ: 16,
+      minBlockZ: -16,
+      maxBlockZ: -1,
       minChunkX: -1,
       maxChunkX: -1,
-      minChunkZ: 0,
-      maxChunkZ: 1,
+      minChunkZ: -1,
+      maxChunkZ: -1,
     });
     expect(chunkRangeForTile({ x: 0, y: 0, z: 0 })).toMatchObject({
       minChunkX: 0,
       maxChunkX: 15,
-      minChunkZ: -16,
-      maxChunkZ: 0,
+      minChunkZ: 0,
+      maxChunkZ: 15,
       scale: 1,
+    });
+    expect(chunkRangeForTile({ x: -21, y: -34, z: 4 })).toMatchObject({
+      minBlockX: -336,
+      maxBlockX: -321,
+      minBlockZ: -544,
+      maxBlockZ: -529,
+      minChunkX: -21,
+      maxChunkX: -21,
+      minChunkZ: -34,
+      maxChunkZ: -34,
     });
   });
 

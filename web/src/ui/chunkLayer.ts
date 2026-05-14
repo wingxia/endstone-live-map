@@ -3,6 +3,7 @@ import type { Coords, DoneCallback, GridLayer } from "leaflet";
 import {
   fetchChunks,
   fetchTextureManifest,
+  segmentKey,
   textureAtlasUrl,
   type BlockUpdatesMessage,
   type ChunkReadyMessage,
@@ -71,7 +72,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     }
 
     refreshChunk(message: ChunkReadyMessage) {
-      if (message.world !== this.worldName || message.dimension !== this.dimensionName) {
+      if (!sameWorldDimension(message.world, message.dimension, this.worldName, this.dimensionName)) {
         return;
       }
       this.chunkCache.delete(cacheKey(message.world, message.dimension, message.chunkX, message.chunkZ));
@@ -79,7 +80,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     }
 
     applyBlockUpdates(message: BlockUpdatesMessage) {
-      if (message.world !== this.worldName || message.dimension !== this.dimensionName) {
+      if (!sameWorldDimension(message.world, message.dimension, this.worldName, this.dimensionName)) {
         return;
       }
       const key = cacheKey(message.world, message.dimension, message.chunkX, message.chunkZ);
@@ -200,8 +201,8 @@ export function chunkRangeForTile(coords: Pick<Coords, "x" | "y" | "z">): TileCh
   const maxLeafletY = ((coords.y + 1) * TILE_SIZE) / scale;
   const minBlockX = Math.floor(minLeafletX);
   const maxBlockX = Math.ceil(maxLeafletX) - 1;
-  const minBlockZ = Math.floor(-maxLeafletY) + 1;
-  const maxBlockZ = normalizeZero(Math.floor(-minLeafletY));
+  const minBlockZ = Math.floor(minLeafletY);
+  const maxBlockZ = normalizeZero(Math.ceil(maxLeafletY) - 1);
 
   return {
     minBlockX,
@@ -226,7 +227,7 @@ function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: T
       }
       const index = blockColumnIndex(localX, localZ);
       const blockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
-      drawBlock(ctx, atlas, blockId, (worldX - range.minBlockX) * range.scale, (range.maxBlockZ - worldZ) * range.scale, range.scale);
+      drawBlock(ctx, atlas, blockId, (worldX - range.minBlockX) * range.scale, (worldZ - range.minBlockZ) * range.scale, range.scale);
     }
   }
 }
@@ -271,7 +272,7 @@ function drawGrid(ctx: CanvasRenderingContext2D, range: TileChunkRange) {
       ctx.stroke();
     }
     for (let blockZ = range.minBlockZ; blockZ <= range.maxBlockZ; blockZ += 1) {
-      const y = (range.maxBlockZ - blockZ) * range.scale + 0.5;
+      const y = (blockZ - range.minBlockZ) * range.scale + 0.5;
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(TILE_SIZE, y);
@@ -289,7 +290,7 @@ function drawGrid(ctx: CanvasRenderingContext2D, range: TileChunkRange) {
     ctx.stroke();
   }
   for (let chunkZ = range.minChunkZ; chunkZ <= range.maxChunkZ + 1; chunkZ += 1) {
-    const y = (range.maxBlockZ - chunkZ * BLOCKS_PER_CHUNK + 1) * range.scale + 0.5;
+    const y = (chunkZ * BLOCKS_PER_CHUNK - range.minBlockZ) * range.scale + 0.5;
     ctx.beginPath();
     ctx.moveTo(0, y);
     ctx.lineTo(TILE_SIZE, y);
@@ -320,7 +321,11 @@ function loadImage(src: string) {
 }
 
 function cacheKey(world: string, dimension: string, chunkX: number, chunkZ: number) {
-  return `${world}/${dimension}/${chunkX}/${chunkZ}`;
+  return `${segmentKey(world)}/${segmentKey(dimension)}/${chunkX}/${chunkZ}`;
+}
+
+function sameWorldDimension(leftWorld: string, leftDimension: string, rightWorld: string, rightDimension: string) {
+  return segmentKey(leftWorld) === segmentKey(rightWorld) && segmentKey(leftDimension) === segmentKey(rightDimension);
 }
 
 function floorDiv(value: number, divisor: number) {
