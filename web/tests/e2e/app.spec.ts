@@ -289,8 +289,8 @@ test("renders visible chunks progressively before slow neighboring chunk request
   const grassChunk = {
     world: "Bedrock level",
     dimension: "Overworld",
-    chunkX: 0,
-    chunkZ: 0,
+    chunkX: 8,
+    chunkZ: 8,
     palette: ["minecraft:grass_block"],
     blocks: Array.from({ length: 256 }, () => 0),
     heights: Array.from({ length: 256 }, () => 64),
@@ -336,8 +336,13 @@ test("renders visible chunks progressively before slow neighboring chunk request
     const maxChunkX = Number(url.searchParams.get("maxChunkX"));
     const minChunkZ = Number(url.searchParams.get("minChunkZ"));
     const maxChunkZ = Number(url.searchParams.get("maxChunkZ"));
-    const includesGrass = minChunkX <= 0 && maxChunkX >= 0 && minChunkZ <= 0 && maxChunkZ >= 0;
-    const isNeighboringRequest = !includesGrass && Math.abs(minChunkX) <= 4 && Math.abs(minChunkZ) <= 4;
+    const includesGrass = minChunkX <= grassChunk.chunkX && maxChunkX >= grassChunk.chunkX && minChunkZ <= grassChunk.chunkZ && maxChunkZ >= grassChunk.chunkZ;
+    const isNeighboringRequest =
+      !includesGrass &&
+      minChunkX >= grassChunk.chunkX - 4 &&
+      maxChunkX <= grassChunk.chunkX + 4 &&
+      minChunkZ >= grassChunk.chunkZ - 4 &&
+      maxChunkZ <= grassChunk.chunkZ + 4;
     if (isNeighboringRequest) {
       slowRequestCount += 1;
       await new Promise((resolve) => setTimeout(resolve, 30_000));
@@ -369,8 +374,8 @@ test("keeps first load scoped to the initial viewport instead of fitting every i
   const grassChunk = {
     world: "Bedrock level",
     dimension: "Overworld",
-    chunkX: 0,
-    chunkZ: 0,
+    chunkX: -23,
+    chunkZ: -21,
     palette: ["minecraft:grass_block"],
     blocks: Array.from({ length: 256 }, () => 0),
     heights: Array.from({ length: 256 }, () => 64),
@@ -404,6 +409,7 @@ test("keeps first load scoped to the initial viewport instead of fitting every i
               minBlockZ: -608,
               maxBlockZ: 15,
             },
+            sampleChunks: [{ chunkX: -23, chunkZ: -21 }],
             topBlocks: { "minecraft:grass_block": 256 },
           },
         ],
@@ -425,7 +431,7 @@ test("keeps first load scoped to the initial viewport instead of fitting every i
         }
       }
     }
-    const includesGrass = minChunkX <= 0 && maxChunkX >= 0 && minChunkZ <= 0 && maxChunkZ >= 0;
+    const includesGrass = minChunkX <= grassChunk.chunkX && maxChunkX >= grassChunk.chunkX && minChunkZ <= grassChunk.chunkZ && maxChunkZ >= grassChunk.chunkZ;
     const chunks = includesGrass ? [grassChunk] : [];
     const missing: Array<{ chunkX: number; chunkZ: number }> = [];
     for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
@@ -444,8 +450,11 @@ test("keeps first load scoped to the initial viewport instead of fitting every i
   await page.goto("/");
   await expect(page.getByTestId("map-canvas")).toBeVisible();
   await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
+  await expect.poll(() => pageHasVisibleGrassTile(page)).toBe(true);
   await page.waitForTimeout(500);
   expect(requestedKnownChunks.has("-42,-38")).toBe(false);
+  expect(requestedKnownChunks.has("0,0")).toBe(false);
+  expect(requestedKnownChunks.has("-23,-21")).toBe(true);
   expect(requestedOutsideBounds.size).toBe(0);
   expect(requestedKnownChunks.size).toBeLessThan(90);
 });
@@ -1277,6 +1286,33 @@ async function pageHasGrassPixels(page: Page) {
   return page.evaluate(() => {
     const grass = [95, 159, 63];
     return [...document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")].some((canvas) => {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        return false;
+      }
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      for (let index = 0; index < data.length; index += 4) {
+        if (data[index] === grass[0] && data[index + 1] === grass[1] && data[index + 2] === grass[2] && data[index + 3] === 255) {
+          return true;
+        }
+      }
+      return false;
+    });
+  });
+}
+
+async function pageHasVisibleGrassTile(page: Page) {
+  return page.evaluate(() => {
+    const grass = [95, 159, 63];
+    return [...document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")].some((canvas) => {
+      const style = window.getComputedStyle(canvas);
+      if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0) {
+        return false;
+      }
+      const rect = canvas.getBoundingClientRect();
+      if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= window.innerWidth || rect.top >= window.innerHeight) {
+        return false;
+      }
       const ctx = canvas.getContext("2d");
       if (!ctx) {
         return false;

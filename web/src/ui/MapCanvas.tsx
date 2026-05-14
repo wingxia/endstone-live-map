@@ -124,24 +124,22 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
       }
       return;
     }
-    state.chunkLayer.setActive(true);
-    if (autoFitKeyRef.current === autoFitKey) {
-      return;
-    }
-    if (playerBounds) {
-      state.map.fitBounds(
-        [
-          minecraftToLeaflet(playerBounds.minX, playerBounds.maxZ),
-          minecraftToLeaflet(playerBounds.maxX, playerBounds.minZ),
-        ],
-        { animate: false, padding: [24, 24], maxZoom: INITIAL_MAP_ZOOM },
-      );
+    if (autoFitKeyRef.current !== autoFitKey) {
+      if (playerBounds) {
+        state.map.fitBounds(
+          [
+            minecraftToLeaflet(playerBounds.minX, playerBounds.maxZ),
+            minecraftToLeaflet(playerBounds.maxX, playerBounds.minZ),
+          ],
+          { animate: false, padding: [24, 24], maxZoom: INITIAL_MAP_ZOOM },
+        );
+      } else {
+        const initialCenter = meta ? initialCenterForMeta(meta) : { x: 0, z: 0 };
+        state.map.setView(minecraftToLeaflet(initialCenter.x, initialCenter.z), INITIAL_MAP_ZOOM, { animate: false });
+      }
       autoFitKeyRef.current = autoFitKey;
-      return;
     }
-    const initialCenter = meta ? initialCenterForBounds(meta.bounds) : { x: 0, z: 0 };
-    state.map.setView(minecraftToLeaflet(initialCenter.x, initialCenter.z), INITIAL_MAP_ZOOM, { animate: false });
-    autoFitKeyRef.current = autoFitKey;
+    state.chunkLayer.setActive(true);
   }, [dimension, mapReady, players, world, worldMeta]);
 
   useEffect(() => {
@@ -312,13 +310,36 @@ function isWorldMetaForMap(worldMeta: WorldMeta | null, world: string, dimension
 
 function initialCenterForBounds(bounds: WorldMeta["bounds"]) {
   return {
-    x: clampNumber(0, bounds.minBlockX, bounds.maxBlockX),
-    z: clampNumber(0, bounds.minBlockZ, bounds.maxBlockZ),
+    x: Math.floor((bounds.minBlockX + bounds.maxBlockX) / 2),
+    z: Math.floor((bounds.minBlockZ + bounds.maxBlockZ) / 2),
   };
 }
 
-function clampNumber(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
+function initialCenterForMeta(meta: WorldMeta) {
+  const boundsCenter = initialCenterForBounds(meta.bounds);
+  const sampleChunk = nearestSampleChunk(meta.sampleChunks || [], boundsCenter);
+  if (!sampleChunk) {
+    return boundsCenter;
+  }
+  return {
+    x: sampleChunk.chunkX * 16 + 8,
+    z: sampleChunk.chunkZ * 16 + 8,
+  };
+}
+
+function nearestSampleChunk(chunks: Array<{ chunkX: number; chunkZ: number }>, target: { x: number; z: number }) {
+  let best: { chunkX: number; chunkZ: number } | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const chunk of chunks) {
+    const centerX = chunk.chunkX * 16 + 8;
+    const centerZ = chunk.chunkZ * 16 + 8;
+    const distance = (centerX - target.x) ** 2 + (centerZ - target.z) ** 2;
+    if (distance < bestDistance) {
+      best = chunk;
+      bestDistance = distance;
+    }
+  }
+  return best;
 }
 
 function autoFitKeyFor(world: string, dimension: string, meta: WorldMeta | null, playerBounds: ReturnType<typeof boundsForPlayers> | null) {

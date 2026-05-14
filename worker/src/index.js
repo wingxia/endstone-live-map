@@ -12,6 +12,7 @@ const MAX_CHUNKS_PER_REQUEST = 256;
 const MAX_CHUNKS_PER_BATCH = 384;
 const REGION_SIZE_CHUNKS = 16;
 const BATCH_WRITE_CONCURRENCY = 32;
+const WORLD_META_SAMPLE_LIMIT = 128;
 const CLEANUP_CONFIRMATION = "delete-map-data-v1";
 const CLEANUP_DEFAULT_LIMIT = 200;
 const CLEANUP_MAX_LIMIT = 500;
@@ -598,6 +599,10 @@ async function updateWorldMetaForChunks(bucket, snapshots) {
       const importedAt = existing?.importedAt ?? Math.min(...chunks.map((chunk) => chunk.updatedAt));
       const updatedAt = Math.max(existing?.updatedAt ?? 0, ...chunks.map((chunk) => chunk.updatedAt), Date.now());
       const topBlocks = mergeTopBlockCounts(existing?.topBlocks || {}, summarizeChunkTopBlocks(previousBounds ? newChunks : chunks));
+      const sampleChunks = selectWorldSampleChunks(bounds, [
+        ...(existing?.sampleChunks || []),
+        ...chunks.map((chunk) => ({ chunkX: chunk.chunkX, chunkZ: chunk.chunkZ })),
+      ]);
       const meta = {
         version: existing?.version ?? 1,
         world: group.world,
@@ -607,6 +612,7 @@ async function updateWorldMetaForChunks(bucket, snapshots) {
         importedAt,
         updatedAt,
         bounds,
+        sampleChunks,
         topBlocks,
       };
 
@@ -631,7 +637,7 @@ async function handleWorldsGet(env) {
       .map(async (object) => {
         const value = await readR2Json(await bucket.get(object.key));
         if (value) {
-          worlds.push(value);
+          worlds.push(await withWorldSampleChunks(bucket, value));
         }
       }),
   );
@@ -650,7 +656,63 @@ async function handleWorldMetaGet(url, env) {
   if (!object) {
     return json({ error: "world_meta_not_found" }, 404);
   }
-  return json(await readR2Json(object), 200, { "Cache-Control": "public, max-age=30" });
+  const meta = await readR2Json(object);
+  return json(await withWorldSampleChunks(bucket, meta), 200, { "Cache-Control": "public, max-age=30" });
+}
+
+async function withWorldSampleChunks(bucket, meta) {
+  const normalized = normalizeOptionalWorldMeta(meta);
+  if (!normalized) {
+    return meta;
+  }
+  if (normalized.sampleChunks.length > 0) {
+    return normalized;
+  }
+  return {
+    ...normalized,
+    sampleChunks: await listWorldSampleChunks(bucket, normalized),
+  };
+}
+
+async function listWorldSampleChunks(bucket, meta) {
+  const chunks = new Map();
+  const addChunk = (chunkX, chunkZ) => {
+    const x = Number(chunkX);
+    const z = Number(chunkZ);
+    if (!Number.isFinite(x) || !Number.isFinite(z) || !chunkWithinBounds({ chunkX: x, chunkZ: z }, meta.bounds)) {
+      return;
+    }
+    chunks.set(coordKey(x, z), { chunkX: x, chunkZ: z });
+  };
+
+  const regionObjects = await listR2Objects(bucket, `${CHUNK_REGION_PREFIX}${cleanSegment(meta.world)}/${cleanSegment(meta.dimension)}/`);
+  for (const object of regionObjects) {
+    if (chunks.size >= WORLD_META_SAMPLE_LIMIT) {
+      break;
+    }
+    const region = await readR2Json(await bucket.get(object.key));
+    for (const chunk of Array.isArray(region?.chunks) ? region.chunks : []) {
+      addChunk(chunk.chunkX, chunk.chunkZ);
+      if (chunks.size >= WORLD_META_SAMPLE_LIMIT) {
+        break;
+      }
+    }
+  }
+
+  if (chunks.size < WORLD_META_SAMPLE_LIMIT) {
+    const chunkObjects = await listR2Objects(bucket, `chunks/v1/${cleanSegment(meta.world)}/${cleanSegment(meta.dimension)}/`);
+    for (const object of chunkObjects) {
+      const parsed = parseChunkKey(object.key);
+      if (parsed) {
+        addChunk(parsed.chunkX, parsed.chunkZ);
+      }
+      if (chunks.size >= WORLD_META_SAMPLE_LIMIT) {
+        break;
+      }
+    }
+  }
+
+  return [...chunks.values()].sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
 }
 
 async function handleLandsGet(url, env) {
@@ -917,6 +979,7 @@ export function normalizeWorldMeta(payload) {
       minBlockZ: numberOrThrow(bounds.minBlockZ ?? bounds.minChunkZ * 16, "bounds.minBlockZ"),
       maxBlockZ: numberOrThrow(bounds.maxBlockZ ?? bounds.maxChunkZ * 16 + 15, "bounds.maxBlockZ"),
     },
+    sampleChunks: normalizeSampleChunks(payload.sampleChunks || []),
     topBlocks: normalizeTopBlocks(payload.topBlocks || {}),
   };
   if (normalized.bounds.maxChunkX < normalized.bounds.minChunkX || normalized.bounds.maxChunkZ < normalized.bounds.minChunkZ) {
@@ -934,6 +997,37 @@ function normalizeOptionalWorldMeta(value) {
   } catch {
     return null;
   }
+}
+
+function normalizeSampleChunks(chunks) {
+  if (!Array.isArray(chunks)) {
+    return [];
+  }
+  const normalized = [];
+  const seen = new Set();
+  for (const chunk of chunks) {
+    if (normalized.length >= WORLD_META_SAMPLE_LIMIT) {
+      break;
+    }
+    const chunkX = Number(chunk?.chunkX);
+    const chunkZ = Number(chunk?.chunkZ);
+    if (!Number.isFinite(chunkX) || !Number.isFinite(chunkZ)) {
+      continue;
+    }
+    const key = coordKey(chunkX, chunkZ);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    normalized.push({ chunkX, chunkZ });
+  }
+  return normalized;
+}
+
+function selectWorldSampleChunks(bounds, chunks) {
+  return normalizeSampleChunks(chunks)
+    .filter((chunk) => chunkWithinBounds(chunk, bounds))
+    .slice(0, WORLD_META_SAMPLE_LIMIT);
 }
 
 export function normalizeChunkQuery(params) {

@@ -197,7 +197,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       canvas.className = "chunk-tile";
       const context = this.currentDrawContext();
       drawEmptyTile(canvas, "#17202a");
-      done(undefined, canvas);
+      window.setTimeout(() => done(undefined, canvas), 0);
       void this.drawTile(canvas, coords, context).catch(() => drawEmptyTile(canvas, "#17202a"));
       return canvas;
     }

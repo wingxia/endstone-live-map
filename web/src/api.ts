@@ -77,6 +77,10 @@ export interface WorldMeta {
     minBlockZ: number;
     maxBlockZ: number;
   };
+  sampleChunks?: Array<{
+    chunkX: number;
+    chunkZ: number;
+  }>;
   topBlocks: Record<string, number>;
 }
 

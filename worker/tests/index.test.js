@@ -506,6 +506,10 @@ describe("worker routes", () => {
       chunkCount: 2,
       bounds: { minChunkX: 0, maxChunkX: 1, minChunkZ: 0, maxChunkZ: 0, minBlockX: 0, maxBlockX: 31 },
       topBlocks: { "minecraft:grass_block": 512 },
+      sampleChunks: [
+        { chunkX: 0, chunkZ: 0 },
+        { chunkX: 1, chunkZ: 0 },
+      ],
     });
     expect(env.live.messages).toHaveLength(0);
   });
@@ -666,6 +670,55 @@ describe("worker routes", () => {
 
     const worlds = await worker.fetch(new Request("https://map.buhe.li/api/worlds"), env, {});
     expect((await worlds.json()).worlds).toHaveLength(1);
+  });
+
+  it("adds real chunk samples to world metadata for sparse imports", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put(
+      "meta/v1/world/Overworld.json",
+      JSON.stringify(
+        normalizeWorldMeta({
+          world: "world",
+          dimension: "Overworld",
+          status: "live",
+          chunkCount: 3,
+          bounds: { minChunkX: -42, maxChunkX: 0, minChunkZ: -38, maxChunkZ: 0 },
+          topBlocks: { "minecraft:grass_block": 256 },
+          importedAt: 10,
+          updatedAt: 10,
+        }),
+      ),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+    await env.MAP_DATA.put(
+      chunkRegionKey("world", "Overworld", -2, -2),
+      JSON.stringify({
+        version: 1,
+        world: "world",
+        dimension: "Overworld",
+        regionSize: 16,
+        regionX: -2,
+        regionZ: -2,
+        chunks: [createChunk({ chunkX: -23, chunkZ: -21 })],
+      }),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ chunkX: 0, chunkZ: 0 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const worlds = await worker.fetch(new Request("https://map.buhe.li/api/worlds"), env, {});
+    expect(await worlds.json()).toMatchObject({
+      worlds: [
+        {
+          world: "world",
+          sampleChunks: expect.arrayContaining([
+            { chunkX: -23, chunkZ: -21 },
+            { chunkX: 0, chunkZ: 0 },
+          ]),
+        },
+      ],
+    });
   });
 
   it("serves texture manifest and atlas from R2", async () => {
