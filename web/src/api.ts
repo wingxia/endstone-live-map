@@ -19,6 +19,8 @@ export interface ChunkSnapshot {
   palette: string[];
   blocks: number[];
   heights: number[];
+  overlayBlocks?: number[];
+  overlayHeights?: number[];
   updatedAt: number;
 }
 
@@ -29,6 +31,11 @@ export interface ChunkQuery {
   maxChunkX: number;
   minChunkZ: number;
   maxChunkZ: number;
+}
+
+export interface ChunkFetchOptions {
+  cacheBust?: string | number;
+  cache?: RequestCache;
 }
 
 export interface ChunkResponse {
@@ -76,6 +83,8 @@ export interface BlockUpdate {
   localZ: number;
   block: string;
   height: number;
+  overlayBlock?: string;
+  overlayHeight?: number;
 }
 
 export interface ChunkReadyMessage {
@@ -108,7 +117,7 @@ export interface LiveMessage {
   updatedAt?: number;
 }
 
-export function chunkUrl(query: ChunkQuery): string {
+export function chunkUrl(query: ChunkQuery, options: ChunkFetchOptions = {}): string {
   const params = new URLSearchParams({
     world: query.world,
     dimension: query.dimension,
@@ -117,12 +126,15 @@ export function chunkUrl(query: ChunkQuery): string {
     minChunkZ: String(query.minChunkZ),
     maxChunkZ: String(query.maxChunkZ),
   });
+  if (options.cacheBust !== undefined) {
+    params.set("_", String(options.cacheBust));
+  }
   return `/api/chunks?${params.toString()}`;
 }
 
-export async function fetchChunks(query: ChunkQuery): Promise<ChunkResponse> {
+export async function fetchChunks(query: ChunkQuery, options: ChunkFetchOptions = {}): Promise<ChunkResponse> {
   try {
-    const response = await fetch(chunkUrl(query));
+    const response = await fetch(chunkUrl(query, options), { cache: options.cache });
     if (!response.ok) {
       throw new Error(`Failed to load chunks: ${response.status}`);
     }

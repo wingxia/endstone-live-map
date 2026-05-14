@@ -1,5 +1,6 @@
 #include "livemap/baseline.hpp"
 #include "livemap/chunk.hpp"
+#include "livemap/map_blocks.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
 #include "livemap/tile_math.hpp"
@@ -48,6 +49,10 @@ struct ColumnTop {
     int height = -64;
 };
 
+struct ColumnSample {
+    ColumnTop surface;
+    ColumnTop overlay;
+};
 
 struct QueuedSeed {
     livemap::ChunkCoord coord;
@@ -616,15 +621,32 @@ private:
         }
     }
 
-    std::optional<ColumnTop> sampleColumn(endstone::Dimension &dimension, int block_x, int block_z)
+    std::optional<ColumnSample> sampleColumnForMap(endstone::Dimension &dimension, int block_x, int block_z)
     {
         try {
-            const int highest_y = dimension.getHighestBlockYAt(block_x, block_z);
-            const auto block = dimension.getBlockAt(block_x, highest_y, block_z);
-            if (block == nullptr) {
-                return ColumnTop{};
+            int highest_y = dimension.getHighestBlockYAt(block_x, block_z);
+            const int min_y = minSampleY(dimension);
+            if (highest_y < min_y) {
+                highest_y = min_y;
             }
-            return ColumnTop{block->getType(), block->getY()};
+            ColumnSample sample;
+            bool found_overlay = false;
+            for (int y = highest_y; y >= min_y; --y) {
+                const auto block = dimension.getBlockAt(block_x, y, block_z);
+                if (block == nullptr) {
+                    continue;
+                }
+                const auto type = block->getType();
+                if (!found_overlay && livemap::isMapDecorationBlock(type)) {
+                    sample.overlay = {type, block->getY()};
+                    found_overlay = true;
+                }
+                if (livemap::isMapSurfaceBlock(type)) {
+                    sample.surface = {type, block->getY()};
+                    return sample;
+                }
+            }
+            return sample;
         }
         catch (const std::exception &error) {
             getLogger().error("Failed to sample live map column {}/{}: {}", block_x, block_z, error.what());
@@ -634,6 +656,24 @@ private:
             getLogger().error("Failed to sample live map column {}/{}.", block_x, block_z);
             return std::nullopt;
         }
+    }
+
+    std::optional<ColumnTop> sampleColumn(endstone::Dimension &dimension, int block_x, int block_z)
+    {
+        const auto sample = sampleColumnForMap(dimension, block_x, block_z);
+        if (!sample.has_value()) {
+            return std::nullopt;
+        }
+        return sample->surface;
+    }
+
+    static int minSampleY(const endstone::Dimension &dimension)
+    {
+        const auto type = dimension.getType();
+        if (type == endstone::Dimension::Type::Nether || type == endstone::Dimension::Type::TheEnd) {
+            return 0;
+        }
+        return -64;
     }
 
     std::optional<livemap::ChunkSnapshot> sampleChunk(endstone::Dimension &dimension, const livemap::ChunkCoord &coord)
@@ -662,12 +702,14 @@ private:
                 const int block_x = coord.x * livemap::kChunkSize + local_x;
                 const int block_z = coord.z * livemap::kChunkSize + local_z;
                 const int index = local_z * livemap::kChunkSize + local_x;
-                const auto column = sampleColumn(dimension, block_x, block_z);
+                const auto column = sampleColumnForMap(dimension, block_x, block_z);
                 if (!column.has_value()) {
                     return std::nullopt;
                 }
-                snapshot.blocks[index] = palette_index(column->block);
-                snapshot.heights[index] = column->height;
+                snapshot.blocks[index] = palette_index(column->surface.block);
+                snapshot.heights[index] = column->surface.height;
+                snapshot.overlay_blocks[index] = palette_index(column->overlay.block);
+                snapshot.overlay_heights[index] = column->overlay.height;
             }
         }
         return snapshot;
@@ -1063,6 +1105,7 @@ private:
 
         std::map<livemap::ChunkCoord, std::vector<livemap::BlockColumnUpdate>> grouped;
         int skipped_below_top = 0;
+        int queued_overlay_resamples = 0;
         for (const auto &dirty : dirty_columns) {
             auto *dimension = level->getDimension(dirty.coord.dimension);
             if (dimension == nullptr) {
@@ -1077,27 +1120,35 @@ private:
             }
 
             const auto had_cached_column = cached.has_value();
-            const auto current = sampleColumn(*dimension, dirty.coord.x, dirty.coord.z);
-            if (!current.has_value()) {
+            const auto current_sample = sampleColumnForMap(*dimension, dirty.coord.x, dirty.coord.z);
+            if (!current_sample.has_value()) {
                 requeueDirtyColumn(dirty);
                 continue;
             }
+            const auto current = current_sample->surface;
+            const auto overlay = current_sample->overlay;
 
-            if (!had_cached_column && current->height > dirty.touched_y) {
-                cacheColumn(dirty.coord, *current);
+            if (!had_cached_column && current.height > dirty.touched_y) {
+                cacheColumn(dirty.coord, current);
                 ++skipped_below_top;
                 continue;
             }
-            if (cached.has_value() && cached->height == current->height && cached->block == current->block) {
+
+            if (cached.has_value() && cached->height == current.height && cached->block == current.block) {
+                if (dirty.touched_y >= current.height) {
+                    queued_overlay_resamples += static_cast<int>(enqueueSeedChunk(chunk, true));
+                }
                 continue;
             }
 
-            cacheColumn(dirty.coord, *current);
+            cacheColumn(dirty.coord, current);
             grouped[chunk].push_back({
                 livemap::localChunkCoord(dirty.coord.x, chunk.x),
                 livemap::localChunkCoord(dirty.coord.z, chunk.z),
-                current->block,
-                current->height,
+                current.block,
+                current.height,
+                overlay.block,
+                overlay.height,
             });
         }
 
@@ -1106,9 +1157,17 @@ private:
                 background_log_.info("Skipped ", skipped_below_top,
                                      " live map dirty block column(s) below cached top blocks.");
             }
+            if (queued_overlay_resamples > 0) {
+                background_log_.info("Queued ", queued_overlay_resamples,
+                                     " live map chunk resample(s) for decoration-only column changes.");
+            }
             return;
         }
 
+        if (queued_overlay_resamples > 0) {
+            background_log_.info("Queued ", queued_overlay_resamples,
+                                 " live map chunk resample(s) for decoration-only column changes.");
+        }
         background_log_.info("Uploading live map dirty block updates for ", grouped.size(), " chunk(s).");
         for (const auto &[coord, updates] : grouped) {
             livemap::BlockUpdateBatch batch;

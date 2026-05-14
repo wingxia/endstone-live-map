@@ -89,6 +89,20 @@ std::string serializeChunkSnapshot(const ChunkSnapshot &snapshot)
         }
         out << snapshot.heights[i];
     }
+    out << "],\"overlayBlocks\":[";
+    for (std::size_t i = 0; i < snapshot.overlay_blocks.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << snapshot.overlay_blocks[i];
+    }
+    out << "],\"overlayHeights\":[";
+    for (std::size_t i = 0; i < snapshot.overlay_heights.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << snapshot.overlay_heights[i];
+    }
     out << "],\"updatedAt\":" << snapshot.updated_at_ms << '}';
     return out.str();
 }
@@ -118,7 +132,8 @@ std::string serializeBlockUpdateBatch(const BlockUpdateBatch &batch)
             out << ',';
         }
         out << "{\"localX\":" << update.local_x << ",\"localZ\":" << update.local_z << ",\"block\":\""
-            << jsonEscape(update.block) << "\",\"height\":" << update.height << '}';
+            << jsonEscape(update.block) << "\",\"height\":" << update.height << ",\"overlayBlock\":\""
+            << jsonEscape(update.overlay_block) << "\",\"overlayHeight\":" << update.overlay_height << '}';
     }
     out << "],\"updatedAt\":" << batch.updated_at_ms << '}';
     return out.str();

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { chunkUrl, segmentKey, textureAtlasUrl, type WorldMeta } from "../src/api";
 import { blockColumnIndex, blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "../src/ui/coords";
 import { chunkRangeForTile, fallbackTextureColor, usesMapTint } from "../src/ui/chunkLayer";
+import { isMapDecorationBlock, isPlantBlock } from "../src/ui/mapBlocks";
 
 describe("api helpers", () => {
   it("builds chunk query urls for the selected viewport", () => {
@@ -26,6 +27,14 @@ describe("api helpers", () => {
     expect(usesMapTint("minecraft:grass_block")).toBe(true);
     expect(usesMapTint("minecraft:oak_leaves")).toBe(true);
     expect(usesMapTint("minecraft:stone")).toBe(false);
+    expect(isPlantBlock("minecraft:poppy")).toBe(true);
+    expect(isPlantBlock("minecraft:grass_block")).toBe(false);
+    expect(isPlantBlock("minecraft:grass_path")).toBe(false);
+    expect(isPlantBlock("minecraft:dirt_with_roots")).toBe(false);
+    expect(isMapDecorationBlock("minecraft:glass_pane")).toBe(true);
+    expect(isMapDecorationBlock("minecraft:oak_trapdoor")).toBe(true);
+    expect(isMapDecorationBlock("minecraft:stone")).toBe(false);
+    expect(isMapDecorationBlock("minecraft:glass")).toBe(false);
     expect(segmentKey("Bedrock level")).toBe("Bedrock_level");
   });
 

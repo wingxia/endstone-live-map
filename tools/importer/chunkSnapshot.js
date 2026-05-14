@@ -1,3 +1,5 @@
+import { isMapDecorationBlock, isMapSurfaceBlock } from "./mapBlocks.js";
+
 export const CHUNK_SIZE = 16;
 export const CHUNK_BLOCK_COUNT = CHUNK_SIZE * CHUNK_SIZE;
 export const DEFAULT_WORLD = "Bedrock level";
@@ -43,6 +45,8 @@ export function buildChunkSnapshot({ world = DEFAULT_WORLD, dimension, chunkX, c
   const paletteIndexes = new Map();
   const blocks = Array.from({ length: CHUNK_BLOCK_COUNT }, () => 0);
   const heights = Array.from({ length: CHUNK_BLOCK_COUNT }, () => -64);
+  const overlayBlocks = Array.from({ length: CHUNK_BLOCK_COUNT }, () => 0);
+  const overlayHeights = Array.from({ length: CHUNK_BLOCK_COUNT }, () => -64);
 
   const paletteIndex = (blockId) => {
     const id = normalizeBlockId(blockId);
@@ -59,6 +63,7 @@ export function buildChunkSnapshot({ world = DEFAULT_WORLD, dimension, chunkX, c
   for (let localZ = 0; localZ < CHUNK_SIZE; localZ += 1) {
     for (let localX = 0; localX < CHUNK_SIZE; localX += 1) {
       const columnIndex = chunkColumnIndex(localX, localZ);
+      let overlayFound = false;
       for (const subchunk of ordered) {
         const layer = subchunk.layers[0];
         if (!layer) {
@@ -66,13 +71,18 @@ export function buildChunkSnapshot({ world = DEFAULT_WORLD, dimension, chunkX, c
         }
         for (let localY = CHUNK_SIZE - 1; localY >= 0; localY -= 1) {
           const block = blockNameAt(layer, localX, localY, localZ);
-          if (!isVisibleTopBlock(block, includeLiquids)) {
-            continue;
+          const y = subchunk.y * CHUNK_SIZE + localY;
+          if (!overlayFound && isMapDecorationBlock(block)) {
+            overlayBlocks[columnIndex] = paletteIndex(block);
+            overlayHeights[columnIndex] = y;
+            overlayFound = true;
           }
-          blocks[columnIndex] = paletteIndex(block);
-          heights[columnIndex] = subchunk.y * CHUNK_SIZE + localY;
-          localY = -1;
-          break;
+          if (isVisibleTopBlock(block, includeLiquids)) {
+            blocks[columnIndex] = paletteIndex(block);
+            heights[columnIndex] = y;
+            localY = -1;
+            break;
+          }
         }
         if (heights[columnIndex] !== -64) {
           break;
@@ -89,6 +99,8 @@ export function buildChunkSnapshot({ world = DEFAULT_WORLD, dimension, chunkX, c
     palette,
     blocks,
     heights,
+    overlayBlocks,
+    overlayHeights,
     updatedAt,
   };
 }
@@ -170,14 +182,7 @@ export function chunkKey(snapshot) {
 }
 
 function isVisibleTopBlock(blockId, includeLiquids) {
-  const id = normalizeBlockId(blockId);
-  if (id === "minecraft:air" || id === "minecraft:cave_air" || id === "minecraft:void_air") {
-    return false;
-  }
-  if (!includeLiquids && (id === "minecraft:water" || id === "minecraft:flowing_water" || id === "minecraft:lava" || id === "minecraft:flowing_lava")) {
-    return false;
-  }
-  return true;
+  return isMapSurfaceBlock(blockId, includeLiquids);
 }
 
 function normalizeBlockId(value) {

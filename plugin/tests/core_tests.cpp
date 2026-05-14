@@ -1,6 +1,7 @@
 #include "livemap/baseline.hpp"
 #include "livemap/base64.hpp"
 #include "livemap/chunk.hpp"
+#include "livemap/map_blocks.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
 #include "livemap/tile_math.hpp"
@@ -72,6 +73,25 @@ void testChunkMath()
     assert(column.z == -17);
 }
 
+void testMapBlockClassification()
+{
+    assert(!livemap::isMapSurfaceBlock("minecraft:air"));
+    assert(!livemap::isMapSurfaceBlock("minecraft:poppy"));
+    assert(!livemap::isMapSurfaceBlock("minecraft:glass_pane"));
+    assert(livemap::isMapSurfaceBlock("minecraft:glass"));
+    assert(!livemap::isMapSurfaceBlock("minecraft:oak_trapdoor"));
+    assert(livemap::isMapSurfaceBlock("minecraft:grass_block"));
+    assert(livemap::isMapSurfaceBlock("minecraft:oak_leaves"));
+    assert(livemap::isMapSurfaceBlock("minecraft:water"));
+    assert(!livemap::isMapSurfaceBlock("minecraft:water", false));
+    assert(livemap::isPlantBlock("minecraft:tall_grass"));
+    assert(!livemap::isPlantBlock("minecraft:grass_block"));
+    assert(!livemap::isPlantBlock("minecraft:grass_path"));
+    assert(!livemap::isPlantBlock("minecraft:dirt_with_roots"));
+    assert(livemap::isMapDecorationBlock("minecraft:iron_bars"));
+    assert(!livemap::isMapDecorationBlock("minecraft:glass"));
+}
+
 void testProtocol()
 {
     const std::vector<livemap::PlayerState> players = {{
@@ -104,10 +124,17 @@ void testProtocol()
     snapshot.blocks[3] = 1;
     snapshot.heights.fill(64);
     snapshot.heights[3] = 62;
+    snapshot.overlay_blocks.fill(0);
+    snapshot.overlay_heights.fill(-64);
+    snapshot.palette.push_back("minecraft:poppy");
+    snapshot.overlay_blocks[3] = 2;
+    snapshot.overlay_heights[3] = 63;
     snapshot.updated_at_ms = 99;
     const auto chunk_json = livemap::serializeChunkSnapshot(snapshot);
     assert(chunk_json.find("\"chunkX\":-1") != std::string::npos);
-    assert(chunk_json.find("\"palette\":[\"minecraft:grass_block\",\"minecraft:water\"]") != std::string::npos);
+    assert(chunk_json.find("\"palette\":[\"minecraft:grass_block\",\"minecraft:water\",\"minecraft:poppy\"]") != std::string::npos);
+    assert(chunk_json.find("\"overlayBlocks\"") != std::string::npos);
+    assert(chunk_json.find("\"overlayHeights\"") != std::string::npos);
     assert(chunk_json.find("\"updatedAt\":99") != std::string::npos);
     const auto chunk_batch_json = livemap::serializeChunkBatch({snapshot}, true);
     assert(chunk_batch_json.find("\"broadcast\":true") != std::string::npos);
@@ -119,11 +146,12 @@ void testProtocol()
     batch.dimension = "Overworld";
     batch.chunk_x = 0;
     batch.chunk_z = 0;
-    batch.updates.push_back({1, 2, "minecraft:stone", 70});
+    batch.updates.push_back({1, 2, "minecraft:stone", 70, "minecraft:poppy", 71});
     batch.updated_at_ms = 100;
     const auto update_json = livemap::serializeBlockUpdateBatch(batch);
     assert(update_json.find("\"updates\":[{\"localX\":1,\"localZ\":2") != std::string::npos);
     assert(update_json.find("\"block\":\"minecraft:stone\"") != std::string::npos);
+    assert(update_json.find("\"overlayBlock\":\"minecraft:poppy\"") != std::string::npos);
 }
 
 void testBase64()
@@ -133,7 +161,6 @@ void testBase64()
     const std::vector<std::uint8_t> one = {'M'};
     assert(livemap::base64Encode(one) == "TQ==");
 }
-
 
 livemap::ChunkSnapshot makeBaselineTestSnapshot()
 {
@@ -147,6 +174,8 @@ livemap::ChunkSnapshot makeBaselineTestSnapshot()
     snapshot.heights.fill(64);
     snapshot.blocks[3] = 1;
     snapshot.heights[3] = 62;
+    snapshot.overlay_blocks.fill(0);
+    snapshot.overlay_heights.fill(-64);
     snapshot.updated_at_ms = 99;
     return snapshot;
 }
@@ -157,9 +186,13 @@ void testChunkSnapshotFingerprint()
     auto second = makeBaselineTestSnapshot();
     assert(livemap::fingerprintChunkSnapshot(first) == livemap::fingerprintChunkSnapshot(second));
 
-    livemap::applyBlockUpdatesToSnapshot(second, {{3, 0, "minecraft:stone", 70}}, 100);
+    livemap::applyBlockUpdatesToSnapshot(second, {{3, 0, "minecraft:stone", 70, "minecraft:air", -64}}, 100);
     assert(livemap::fingerprintChunkSnapshot(first) != livemap::fingerprintChunkSnapshot(second));
     assert(second.updated_at_ms == 100);
+
+    auto third = makeBaselineTestSnapshot();
+    livemap::applyBlockUpdatesToSnapshot(third, {{3, 0, "minecraft:grass_block", 64, "minecraft:poppy", 65}}, 101);
+    assert(livemap::fingerprintChunkSnapshot(first) != livemap::fingerprintChunkSnapshot(third));
 }
 
 void testChunkBaselineIndex()
@@ -181,7 +214,7 @@ void testChunkBaselineIndex()
     assert(loaded.baselines.at(coord).fingerprint == baselines.at(coord).fingerprint);
     assert(loaded.baselines.at(coord).updated_at_ms == 99);
 
-    livemap::applyBlockUpdatesToSnapshot(snapshot, {{1, 1, "minecraft:stone", 71}}, 101);
+    livemap::applyBlockUpdatesToSnapshot(snapshot, {{1, 1, "minecraft:stone", 71, "minecraft:air", -64}}, 101);
     baselines[coord] = {coord, livemap::fingerprintChunkSnapshot(snapshot), snapshot.updated_at_ms};
     assert(livemap::saveChunkBaselineIndexAtomic(path, baselines, &error));
     loaded = livemap::loadChunkBaselineIndex(path);
@@ -285,6 +318,7 @@ int main()
 {
     testTileMath();
     testChunkMath();
+    testMapBlockClassification();
     testDirtyTracker();
     testDirtyBlockTracker();
     testProtocol();

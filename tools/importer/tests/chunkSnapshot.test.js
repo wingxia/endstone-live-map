@@ -10,6 +10,10 @@ function layerWithBlocks(entries) {
     1: block("minecraft:stone"),
     2: block("minecraft:grass_block"),
     3: block("minecraft:water"),
+    4: block("minecraft:poppy"),
+    5: block("minecraft:glass_pane"),
+    6: block("minecraft:glass"),
+    7: block("minecraft:grass_path"),
   };
   for (const entry of entries) {
     block_indices[offsetToSubchunkIndex(entry.x, entry.y, entry.z)] = entry.paletteIndex;
@@ -87,6 +91,48 @@ describe("chunk snapshot importer helpers", () => {
     expect(snapshot.palette[snapshot.blocks[1 * 16 + 1]]).toBe("minecraft:grass_block");
     expect(snapshot.heights[2 * 16 + 2]).toBe(17);
     expect(snapshot.palette[snapshot.blocks[2 * 16 + 2]]).toBe("minecraft:water");
+  });
+
+  it("skips plant and cutout decoration blocks when choosing the map surface", () => {
+    const snapshot = buildChunkSnapshot({
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkX: 0,
+      chunkZ: 0,
+      subchunks: [
+        {
+          y: 0,
+          layers: [
+            layerWithBlocks([
+              { x: 1, y: 4, z: 1, paletteIndex: 4 },
+              { x: 1, y: 3, z: 1, paletteIndex: 2 },
+              { x: 2, y: 5, z: 2, paletteIndex: 5 },
+              { x: 2, y: 2, z: 2, paletteIndex: 1 },
+              { x: 3, y: 6, z: 3, paletteIndex: 6 },
+              { x: 3, y: 1, z: 3, paletteIndex: 1 },
+              { x: 4, y: 6, z: 4, paletteIndex: 7 },
+              { x: 4, y: 1, z: 4, paletteIndex: 1 },
+            ]),
+          ],
+        },
+      ],
+      updatedAt: 100,
+    });
+
+    expect(snapshot.palette[snapshot.blocks[1 * 16 + 1]]).toBe("minecraft:grass_block");
+    expect(snapshot.heights[1 * 16 + 1]).toBe(3);
+    expect(snapshot.palette[snapshot.overlayBlocks[1 * 16 + 1]]).toBe("minecraft:poppy");
+    expect(snapshot.overlayHeights[1 * 16 + 1]).toBe(4);
+    expect(snapshot.palette[snapshot.blocks[2 * 16 + 2]]).toBe("minecraft:stone");
+    expect(snapshot.heights[2 * 16 + 2]).toBe(2);
+    expect(snapshot.palette[snapshot.overlayBlocks[2 * 16 + 2]]).toBe("minecraft:glass_pane");
+    expect(snapshot.overlayHeights[2 * 16 + 2]).toBe(5);
+    expect(snapshot.palette[snapshot.blocks[3 * 16 + 3]]).toBe("minecraft:glass");
+    expect(snapshot.heights[3 * 16 + 3]).toBe(6);
+    expect(snapshot.palette[snapshot.overlayBlocks[3 * 16 + 3]]).toBe("minecraft:air");
+    expect(snapshot.overlayHeights[3 * 16 + 3]).toBe(-64);
+    expect(snapshot.palette[snapshot.blocks[4 * 16 + 4]]).toBe("minecraft:grass_path");
+    expect(snapshot.heights[4 * 16 + 4]).toBe(6);
   });
 
   it("summarizes and merges world metadata", () => {

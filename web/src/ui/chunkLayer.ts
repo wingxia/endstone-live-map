@@ -12,17 +12,37 @@ import {
   type TextureManifest,
 } from "../api";
 import { blockColumnIndex, blockToChunk } from "./coords";
+import { isLikelyTransparentTextureBlock, isMapDecorationBlock, isPlantBlock } from "./mapBlocks";
 
 const BLOCKS_PER_CHUNK = 16;
 const TILE_SIZE = 256;
 const MIN_ZOOM = 0;
 const MAX_ZOOM = 4;
+const TILE_KEEP_BUFFER = 2;
 
 export const INITIAL_MAP_ZOOM = 4;
 
 interface AtlasResource {
   manifest: TextureManifest;
   image: HTMLImageElement | null;
+}
+
+interface TileDrawContext {
+  world: string;
+  dimension: string;
+  active: boolean;
+  dataVersion: number;
+}
+
+interface LeafletTileRecord {
+  el: HTMLElement;
+  coords: Coords;
+  current?: boolean;
+}
+
+interface GridLayerInternals {
+  _tiles?: Record<string, LeafletTileRecord>;
+  _update?: () => void;
 }
 
 export interface ChunkLayerHandle extends GridLayer {
@@ -48,6 +68,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     private dimensionName = dimension;
     private active = false;
     private readonly chunkCache = new Map<string, ChunkSnapshot>();
+    private dataVersion = 0;
     private atlasPromise: Promise<AtlasResource> | null = null;
 
     setActive(active: boolean) {
@@ -58,6 +79,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       if (!active) {
         this.chunkCache.clear();
       }
+      this.dataVersion += 1;
       this.redraw();
     }
 
@@ -68,6 +90,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       this.worldName = nextWorld;
       this.dimensionName = nextDimension;
       this.chunkCache.clear();
+      this.dataVersion += 1;
       this.redraw();
     }
 
@@ -76,17 +99,19 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
         return;
       }
       this.chunkCache.delete(cacheKey(message.world, message.dimension, message.chunkX, message.chunkZ));
-      this.redraw();
+      this.dataVersion += 1;
+      this.refreshVisibleTiles({ chunkX: message.chunkX, chunkZ: message.chunkZ });
     }
 
     applyBlockUpdates(message: BlockUpdatesMessage) {
       if (!sameWorldDimension(message.world, message.dimension, this.worldName, this.dimensionName)) {
         return;
       }
+      this.dataVersion += 1;
       const key = cacheKey(message.world, message.dimension, message.chunkX, message.chunkZ);
       const chunk = this.chunkCache.get(key);
       if (!chunk) {
-        this.redraw();
+        this.refreshVisibleTiles({ chunkX: message.chunkX, chunkZ: message.chunkZ });
         return;
       }
       for (const update of message.updates) {
@@ -100,8 +125,20 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
         const index = blockColumnIndex(update.localX, update.localZ);
         chunk.blocks[index] = paletteIndex;
         chunk.heights[index] = update.height;
+        if (update.overlayBlock !== undefined || chunk.overlayBlocks !== undefined || chunk.overlayHeights !== undefined) {
+          const overlayBlock = update.overlayBlock || "minecraft:air";
+          const overlayHeight = update.overlayHeight ?? -64;
+          let overlayPaletteIndex = chunk.palette.indexOf(overlayBlock);
+          if (overlayPaletteIndex === -1) {
+            overlayPaletteIndex = chunk.palette.push(overlayBlock) - 1;
+          }
+          chunk.overlayBlocks = fixedChunkArray(chunk.overlayBlocks, airPaletteIndex(chunk));
+          chunk.overlayHeights = fixedChunkArray(chunk.overlayHeights, -64);
+          chunk.overlayBlocks[index] = overlayPaletteIndex;
+          chunk.overlayHeights[index] = overlayHeight;
+        }
       }
-      this.redraw();
+      this.refreshVisibleTiles({ chunkX: message.chunkX, chunkZ: message.chunkZ });
     }
 
     getBlockInfo(x: number, z: number): BlockInfo | null {
@@ -127,41 +164,107 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       canvas.width = TILE_SIZE;
       canvas.height = TILE_SIZE;
       canvas.className = "chunk-tile";
-      void this.drawTile(canvas, coords)
+      const context = this.currentDrawContext();
+      void this.drawTile(canvas, coords, context)
         .catch(() => drawEmptyTile(canvas, "#17202a"))
         .finally(() => done(undefined, canvas));
       return canvas;
     }
 
-    private async drawTile(canvas: HTMLCanvasElement, coords: Coords) {
+    private async drawTile(
+      canvas: HTMLCanvasElement,
+      coords: Coords,
+      context: TileDrawContext,
+      options: { preserveExisting?: boolean } = {},
+    ) {
       const ctx = canvas.getContext("2d");
       if (!ctx) {
         return;
       }
       ctx.imageSmoothingEnabled = false;
-      drawEmptyTile(canvas, "#17202a");
-      if (!this.active) {
+      if (!options.preserveExisting) {
+        drawEmptyTile(canvas, "#17202a");
+      }
+      if (!context.active || !this.isCurrentTileContext(context)) {
         return;
       }
 
       const tileRange = chunkRangeForTile(coords);
-      const response = await fetchChunks({
-        world: this.worldName,
-        dimension: this.dimensionName,
-        minChunkX: tileRange.minChunkX,
-        maxChunkX: tileRange.maxChunkX,
-        minChunkZ: tileRange.minChunkZ,
-        maxChunkZ: tileRange.maxChunkZ,
-      });
+      const cachedChunks = chunksFromCache(this.chunkCache, context.world, context.dimension, tileRange);
+      const atlasPromise = this.loadAtlas();
+      if (cachedChunks.length > 0) {
+        const atlas = await atlasPromise;
+        if (!this.isCurrentTileContext(context)) {
+          return;
+        }
+        drawEmptyTile(canvas, "#17202a");
+        for (const chunk of cachedChunks) {
+          drawChunk(ctx, chunk, tileRange, atlas);
+        }
+        drawGrid(ctx, tileRange);
+      }
+
+      const response = await fetchChunks(
+        {
+          world: context.world,
+          dimension: context.dimension,
+          minChunkX: tileRange.minChunkX,
+          maxChunkX: tileRange.maxChunkX,
+          minChunkZ: tileRange.minChunkZ,
+          maxChunkZ: tileRange.maxChunkZ,
+        },
+        { cache: "no-store", cacheBust: `${context.dataVersion}-${coords.z}-${coords.x}-${coords.y}` },
+      );
+      if (!this.isCurrentTileContext(context)) {
+        return;
+      }
       for (const chunk of response.chunks) {
         this.chunkCache.set(cacheKey(chunk.world, chunk.dimension, chunk.chunkX, chunk.chunkZ), chunk);
       }
 
-      const atlas = await this.loadAtlas();
+      const atlas = await atlasPromise;
+      if (!this.isCurrentTileContext(context)) {
+        return;
+      }
+      drawEmptyTile(canvas, "#17202a");
       for (const chunk of response.chunks) {
         drawChunk(ctx, chunk, tileRange, atlas);
       }
       drawGrid(ctx, tileRange);
+    }
+
+    private refreshVisibleTiles(changedChunk: { chunkX: number; chunkZ: number }) {
+      const internals = this as unknown as GridLayerInternals;
+      let refreshed = false;
+      for (const tile of Object.values(internals._tiles || {})) {
+        if (!tile.current || !(tile.el instanceof HTMLCanvasElement) || !tileIntersectsChunk(tile.coords, changedChunk)) {
+          continue;
+        }
+        refreshed = true;
+        void this.drawTile(tile.el, tile.coords, this.currentDrawContext(), { preserveExisting: true }).catch(() => undefined);
+      }
+      if (!refreshed) {
+        internals._update?.call(this);
+      }
+    }
+
+    private currentDrawContext(): TileDrawContext {
+      return {
+        world: this.worldName,
+        dimension: this.dimensionName,
+        active: this.active,
+        dataVersion: this.dataVersion,
+      };
+    }
+
+    private isCurrentTileContext(context: TileDrawContext) {
+      return (
+        context.active &&
+        this.active &&
+        context.dataVersion === this.dataVersion &&
+        this.worldName === context.world &&
+        this.dimensionName === context.dimension
+      );
     }
 
     private loadAtlas() {
@@ -177,6 +280,8 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     minZoom: MIN_ZOOM,
     maxZoom: MAX_ZOOM,
     noWrap: false,
+    updateWhenZooming: false,
+    keepBuffer: TILE_KEEP_BUFFER,
     className: "chunk-grid-layer",
   }) as ChunkLayerHandle;
 }
@@ -227,12 +332,44 @@ function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: T
       }
       const index = blockColumnIndex(localX, localZ);
       const blockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
-      drawBlock(ctx, atlas, blockId, (worldX - range.minBlockX) * range.scale, (worldZ - range.minBlockZ) * range.scale, range.scale);
+      const x = (worldX - range.minBlockX) * range.scale;
+      const y = (worldZ - range.minBlockZ) * range.scale;
+      drawBlock(ctx, atlas, blockId, x, y, range.scale, "base");
+      const overlayBlockId = overlayBlockAt(chunk, index);
+      if (overlayBlockId && overlayBlockId !== "minecraft:air") {
+        drawBlock(ctx, atlas, overlayBlockId, x, y, range.scale, "overlay");
+      }
     }
   }
 }
 
-function drawBlock(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId: string, x: number, y: number, size: number) {
+function chunksFromCache(cache: Map<string, ChunkSnapshot>, world: string, dimension: string, range: TileChunkRange) {
+  const chunks: ChunkSnapshot[] = [];
+  for (let chunkZ = range.minChunkZ; chunkZ <= range.maxChunkZ; chunkZ += 1) {
+    for (let chunkX = range.minChunkX; chunkX <= range.maxChunkX; chunkX += 1) {
+      const chunk = cache.get(cacheKey(world, dimension, chunkX, chunkZ));
+      if (chunk) {
+        chunks.push(chunk);
+      }
+    }
+  }
+  return chunks;
+}
+
+function tileIntersectsChunk(coords: Pick<Coords, "x" | "y" | "z">, chunk: { chunkX: number; chunkZ: number }) {
+  const range = chunkRangeForTile(coords);
+  return chunk.chunkX >= range.minChunkX && chunk.chunkX <= range.maxChunkX && chunk.chunkZ >= range.minChunkZ && chunk.chunkZ <= range.maxChunkZ;
+}
+
+function drawBlock(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId: string, x: number, y: number, size: number, layer: "base" | "overlay" = "base") {
+  if (isPlantBlock(blockId)) {
+    drawPlantMarker(ctx, atlas, blockId, x, y, size, layer);
+    return;
+  }
+  if (isMapDecorationBlock(blockId)) {
+    drawDecorationBlock(ctx, atlas, blockId, x, y, size, layer);
+    return;
+  }
   if (usesMapTint(blockId)) {
     ctx.fillStyle = fallbackTextureColor(blockId);
     ctx.fillRect(x, y, size, size);
@@ -240,6 +377,10 @@ function drawBlock(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId:
   }
   const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
   if (atlas.image && entry) {
+    if (isLikelyTransparentTextureBlock(blockId)) {
+      ctx.fillStyle = fallbackTextureColor(blockId);
+      ctx.fillRect(x, y, size, size);
+    }
     drawAtlasEntry(ctx, atlas.image, entry, x, y, size);
     return;
   }
@@ -249,6 +390,76 @@ function drawBlock(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId:
 
 function drawAtlasEntry(ctx: CanvasRenderingContext2D, image: HTMLImageElement, entry: TextureAtlasEntry, x: number, y: number, size: number) {
   ctx.drawImage(image, entry.x, entry.y, entry.w, entry.h, x, y, size, size);
+}
+
+function drawPlantMarker(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId: string, x: number, y: number, size: number, layer: "base" | "overlay") {
+  if (layer === "base") {
+    ctx.fillStyle = "#5f9f3f";
+    ctx.fillRect(x, y, size, size);
+  }
+  const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
+  if (atlas.image && entry && size >= 4) {
+    const inset = layer === "overlay" ? Math.max(1, Math.floor(size * 0.26)) : Math.max(1, Math.floor(size * 0.22));
+    drawAtlasEntry(ctx, atlas.image, entry, x + inset, y + inset, Math.max(1, size - inset * 2));
+    return;
+  }
+  ctx.fillStyle = fallbackTextureColor(blockId);
+  const marker = Math.max(1, Math.floor(size * (layer === "overlay" ? 0.35 : 0.45)));
+  ctx.fillRect(x + Math.floor((size - marker) / 2), y + Math.floor((size - marker) / 2), marker, marker);
+}
+
+function drawDecorationBlock(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId: string, x: number, y: number, size: number, layer: "base" | "overlay") {
+  if (layer === "base") {
+    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillRect(x, y, size, size);
+  }
+  const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
+  if (atlas.image && entry) {
+    const inset = layer === "overlay" ? decorationInset(blockId, size) : 0;
+    drawAtlasEntry(ctx, atlas.image, entry, x + inset, y + inset, Math.max(1, size - inset * 2));
+    return;
+  }
+  drawDecorationGlyph(ctx, blockId, x, y, size);
+}
+
+function overlayBlockAt(chunk: ChunkSnapshot, index: number) {
+  const overlayBlocks = chunk.overlayBlocks;
+  if (!overlayBlocks || !chunk.overlayHeights || chunk.overlayHeights[index] <= -64) {
+    return "";
+  }
+  return chunk.palette[overlayBlocks[index]] || "minecraft:air";
+}
+
+function fixedChunkArray(values: number[] | undefined, fallback: number) {
+  if (values && values.length === 256) {
+    return values;
+  }
+  return Array.from({ length: 256 }, () => fallback);
+}
+
+function airPaletteIndex(chunk: ChunkSnapshot) {
+  const index = chunk.palette.indexOf("minecraft:air");
+  if (index >= 0) {
+    return index;
+  }
+  return chunk.palette.push("minecraft:air") - 1;
+}
+
+function decorationInset(blockId: string, size: number) {
+  const id = blockId.toLowerCase();
+  if (id.includes("pane") || id.includes("bars") || id.includes("fence") || id.includes("rail") || id.includes("chain")) {
+    return Math.max(1, Math.floor(size * 0.28));
+  }
+  if (id.includes("torch") || id.includes("button") || id.includes("lever") || id.includes("candle")) {
+    return Math.max(1, Math.floor(size * 0.34));
+  }
+  return Math.max(1, Math.floor(size * 0.18));
+}
+
+function drawDecorationGlyph(ctx: CanvasRenderingContext2D, blockId: string, x: number, y: number, size: number) {
+  const inset = decorationInset(blockId, size);
+  ctx.fillStyle = fallbackTextureColor(blockId);
+  ctx.fillRect(x + inset, y + inset, Math.max(1, size - inset * 2), Math.max(1, size - inset * 2));
 }
 
 function drawEmptyTile(canvas: HTMLCanvasElement, color: string) {
@@ -371,8 +582,17 @@ export function fallbackTextureColor(blockId: string) {
   if (id.includes("short_grass") || id.includes("tall_grass") || id.includes("fern") || id.includes("vine")) {
     return "#4f8f35";
   }
+  if (id.includes("flower") || id.includes("poppy") || id.includes("dandelion") || id.includes("tulip") || id.includes("orchid") || id.includes("allium")) {
+    return "#d9d16b";
+  }
   if (id.includes("leaves")) {
     return "#3f7f38";
+  }
+  if (id.includes("glass") || id.includes("pane") || id.includes("ice")) {
+    return "#9fc7d1";
+  }
+  if (id.includes("fence") || id.includes("trapdoor") || id.includes("door") || id.includes("rail") || id.includes("bars") || id.includes("chain")) {
+    return "#8b8174";
   }
   if (id.includes("sand")) {
     return "#d7c47a";

@@ -7,6 +7,7 @@ const CORS_HEADERS = {
 };
 
 const CHUNK_BLOCK_COUNT = 256;
+const MAX_CHUNK_PALETTE_SIZE = CHUNK_BLOCK_COUNT * 2;
 const MAX_CHUNKS_PER_REQUEST = 256;
 const MAX_CHUNKS_PER_BATCH = 384;
 const REGION_SIZE_CHUNKS = 16;
@@ -704,8 +705,11 @@ async function deleteMarker(env, id) {
 
 export function normalizeChunkSnapshot(payload) {
   const palette = Array.isArray(payload.palette) ? payload.palette.map((value) => cleanBlockId(value)) : [];
-  if (palette.length < 1 || palette.length > CHUNK_BLOCK_COUNT) {
-    throw new Error("palette must contain 1-256 block ids");
+  if (!palette.includes("minecraft:air")) {
+    palette.push("minecraft:air");
+  }
+  if (palette.length < 1 || palette.length > MAX_CHUNK_PALETTE_SIZE) {
+    throw new Error(`palette must contain 1-${MAX_CHUNK_PALETTE_SIZE} block ids`);
   }
   const blocks = normalizeFixedNumberArray(payload.blocks, "blocks", CHUNK_BLOCK_COUNT).map((value) => {
     if (value < 0 || value >= palette.length) {
@@ -714,6 +718,10 @@ export function normalizeChunkSnapshot(payload) {
     return value;
   });
   const heights = normalizeFixedNumberArray(payload.heights, "heights", CHUNK_BLOCK_COUNT);
+  const overlayBlocks = normalizeOptionalPaletteArray(payload.overlayBlocks, "overlayBlocks", CHUNK_BLOCK_COUNT, palette);
+  const overlayHeights = Array.isArray(payload.overlayHeights)
+    ? normalizeFixedNumberArray(payload.overlayHeights, "overlayHeights", CHUNK_BLOCK_COUNT)
+    : Array.from({ length: CHUNK_BLOCK_COUNT }, () => -64);
 
   return {
     world: cleanSegment(payload.world || "world"),
@@ -723,6 +731,8 @@ export function normalizeChunkSnapshot(payload) {
     palette,
     blocks,
     heights,
+    overlayBlocks,
+    overlayHeights,
     updatedAt: numberOrThrow(payload.updatedAt ?? Date.now(), "updatedAt"),
   };
 }
@@ -762,6 +772,8 @@ function normalizeBlockUpdate(update) {
     localZ,
     block: cleanBlockId(update.block || "minecraft:air"),
     height: numberOrThrow(update.height, "updates.height"),
+    overlayBlock: cleanBlockId(update.overlayBlock || "minecraft:air"),
+    overlayHeight: numberOrThrow(update.overlayHeight ?? -64, "updates.overlayHeight"),
   };
 }
 
@@ -969,22 +981,35 @@ function floorDiv(value, divisor) {
 function applyBlockUpdatesToChunk(chunk, updates) {
   const applied = [];
   for (const update of updates) {
-    let paletteIndex = chunk.palette.indexOf(update.block);
-    if (paletteIndex === -1) {
-      if (chunk.palette.length >= CHUNK_BLOCK_COUNT) {
-        throw new Error("chunk palette is full");
-      }
-      paletteIndex = chunk.palette.push(update.block) - 1;
-    }
+    const paletteIndex = paletteIndexFor(chunk, update.block);
+    const overlayPaletteIndex = paletteIndexFor(chunk, update.overlayBlock);
     const index = update.localZ * 16 + update.localX;
-    if (chunk.blocks[index] === paletteIndex && chunk.heights[index] === update.height) {
+    if (
+      chunk.blocks[index] === paletteIndex &&
+      chunk.heights[index] === update.height &&
+      chunk.overlayBlocks[index] === overlayPaletteIndex &&
+      chunk.overlayHeights[index] === update.overlayHeight
+    ) {
       continue;
     }
     chunk.blocks[index] = paletteIndex;
     chunk.heights[index] = update.height;
+    chunk.overlayBlocks[index] = overlayPaletteIndex;
+    chunk.overlayHeights[index] = update.overlayHeight;
     applied.push(update);
   }
   return applied;
+}
+
+function paletteIndexFor(chunk, block) {
+  let paletteIndex = chunk.palette.indexOf(block);
+  if (paletteIndex === -1) {
+    if (chunk.palette.length >= MAX_CHUNK_PALETTE_SIZE) {
+      throw new Error("chunk palette is full");
+    }
+    paletteIndex = chunk.palette.push(block) - 1;
+  }
+  return paletteIndex;
 }
 
 async function mapWithConcurrency(items, concurrency, fn) {
@@ -1006,15 +1031,32 @@ export function diffChunkSnapshots(previous, next) {
     return [];
   }
   const updates = [];
+  const previousOverlayBlocks = Array.isArray(previous.overlayBlocks) ? previous.overlayBlocks : [];
+  const previousOverlayHeights = Array.isArray(previous.overlayHeights) ? previous.overlayHeights : [];
+  const nextOverlayBlocks = Array.isArray(next.overlayBlocks) ? next.overlayBlocks : [];
+  const nextOverlayHeights = Array.isArray(next.overlayHeights) ? next.overlayHeights : [];
   for (let index = 0; index < CHUNK_BLOCK_COUNT; index += 1) {
-    if (previous.blocks[index] === next.blocks[index] && previous.heights[index] === next.heights[index]) {
+    const previousBlock = previous.palette[previous.blocks[index]] || "minecraft:air";
+    const nextBlock = next.palette[next.blocks[index]] || "minecraft:air";
+    const previousOverlayHeight = previousOverlayHeights[index] ?? -64;
+    const nextOverlayHeight = nextOverlayHeights[index] ?? -64;
+    const previousOverlayBlock = previousOverlayHeight > -64 ? previous.palette[previousOverlayBlocks[index]] || "minecraft:air" : "minecraft:air";
+    const nextOverlayBlock = nextOverlayHeight > -64 ? next.palette[nextOverlayBlocks[index]] || "minecraft:air" : "minecraft:air";
+    if (
+      previousBlock === nextBlock &&
+      previous.heights[index] === next.heights[index] &&
+      previousOverlayBlock === nextOverlayBlock &&
+      previousOverlayHeight === nextOverlayHeight
+    ) {
       continue;
     }
     updates.push({
       localX: index % 16,
       localZ: Math.floor(index / 16),
-      block: next.palette[next.blocks[index]] || "minecraft:air",
+      block: nextBlock,
       height: next.heights[index],
+      overlayBlock: nextOverlayBlock,
+      overlayHeight: nextOverlayHeight,
     });
   }
   return updates;
@@ -1038,6 +1080,19 @@ function normalizeFixedNumberArray(value, field, length) {
     throw new Error(`${field} must contain ${length} entries`);
   }
   return value.map((item, index) => numberOrThrow(item, `${field}[${index}]`));
+}
+
+function normalizeOptionalPaletteArray(value, field, length, palette) {
+  if (!Array.isArray(value)) {
+    const airIndex = Math.max(0, palette.indexOf("minecraft:air"));
+    return Array.from({ length }, () => airIndex);
+  }
+  return normalizeFixedNumberArray(value, field, length).map((item) => {
+    if (item < 0 || item >= palette.length) {
+      throw new Error(`${field} palette index out of range`);
+    }
+    return item;
+  });
 }
 
 function cleanSegment(value) {

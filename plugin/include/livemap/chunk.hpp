@@ -85,6 +85,12 @@ struct ChunkSnapshot {
     std::vector<std::string> palette;
     std::array<std::uint16_t, kChunkBlockCount> blocks{};
     std::array<int, kChunkBlockCount> heights{};
+    std::array<std::uint16_t, kChunkBlockCount> overlay_blocks{};
+    std::array<int, kChunkBlockCount> overlay_heights = [] {
+        std::array<int, kChunkBlockCount> values{};
+        values.fill(-64);
+        return values;
+    }();
     std::int64_t updated_at_ms{};
 };
 
@@ -93,6 +99,8 @@ struct BlockColumnUpdate {
     int local_z{};
     std::string block;
     int height{};
+    std::string overlay_block = "minecraft:air";
+    int overlay_height = -64;
 };
 
 struct BlockUpdateBatch {
