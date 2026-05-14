@@ -115,6 +115,7 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
     const playerBounds = players.length > 0 ? boundsForPlayers(players) : null;
     const meta = isWorldMetaForMap(worldMeta, world, dimension) ? worldMeta : null;
     const autoFitKey = autoFitKeyFor(world, dimension, meta, playerBounds);
+    state.chunkLayer.setKnownBounds(meta?.bounds || null);
     if (!meta && !playerBounds) {
       state.chunkLayer.setActive(false);
       if (autoFitKeyRef.current !== autoFitKey) {

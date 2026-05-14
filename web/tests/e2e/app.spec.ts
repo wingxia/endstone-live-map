@@ -365,6 +365,7 @@ test("renders visible chunks progressively before slow neighboring chunk request
 
 test("keeps first load scoped to the initial viewport instead of fitting every imported chunk", async ({ page }) => {
   const requestedKnownChunks = new Set<string>();
+  const requestedOutsideBounds = new Set<string>();
   const grassChunk = {
     world: "Bedrock level",
     dimension: "Overworld",
@@ -419,6 +420,8 @@ test("keeps first load scoped to the initial viewport instead of fitting every i
       for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
         if (chunkX >= -42 && chunkX <= 0 && chunkZ >= -38 && chunkZ <= 0) {
           requestedKnownChunks.add(`${chunkX},${chunkZ}`);
+        } else {
+          requestedOutsideBounds.add(`${chunkX},${chunkZ}`);
         }
       }
     }
@@ -443,7 +446,66 @@ test("keeps first load scoped to the initial viewport instead of fitting every i
   await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
   await page.waitForTimeout(500);
   expect(requestedKnownChunks.has("-42,-38")).toBe(false);
+  expect(requestedOutsideBounds.size).toBe(0);
   expect(requestedKnownChunks.size).toBeLessThan(90);
+});
+
+test("renders fallback map colors before the texture atlas finishes loading", async ({ page }) => {
+  const grassChunk = {
+    world: "Bedrock level",
+    dimension: "Overworld",
+    chunkX: 0,
+    chunkZ: 0,
+    palette: ["minecraft:grass_block"],
+    blocks: Array.from({ length: 256 }, () => 0),
+    heights: Array.from({ length: 256 }, () => 64),
+    updatedAt: 1,
+  };
+
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        worlds: [
+          {
+            version: 1,
+            world: "Bedrock level",
+            dimension: "Overworld",
+            status: "complete",
+            chunkCount: 1,
+            importedAt: 1,
+            updatedAt: 1,
+            bounds: {
+              minChunkX: 0,
+              maxChunkX: 0,
+              minChunkZ: 0,
+              maxChunkZ: 0,
+              minBlockX: 0,
+              maxBlockX: 15,
+              minBlockZ: 0,
+              maxBlockZ: 15,
+            },
+            topBlocks: { "minecraft:grass_block": 256 },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [grassChunk], missing: [] }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 30_000));
+    await route.fulfill({ status: 404, body: "texture manifest delayed" });
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => pageHasGrassPixels(page), { timeout: 2_000 }).toBe(true);
 });
 
 test("renders plant and cutout overlays without dark tile holes", async ({ page }) => {

@@ -40,6 +40,17 @@ interface TileDrawOptions {
   cacheBust?: string | number;
 }
 
+interface ChunkLayerOptions {
+  bounds?: ChunkLayerBounds | null;
+}
+
+interface ChunkLayerBounds {
+  minChunkX: number;
+  maxChunkX: number;
+  minChunkZ: number;
+  maxChunkZ: number;
+}
+
 interface LeafletTileRecord {
   el: HTMLElement;
   coords: Coords;
@@ -53,6 +64,7 @@ interface GridLayerInternals {
 
 export interface ChunkLayerHandle extends GridLayer {
   setActive: (active: boolean) => void;
+  setKnownBounds: (bounds: ChunkLayerBounds | null) => void;
   setWorldDimension: (world: string, dimension: string) => void;
   refreshChunk: (message: ChunkReadyMessage) => void;
   applyBlockUpdates: (message: BlockUpdatesMessage) => void;
@@ -68,10 +80,11 @@ export interface BlockInfo {
   localZ: number;
 }
 
-export function createChunkGridLayer(L: typeof import("leaflet"), world: string, dimension: string): ChunkLayerHandle {
+export function createChunkGridLayer(L: typeof import("leaflet"), world: string, dimension: string, options: ChunkLayerOptions = {}): ChunkLayerHandle {
   class ChunkGridLayer extends L.GridLayer implements ChunkLayerHandle {
     private worldName = world;
     private dimensionName = dimension;
+    private knownBounds = options.bounds || null;
     private active = false;
     private readonly chunkCache = new Map<string, ChunkSnapshot>();
     private readonly missingChunkCache = new Set<string>();
@@ -86,6 +99,10 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       this.active = active;
       this.dataVersion += 1;
       this.redraw();
+    }
+
+    setKnownBounds(bounds: ChunkLayerBounds | null) {
+      this.knownBounds = bounds;
     }
 
     setWorldDimension(nextWorld: string, nextDimension: string) {
@@ -205,18 +222,10 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
 
       const tileRange = chunkRangeForTile(coords);
       const cachedChunks = chunksFromCache(this.chunkCache, context.world, context.dimension, tileRange);
-      const atlasPromise = this.loadAtlas();
       const chunksReady = this.ensureTileChunksCached(context, tileRange, options.cacheBust);
       if (cachedChunks.length > 0) {
-        const atlas = await atlasPromise;
-        if (!this.isCurrentTileContext(context)) {
-          return;
-        }
-        drawEmptyTile(canvas, "#17202a");
-        for (const chunk of cachedChunks) {
-          drawChunk(ctx, chunk, tileRange, atlas);
-        }
-        drawGrid(ctx, tileRange);
+        drawTileChunks(ctx, cachedChunks, tileRange, fallbackAtlas());
+        void this.redrawTileWithAtlas(canvas, coords, context);
       }
       if (!chunksReady) {
         return;
@@ -227,15 +236,11 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
         return;
       }
 
-      const atlas = await atlasPromise;
-      if (!this.isCurrentTileContext(context)) {
-        return;
+      const freshChunks = chunksFromCache(this.chunkCache, context.world, context.dimension, tileRange);
+      if (freshChunks.length > 0) {
+        drawTileChunks(ctx, freshChunks, tileRange, fallbackAtlas());
+        void this.redrawTileWithAtlas(canvas, coords, context);
       }
-      drawEmptyTile(canvas, "#17202a");
-      for (const chunk of chunksFromCache(this.chunkCache, context.world, context.dimension, tileRange)) {
-        drawChunk(ctx, chunk, tileRange, atlas);
-      }
-      drawGrid(ctx, tileRange);
     }
 
     private ensureTileChunksCached(context: TileDrawContext, tileRange: TileChunkRange, cacheBust?: string | number) {
@@ -243,6 +248,9 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       const uncachedChunks: Array<{ chunkX: number; chunkZ: number }> = [];
       for (let chunkZ = tileRange.minChunkZ; chunkZ <= tileRange.maxChunkZ; chunkZ += 1) {
         for (let chunkX = tileRange.minChunkX; chunkX <= tileRange.maxChunkX; chunkX += 1) {
+          if (this.isOutsideKnownBounds(chunkX, chunkZ)) {
+            continue;
+          }
           const key = cacheKey(context.world, context.dimension, chunkX, chunkZ);
           if (this.chunkCache.has(key) || this.missingChunkCache.has(key)) {
             continue;
@@ -309,6 +317,23 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       return request;
     }
 
+    private async redrawTileWithAtlas(canvas: HTMLCanvasElement, coords: Coords, context: TileDrawContext) {
+      const atlas = await this.loadAtlas();
+      if (!atlas.image || !this.isCurrentTileContext(context)) {
+        return;
+      }
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        return;
+      }
+      const tileRange = chunkRangeForTile(coords);
+      const chunks = chunksFromCache(this.chunkCache, context.world, context.dimension, tileRange);
+      if (chunks.length === 0) {
+        return;
+      }
+      drawTileChunks(ctx, chunks, tileRange, atlas);
+    }
+
     private redrawVisibleTilesForRange(context: TileDrawContext, range: ChunkFetchRange) {
       if (!this.isCurrentTileContext(context)) {
         return;
@@ -335,6 +360,13 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       if (!refreshed) {
         internals._update?.call(this);
       }
+    }
+
+    private isOutsideKnownBounds(chunkX: number, chunkZ: number) {
+      return Boolean(
+        this.knownBounds &&
+          (chunkX < this.knownBounds.minChunkX || chunkX > this.knownBounds.maxChunkX || chunkZ < this.knownBounds.minChunkZ || chunkZ > this.knownBounds.maxChunkZ),
+      );
     }
 
     private currentDrawContext(): TileDrawContext {
@@ -438,6 +470,14 @@ function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: T
       }
     }
   }
+}
+
+function drawTileChunks(ctx: CanvasRenderingContext2D, chunks: ChunkSnapshot[], range: TileChunkRange, atlas: AtlasResource) {
+  drawEmptyTile(ctx.canvas, "#17202a");
+  for (const chunk of chunks) {
+    drawChunk(ctx, chunk, range, atlas);
+  }
+  drawGrid(ctx, range);
 }
 
 function chunksFromCache(cache: Map<string, ChunkSnapshot>, world: string, dimension: string, range: TileChunkRange) {
@@ -916,6 +956,13 @@ async function loadAtlasResource(): Promise<AtlasResource> {
       image: null,
     };
   }
+}
+
+function fallbackAtlas(): AtlasResource {
+  return {
+    manifest: { version: 1, tileSize: 16, atlas: "", blocks: {} },
+    image: null,
+  };
 }
 
 function loadImage(src: string) {
