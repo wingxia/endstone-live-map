@@ -1,5 +1,6 @@
 #include "livemap/baseline.hpp"
 #include "livemap/chunk.hpp"
+#include "livemap/land.hpp"
 #include "livemap/map_blocks.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
@@ -80,6 +81,7 @@ struct UploadJob {
         PlayerSnapshot,
         ChunkBatch,
         BlockUpdates,
+        Lands,
     };
 
     Kind kind{};
@@ -315,12 +317,14 @@ public:
         const auto player_ticks = static_cast<std::uint64_t>(std::max(1, settings_.player_push_seconds) * 20);
         const auto seed_ticks = static_cast<std::uint64_t>(std::max(1, settings_.seed_pulse_seconds) * 20);
         const auto dirty_block_ticks = static_cast<std::uint64_t>(std::max(1, settings_.dirty_block_push_seconds) * 20);
+        const auto land_ticks = static_cast<std::uint64_t>(std::max(10, settings_.land_push_seconds) * 20);
         player_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { publishPlayers(); }, player_ticks,
                                                                player_ticks);
         seed_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { pulsePlayerSeedQueue(); }, seed_ticks,
                                                              seed_ticks);
         dirty_block_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { publishDirtyBlocks(); },
                                                                     dirty_block_ticks, dirty_block_ticks);
+        land_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { publishLands(); }, 20, land_ticks);
         upload_result_task_ = getServer().getScheduler().runTaskTimer(*this, [this] { processUploadResults(); }, 20,
                                                                       20);
 
@@ -335,7 +339,8 @@ public:
             settings_.chunk_upload_batch_size, " chunkUploadFlush=", settings_.chunk_upload_flush_seconds,
             "s dirtyBlockPush=", settings_.dirty_block_push_seconds, "s maxDirtyBlocks=",
             settings_.max_dirty_blocks_per_push, " maxUploadQueue=", settings_.max_upload_queue_size,
-            " dimensions=", settings_.dimensions.size(), ".");
+            " uploadLands=", settings_.upload_lands, " landPush=", settings_.land_push_seconds,
+            "s landConfig=", settings_.land_config_file, " dimensions=", settings_.dimensions.size(), ".");
     }
 
     void onDisable() override
@@ -349,6 +354,9 @@ public:
         }
         if (dirty_block_task_ != nullptr) {
             dirty_block_task_->cancel();
+        }
+        if (land_task_ != nullptr) {
+            land_task_->cancel();
         }
         if (upload_result_task_ != nullptr) {
             upload_result_task_->cancel();
@@ -619,6 +627,28 @@ private:
                             livemap::serializePlayerSnapshot(players), {}, {}, 0, false})) {
             background_log_.warning("Dropped live map player snapshot because upload queue is full.");
         }
+    }
+
+    void publishLands()
+    {
+        if (!settings_.upload_lands || settings_.plugin_token.empty()) {
+            return;
+        }
+
+        auto *level = getServer().getLevel();
+        const auto world = level == nullptr ? std::string{"Bedrock level"} : level->getName();
+        const auto parsed = livemap::loadLandConfig(resolveDataPath(settings_.land_config_file), world, nowMs());
+        if (parsed.claims.empty() && parsed.skipped_entries == 0) {
+            return;
+        }
+
+        if (!enqueueUpload({UploadJob::Kind::Lands, "/api/plugin/lands", livemap::serializeLandBatch(parsed.claims),
+                            {}, {}, parsed.claims.size(), false})) {
+            background_log_.warning("Dropped live map land snapshot because upload queue is full.");
+            return;
+        }
+        background_log_.info("Queued ", parsed.claims.size(), " land claim(s) for live map upload; skipped ",
+                             parsed.skipped_entries, " invalid land entrie(s).");
     }
 
     std::optional<ColumnSample> sampleColumnForMap(endstone::Dimension &dimension, int block_x, int block_z)
@@ -1001,11 +1031,21 @@ private:
                     }
                     persistChunkBaselines();
                 }
+                else if (result.kind == UploadJob::Kind::Lands) {
+                    background_log_.info("Uploaded ", result.update_count, " land claim(s) HTTP ",
+                                         result.transport.response_code, ".");
+                }
                 continue;
             }
 
             if (result.kind == UploadJob::Kind::PlayerSnapshot) {
                 getLogger().error("Failed to upload player snapshot HTTP {} curl {} error={}",
+                                  result.transport.response_code, result.transport.curl_code, result.transport.error);
+                continue;
+            }
+
+            if (result.kind == UploadJob::Kind::Lands) {
+                getLogger().error("Failed to upload land claims HTTP {} curl {} error={}",
                                   result.transport.response_code, result.transport.curl_code, result.transport.error);
                 continue;
             }
@@ -1205,6 +1245,7 @@ private:
     std::shared_ptr<endstone::Task> player_task_;
     std::shared_ptr<endstone::Task> seed_task_;
     std::shared_ptr<endstone::Task> dirty_block_task_;
+    std::shared_ptr<endstone::Task> land_task_;
     std::shared_ptr<endstone::Task> upload_result_task_;
     std::unique_ptr<UploadDispatcher> upload_dispatcher_;
     mutable std::mutex state_mutex_;

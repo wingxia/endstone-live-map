@@ -48,7 +48,7 @@ textarea {
   top: 16px;
   z-index: 500;
   display: grid;
-  grid-template-columns: auto auto auto auto auto auto auto;
+  grid-template-columns: repeat(9, auto);
   gap: 8px;
   align-items: center;
   min-height: 38px;
@@ -257,6 +257,22 @@ h2 {
   background: #263541;
   color: #59d59f;
   font-weight: 700;
+}
+
+.land-avatar {
+  border-radius: 8px;
+  background: #233645;
+  color: #7dd3fc;
+}
+
+.land-list {
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.list-more {
+  color: #9badbc;
 }
 
 .trailing-icon {

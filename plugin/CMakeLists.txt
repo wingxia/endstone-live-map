@@ -13,6 +13,7 @@ add_library(livemap_core
     src/baseline.cpp
     src/base64.cpp
     src/chunk.cpp
+    src/land.cpp
     src/map_blocks.cpp
     src/protocol.cpp
     src/settings.cpp

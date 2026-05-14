@@ -1,6 +1,7 @@
 #include "livemap/baseline.hpp"
 #include "livemap/base64.hpp"
 #include "livemap/chunk.hpp"
+#include "livemap/land.hpp"
 #include "livemap/map_blocks.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
@@ -90,6 +91,92 @@ void testMapBlockClassification()
     assert(!livemap::isPlantBlock("minecraft:dirt_with_roots"));
     assert(livemap::isMapDecorationBlock("minecraft:iron_bars"));
     assert(!livemap::isMapDecorationBlock("minecraft:glass"));
+}
+
+void testLandConfigParsing()
+{
+    const std::string json = R"json({
+      "GieZi8670": [
+        {
+          "主城区": {
+            "posa": "-375, 70, -473",
+            "posb": "-227, 300, -580",
+            "dim": "Overworld",
+            "member": ["GieZi8670", "wingxia"],
+            "tpposx": "-352",
+            "tpposy": "70",
+            "tpposz": "-479",
+            "in": false,
+            "son": ["猪人塔"]
+          }
+        },
+        {
+          "猪人塔": {
+            "posa": "-329, 70, -544",
+            "posb": "-300, 117, -510",
+            "dim": "Overworld",
+            "member": ["wingxia", "GieZi8670"],
+            "tpposx": "-317",
+            "tpposy": "75",
+            "tpposz": "-534",
+            "in": true,
+            "father": "主城区",
+            "son": []
+          }
+        },
+        {
+          "末地": {
+            "posa": "100, 50, 0",
+            "posb": "100, 50, 0",
+            "dim": "TheEnd",
+            "member": [],
+            "tpposx": "100",
+            "tpposy": "50",
+            "tpposz": "0",
+            "in": false,
+            "son": []
+          }
+        },
+        {
+          "缺字段": {
+            "posa": "0, 0, 0",
+            "posb": "1, 1, 1",
+            "dim": "Overworld"
+          }
+        }
+      ]
+    })json";
+
+    const auto parsed = livemap::parseLandConfig(json, "Bedrock level", 123);
+    assert(parsed.claims.size() == 3);
+    assert(parsed.skipped_entries == 1);
+    assert(parsed.claims[0].owner == "GieZi8670");
+    assert(parsed.claims[0].name == "主城区");
+    assert(parsed.claims[0].world == "Bedrock level");
+    assert(parsed.claims[0].dimension == "Overworld");
+    assert(parsed.claims[0].min_x == -375);
+    assert(parsed.claims[0].max_x == -227);
+    assert(parsed.claims[0].min_y == 70);
+    assert(parsed.claims[0].max_y == 300);
+    assert(parsed.claims[0].min_z == -580);
+    assert(parsed.claims[0].max_z == -473);
+    assert(parsed.claims[0].teleport.x == -352);
+    assert(parsed.claims[0].teleport.y == 70);
+    assert(parsed.claims[0].teleport.z == -479);
+    assert(parsed.claims[0].members.size() == 2);
+    assert(parsed.claims[0].children.size() == 1);
+    assert(!parsed.claims[0].nested);
+    assert(parsed.claims[1].parent == "主城区");
+    assert(parsed.claims[1].nested);
+    assert(parsed.claims[2].min_x == parsed.claims[2].max_x);
+    assert(parsed.claims[2].min_z == parsed.claims[2].max_z);
+
+    const auto serialized = livemap::serializeLandBatch(parsed.claims);
+    assert(serialized.find("\"claims\"") != std::string::npos);
+    assert(serialized.find("\"owner\":\"GieZi8670\"") != std::string::npos);
+    assert(serialized.find("\"name\":\"主城区\"") != std::string::npos);
+    assert(serialized.find("\"teleport\":{\"x\":-352,\"y\":70,\"z\":-479}") != std::string::npos);
+    assert(serialized.find("\"nested\":true") != std::string::npos);
 }
 
 void testProtocol()
@@ -253,12 +340,14 @@ void testSettingsLegacyKeys()
             << "  \"chunk_upload_batch_size\": 999,\n"
             << "  \"chunk_upload_flush_seconds\": 0,\n"
             << "  \"dirty_block_push_seconds\": 0,\n"
+            << "  \"land_push_seconds\": 1,\n"
             << "  \"max_dirty_blocks_per_push\": 999,\n"
             << "  \"max_upload_queue_size\": 99999,\n"
             << "  \"upload_tiles\": false,\n"
             << "  \"auto_seed_chunks\": true,\n"
             << "  \"upload_dirty_blocks\": false,\n"
-            << "  \"upload_players\": false\n"
+            << "  \"upload_players\": false,\n"
+            << "  \"upload_lands\": false\n"
             << "}\n";
     }
 
@@ -279,12 +368,14 @@ void testSettingsLegacyKeys()
     assert(settings.chunk_upload_batch_size == 128);
     assert(settings.chunk_upload_flush_seconds == 1);
     assert(settings.dirty_block_push_seconds == 1);
+    assert(settings.land_push_seconds == 10);
     assert(settings.max_dirty_blocks_per_push == 512);
     assert(settings.max_upload_queue_size == 4096);
     assert(!settings.upload_chunks);
     assert(settings.auto_seed_chunks);
     assert(!settings.upload_dirty_blocks);
     assert(!settings.upload_players);
+    assert(!settings.upload_lands);
     std::filesystem::remove(path);
 }
 
@@ -298,17 +389,23 @@ void testSettingsNewKeysOverrideLegacyKeys()
             << "  \"tile_refresh_seconds\": 5,\n"
             << "  \"max_chunks_per_refresh\": 4,\n"
             << "  \"max_tiles_per_refresh\": 64,\n"
+            << "  \"land_config_file\": \"/tmp/land.json\",\n"
+            << "  \"land_push_seconds\": 120,\n"
             << "  \"upload_chunks\": true,\n"
             << "  \"upload_tiles\": false,\n"
-            << "  \"auto_seed_chunks\": false\n"
+            << "  \"auto_seed_chunks\": false,\n"
+            << "  \"upload_lands\": true\n"
             << "}\n";
     }
 
     const auto settings = livemap::loadSettings(path);
     assert(settings.chunk_refresh_seconds == 30);
     assert(settings.max_chunks_per_refresh == 4);
+    assert(settings.land_config_file == "/tmp/land.json");
+    assert(settings.land_push_seconds == 120);
     assert(settings.upload_chunks);
     assert(!settings.auto_seed_chunks);
+    assert(settings.upload_lands);
     std::filesystem::remove(path);
 }
 
@@ -319,6 +416,7 @@ int main()
     testTileMath();
     testChunkMath();
     testMapBlockClassification();
+    testLandConfigParsing();
     testDirtyTracker();
     testDirtyBlockTracker();
     testProtocol();

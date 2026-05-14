@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { liveUrl, type BlockUpdatesMessage, type ChunkReadyMessage, type LiveMessage, type PlayerState } from "../api";
+import { liveUrl, type BlockUpdatesMessage, type ChunkReadyMessage, type LandsUpdatedMessage, type LiveMessage, type PlayerState } from "../api";
 
 interface UseLivePlayersResult {
   players: PlayerState[];
   chunkReady: ChunkReadyMessage | null;
   blockUpdates: BlockUpdatesMessage | null;
+  landsUpdated: LandsUpdatedMessage | null;
   connected: boolean;
 }
 
@@ -13,6 +14,7 @@ export function useLivePlayers(): UseLivePlayersResult {
   const [playersById, setPlayersById] = useState<Map<string, PlayerState>>(new Map());
   const [chunkReady, setChunkReady] = useState<ChunkReadyMessage | null>(null);
   const [blockUpdates, setBlockUpdates] = useState<BlockUpdatesMessage | null>(null);
+  const [landsUpdated, setLandsUpdated] = useState<LandsUpdatedMessage | null>(null);
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
@@ -48,6 +50,9 @@ export function useLivePlayers(): UseLivePlayersResult {
         if (message.type === "block_updates" && Array.isArray(message.updates)) {
           setBlockUpdates(message as BlockUpdatesMessage);
         }
+        if (message.type === "lands_updated" && message.world && message.dimension) {
+          setLandsUpdated(message as LandsUpdatedMessage);
+        }
       });
     };
 
@@ -60,5 +65,5 @@ export function useLivePlayers(): UseLivePlayersResult {
   }, []);
 
   const players = useMemo(() => [...playersById.values()].sort((a, b) => a.name.localeCompare(b.name)), [playersById]);
-  return { players, chunkReady, blockUpdates, connected };
+  return { players, chunkReady, blockUpdates, landsUpdated, connected };
 }

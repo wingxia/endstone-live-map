@@ -8,8 +8,10 @@ import worker, {
   normalizeCleanupPayload,
   normalizeChunkBatchPayload,
   normalizeChunkSnapshot,
+  normalizeLandPayload,
   normalizeMarkerPayload,
   normalizeWorldMeta,
+  landKey,
   worldMetaKey,
 } from "../src/index.js";
 
@@ -222,6 +224,41 @@ describe("worker helpers", () => {
       topBlocks: { "minecraft:grass_block": 5 },
     });
     expect(worldMetaKey("Bedrock level", "Overworld")).toBe("meta/v1/Bedrock_level/Overworld.json");
+  });
+
+  it("normalizes land payloads and keys", () => {
+    const payload = normalizeLandPayload({
+      claims: [
+        {
+          owner: "GieZi8670",
+          name: "主城区",
+          world: "Bedrock level",
+          dimension: "Overworld",
+          minX: -375,
+          maxX: -227,
+          minY: 70,
+          maxY: 300,
+          minZ: -580,
+          maxZ: -473,
+          teleport: { x: -352, y: 70, z: -479 },
+          members: ["wingxia"],
+          children: ["猪人塔"],
+          updatedAt: 123,
+        },
+      ],
+    });
+    expect(payload.claims[0]).toMatchObject({
+      owner: "GieZi8670",
+      name: "主城区",
+      world: "Bedrock_level",
+      dimension: "Overworld",
+      minZ: -580,
+      maxZ: -473,
+      teleport: { x: -352, y: 70, z: -479 },
+      nested: false,
+    });
+    expect(landKey("Bedrock level", "Overworld")).toBe("lands/v1/Bedrock_level/Overworld.json");
+    expect(() => normalizeLandPayload({ claims: [{ owner: "x", name: "bad", minX: 1, maxX: 0, minY: 0, maxY: 0, minZ: 0, maxZ: 0, teleport: { x: 0, y: 0, z: 0 } }] })).toThrow(/bounds/);
   });
 });
 
@@ -635,6 +672,80 @@ describe("worker routes", () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: "cleanup_prefix_not_allowed" });
     expect(env.MAP_DATA.objects.has("textures/v1/manifest.json")).toBe(true);
+  });
+
+  it("stores authenticated land uploads by dimension and broadcasts updates", async () => {
+    const env = createEnv();
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/lands", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          claims: [
+            {
+              id: "GieZi8670:主城区:Overworld",
+              owner: "GieZi8670",
+              name: "主城区",
+              world: "Bedrock level",
+              dimension: "Overworld",
+              minX: -375,
+              maxX: -227,
+              minY: 70,
+              maxY: 300,
+              minZ: -580,
+              maxZ: -473,
+              teleport: { x: -352, y: 70, z: -479 },
+              members: ["wingxia"],
+              parent: "",
+              children: ["猪人塔"],
+              nested: false,
+              updatedAt: 123,
+            },
+            {
+              id: "GieZi8670:末地:TheEnd",
+              owner: "GieZi8670",
+              name: "末地",
+              world: "Bedrock level",
+              dimension: "TheEnd",
+              minX: 100,
+              maxX: 100,
+              minY: 50,
+              maxY: 50,
+              minZ: 0,
+              maxZ: 0,
+              teleport: { x: 100, y: 50, z: 0 },
+              members: [],
+              parent: "",
+              children: [],
+              nested: false,
+              updatedAt: 123,
+            },
+          ],
+        }),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    const uploadBody = await response.json();
+    expect(uploadBody).toMatchObject({ ok: true, claims: 2 });
+    expect(uploadBody.groups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ world: "Bedrock_level", dimension: "Overworld", claims: 1 }),
+        expect.objectContaining({ world: "Bedrock_level", dimension: "TheEnd", claims: 1 }),
+      ]),
+    );
+    expect(env.MAP_DATA.objects.has("lands/v1/Bedrock_level/Overworld.json")).toBe(true);
+    expect(env.MAP_DATA.objects.has("lands/v1/Bedrock_level/TheEnd.json")).toBe(true);
+    expect(env.live.messages.filter((message) => String(message).includes("lands_updated"))).toHaveLength(2);
+
+    const lands = await worker.fetch(new Request("https://map.buhe.li/api/lands?world=Bedrock%20level&dimension=Overworld"), env, {});
+    expect(lands.status).toBe(200);
+    expect(await lands.json()).toMatchObject({ world: "Bedrock_level", dimension: "Overworld", claims: [{ name: "主城区" }] });
+
+    const empty = await worker.fetch(new Request("https://map.buhe.li/api/lands?world=Bedrock%20level&dimension=Nether"), env, {});
+    expect(await empty.json()).toMatchObject({ world: "Bedrock_level", dimension: "Nether", claims: [] });
   });
 
   it("rejects unauthenticated plugin writes", async () => {

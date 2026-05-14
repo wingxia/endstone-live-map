@@ -12,6 +12,7 @@ struct LiveMapSettings {
     std::string server_id = "default";
     std::string background_log_file = "live_map.log";
     std::string baseline_index_file = "chunk_baselines.tsv";
+    std::string land_config_file = "/vol1/1000/bedrock_server/plugins/land/land.json";
     std::vector<std::string> dimensions = {"Overworld"};
     int scan_radius_chunks = 8;
     int chunk_refresh_seconds = 20;
@@ -25,12 +26,14 @@ struct LiveMapSettings {
     int chunk_upload_batch_size = 32;
     int chunk_upload_flush_seconds = 10;
     int dirty_block_push_seconds = 1;
+    int land_push_seconds = 60;
     int max_dirty_blocks_per_push = 64;
     int max_upload_queue_size = 256;
     bool upload_chunks = true;
     bool auto_seed_chunks = false;
     bool upload_dirty_blocks = true;
     bool upload_players = true;
+    bool upload_lands = true;
 };
 
 struct TransportResult {

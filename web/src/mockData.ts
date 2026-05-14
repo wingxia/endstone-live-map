@@ -1,4 +1,4 @@
-import type { ChunkSnapshot, PlayerState, WorldMeta } from "./api";
+import type { ChunkSnapshot, LandClaim, PlayerState, WorldMeta } from "./api";
 
 const MOCK_WORLD = "Bedrock level";
 
@@ -37,6 +37,47 @@ export const mockPlayers: PlayerState[] = [
     z: -80,
     yaw: 40,
     pitch: 0,
+    updatedAt: Date.now(),
+  },
+];
+
+export const mockLands: LandClaim[] = [
+  {
+    id: "GieZi8670:主城区:Overworld",
+    owner: "GieZi8670",
+    name: "主城区",
+    world: "Bedrock level",
+    dimension: "Overworld",
+    minX: -375,
+    maxX: -227,
+    minY: 70,
+    maxY: 300,
+    minZ: -580,
+    maxZ: -473,
+    teleport: { x: -352, y: 70, z: -479 },
+    members: ["GieZi8670", "wingxia", "SimoneGoes2322"],
+    parent: "",
+    children: ["猪人塔", "交易所/刷铁机"],
+    nested: false,
+    updatedAt: Date.now(),
+  },
+  {
+    id: "GieZi8670:白色青蛙:Overworld",
+    owner: "GieZi8670",
+    name: "白色青蛙",
+    world: "Bedrock level",
+    dimension: "Overworld",
+    minX: -665,
+    maxX: -665,
+    minY: 63,
+    maxY: 63,
+    minZ: -6357,
+    maxZ: -6357,
+    teleport: { x: -665, y: 63, z: -6357 },
+    members: [],
+    parent: "",
+    children: [],
+    nested: false,
     updatedAt: Date.now(),
   },
 ];

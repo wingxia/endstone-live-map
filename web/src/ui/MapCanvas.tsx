@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type PlayerState, type WorldMeta } from "../api";
+import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type LandClaim, type PlayerState, type WorldMeta } from "../api";
 import { blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "./coords";
 import { createChunkGridLayer, INITIAL_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
@@ -23,16 +23,18 @@ interface MapCanvasProps {
   world: string;
   dimension: string;
   players: PlayerState[];
+  lands: LandClaim[];
   worldMeta: WorldMeta | null;
   chunkReady: ChunkReadyMessage | null;
   blockUpdates: BlockUpdatesMessage | null;
 }
 
-export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, blockUpdates }: MapCanvasProps) {
+export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkReady, blockUpdates }: MapCanvasProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const stateRef = useRef<{
     map: import("leaflet").Map;
     layers: import("leaflet").LayerGroup;
+    landLayers: import("leaflet").LayerGroup;
     chunkLayer: ChunkLayerHandle;
   } | null>(null);
   const [coordinate, setCoordinate] = useState<CoordinateState>(() => buildCoordinateState(0, 0, null, false));
@@ -42,6 +44,7 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
 
   useEffect(() => {
     let cancelled = false;
+    let readyFrame = 0;
 
     async function mount() {
       const L = await import("leaflet");
@@ -60,9 +63,16 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
       L.control.zoom({ position: "bottomright" }).addTo(map);
       const chunkLayer = createChunkGridLayer(L, world, dimension).addTo(map);
 
+      const landLayers = L.layerGroup().addTo(map);
       const layers = L.layerGroup().addTo(map);
-      stateRef.current = { map, layers, chunkLayer };
-      setMapReady(true);
+      stateRef.current = { map, layers, landLayers, chunkLayer };
+      readyFrame = window.requestAnimationFrame(() => {
+        if (cancelled) {
+          return;
+        }
+        map.invalidateSize({ animate: false });
+        setMapReady(true);
+      });
 
       const updateCoordinate = (event: import("leaflet").LeafletMouseEvent, locked: boolean) => {
         const point = leafletToMinecraft(event.latlng.lat, event.latlng.lng);
@@ -87,6 +97,9 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
     mount();
     return () => {
       cancelled = true;
+      if (readyFrame) {
+        window.cancelAnimationFrame(readyFrame);
+      }
     };
   }, [dimension, world]);
 
@@ -174,10 +187,65 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
   useEffect(() => {
     let cancelled = false;
 
+    async function refreshLandOverlay() {
+      const L = await import("leaflet");
+      const state = stateRef.current;
+      if (cancelled || !state || !mapReady) {
+        return;
+      }
+      state.landLayers.clearLayers();
+
+      for (const land of lands) {
+        const tooltip = landTooltip(land);
+        if (land.minX === land.maxX && land.minZ === land.maxZ) {
+          L.circleMarker(minecraftToLeaflet(land.minX, land.minZ), {
+            radius: 5,
+            color: "#f8fafc",
+            weight: 2,
+            fillColor: land.nested ? "#f59e0b" : "#38bdf8",
+            fillOpacity: 0.88,
+            pane: "markerPane",
+          })
+            .bindTooltip(tooltip)
+            .addTo(state.landLayers);
+        } else {
+          L.rectangle([minecraftToLeaflet(land.minX, land.maxZ), minecraftToLeaflet(land.maxX, land.minZ)], {
+            color: land.nested ? "#f59e0b" : "#38bdf8",
+            weight: land.nested ? 1 : 2,
+            opacity: 0.9,
+            fillColor: land.nested ? "#f59e0b" : "#0ea5e9",
+            fillOpacity: land.nested ? 0.08 : 0.1,
+          })
+            .bindTooltip(tooltip)
+            .addTo(state.landLayers);
+        }
+
+        L.circleMarker(minecraftToLeaflet(land.teleport.x, land.teleport.z), {
+          radius: 4,
+          color: "#111827",
+          weight: 2,
+          fillColor: "#facc15",
+          fillOpacity: 0.95,
+          pane: "markerPane",
+        })
+          .bindTooltip(`${escapeHtml(land.name)} 传送点 (${land.teleport.x}, ${land.teleport.y}, ${land.teleport.z})`)
+          .addTo(state.landLayers);
+      }
+    }
+
+    refreshLandOverlay();
+    return () => {
+      cancelled = true;
+    };
+  }, [lands, mapReady]);
+
+  useEffect(() => {
+    let cancelled = false;
+
     async function refreshOverlay() {
       const L = await import("leaflet");
       const state = stateRef.current;
-      if (cancelled || !state) {
+      if (cancelled || !state || !mapReady) {
         return;
       }
       state.layers.clearLayers();
@@ -201,7 +269,7 @@ export function MapCanvas({ world, dimension, players, worldMeta, chunkReady, bl
     return () => {
       cancelled = true;
     };
-  }, [players]);
+  }, [mapReady, players]);
 
   return (
     <>
@@ -298,6 +366,12 @@ function boundsForPlayers(players: PlayerState[]) {
     minZ: Math.floor(Math.min(...zs) - LIVE_PLAYER_PADDING_BLOCKS),
     maxZ: Math.ceil(Math.max(...zs) + LIVE_PLAYER_PADDING_BLOCKS),
   };
+}
+
+function landTooltip(land: LandClaim) {
+  const size = land.minX === land.maxX && land.minZ === land.maxZ ? "点位" : `${land.minX}, ${land.minZ} 到 ${land.maxX}, ${land.maxZ}`;
+  const parent = land.parent ? `<br/>父领地 ${escapeHtml(land.parent)}` : "";
+  return `${escapeHtml(land.name)}<br/>所属 ${escapeHtml(land.owner)}<br/>范围 ${size}<br/>TP ${land.teleport.x}, ${land.teleport.y}, ${land.teleport.z}<br/>成员 ${land.members.length}${parent}`;
 }
 
 function escapeHtml(value: string) {

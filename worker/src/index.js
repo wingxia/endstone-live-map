@@ -15,12 +15,13 @@ const BATCH_WRITE_CONCURRENCY = 32;
 const CLEANUP_CONFIRMATION = "delete-map-data-v1";
 const CLEANUP_DEFAULT_LIMIT = 200;
 const CLEANUP_MAX_LIMIT = 500;
-const CLEANUP_PREFIXES = new Set(["chunks/v1/", "chunk-regions/v1/", "meta/v1/", "Bedrock_level/", "world/"]);
+const CLEANUP_PREFIXES = new Set(["chunks/v1/", "chunk-regions/v1/", "meta/v1/", "lands/v1/", "Bedrock_level/", "world/"]);
 const TEXTURE_MANIFEST_KEY = "textures/v1/manifest.json";
 const TEXTURE_ATLAS_KEY = "textures/v1/atlas.png";
 const TEXTURE_REPORT_KEY = "textures/v1/report.json";
 const WORLD_META_PREFIX = "meta/v1/";
 const CHUNK_REGION_PREFIX = "chunk-regions/v1/";
+const LAND_PREFIX = "lands/v1/";
 
 export class LiveRoom {
   constructor(state, env) {
@@ -136,6 +137,14 @@ export default {
         return handleWorldMetaUpload(request, env);
       }
 
+      if (url.pathname === "/api/plugin/lands") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleLandUpload(request, env);
+      }
+
       if (url.pathname === "/api/plugin/textures") {
         const auth = requirePluginAuth(request, env);
         if (auth) {
@@ -162,6 +171,10 @@ export default {
 
       if (url.pathname === "/api/world-meta") {
         return handleWorldMetaGet(url, env);
+      }
+
+      if (url.pathname === "/api/lands") {
+        return handleLandsGet(url, env);
       }
 
       if (url.pathname === "/api/textures/manifest") {
@@ -523,6 +536,43 @@ async function handleWorldMetaUpload(request, env) {
   return json({ ok: true, key });
 }
 
+async function handleLandUpload(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
+  const payload = normalizeLandPayload(await request.json());
+  const groups = new Map();
+  for (const claim of payload.claims) {
+    const key = `${claim.world}/${claim.dimension}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        version: 1,
+        world: claim.world,
+        dimension: claim.dimension,
+        claims: [],
+        updatedAt: payload.updatedAt,
+      });
+    }
+    groups.get(key).claims.push(claim);
+  }
+
+  const writes = [];
+  for (const group of groups.values()) {
+    group.claims.sort((a, b) => a.name.localeCompare(b.name) || a.owner.localeCompare(b.owner));
+    const key = landKey(group.world, group.dimension);
+    await bucket.put(key, JSON.stringify(group), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: { world: group.world, dimension: group.dimension },
+    });
+    writes.push({ key, world: group.world, dimension: group.dimension, claims: group.claims.length });
+    await broadcastLive(env, JSON.stringify({ type: "lands_updated", world: group.world, dimension: group.dimension, updatedAt: group.updatedAt }));
+  }
+
+  return json({ ok: true, claims: payload.claims.length, groups: writes });
+}
+
 async function updateWorldMetaForChunks(bucket, snapshots) {
   const groups = new Map();
   for (const snapshot of snapshots) {
@@ -601,6 +651,20 @@ async function handleWorldMetaGet(url, env) {
     return json({ error: "world_meta_not_found" }, 404);
   }
   return json(await readR2Json(object), 200, { "Cache-Control": "public, max-age=30" });
+}
+
+async function handleLandsGet(url, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  const world = cleanSegment(url.searchParams.get("world") || "world");
+  const dimension = cleanSegment(url.searchParams.get("dimension") || "Overworld");
+  const object = await bucket.get(landKey(world, dimension));
+  if (!object) {
+    return json({ version: 1, world, dimension, claims: [], updatedAt: 0 }, 200, { "Cache-Control": "public, max-age=15" });
+  }
+  return json(await readR2Json(object), 200, { "Cache-Control": "public, max-age=15" });
 }
 
 async function handleMapDataCleanup(request, env) {
@@ -916,6 +980,52 @@ export function normalizeMarkerPayload(payload) {
   };
 }
 
+export function normalizeLandPayload(payload) {
+  const claims = Array.isArray(payload.claims) ? payload.claims.map((claim, index) => normalizeLandClaim(claim, index)) : [];
+  return {
+    claims,
+    updatedAt: claims.reduce((max, claim) => Math.max(max, claim.updatedAt), numberOrThrow(payload.updatedAt ?? Date.now(), "updatedAt")),
+  };
+}
+
+function normalizeLandClaim(payload, index) {
+  const world = cleanSegment(payload.world || "Bedrock level");
+  const dimension = cleanSegment(payload.dimension || "Overworld");
+  const minX = numberOrThrow(payload.minX, `claims[${index}].minX`);
+  const maxX = numberOrThrow(payload.maxX, `claims[${index}].maxX`);
+  const minY = numberOrThrow(payload.minY, `claims[${index}].minY`);
+  const maxY = numberOrThrow(payload.maxY, `claims[${index}].maxY`);
+  const minZ = numberOrThrow(payload.minZ, `claims[${index}].minZ`);
+  const maxZ = numberOrThrow(payload.maxZ, `claims[${index}].maxZ`);
+  if (maxX < minX || maxY < minY || maxZ < minZ) {
+    throw new Error(`claims[${index}] has invalid bounds`);
+  }
+  const teleport = payload.teleport || {};
+  return {
+    id: cleanText(payload.id || `${payload.owner || ""}:${payload.name || ""}:${dimension}`, 160),
+    owner: cleanText(payload.owner, 80),
+    name: cleanText(payload.name, 120),
+    world,
+    dimension,
+    minX,
+    maxX,
+    minY,
+    maxY,
+    minZ,
+    maxZ,
+    teleport: {
+      x: numberOrThrow(teleport.x, `claims[${index}].teleport.x`),
+      y: numberOrThrow(teleport.y, `claims[${index}].teleport.y`),
+      z: numberOrThrow(teleport.z, `claims[${index}].teleport.z`),
+    },
+    members: normalizeStringArray(payload.members, `claims[${index}].members`, 80),
+    parent: cleanText(payload.parent || "", 120, false),
+    children: normalizeStringArray(payload.children, `claims[${index}].children`, 120),
+    nested: payload.nested === true || Boolean(payload.parent),
+    updatedAt: numberOrThrow(payload.updatedAt ?? Date.now(), `claims[${index}].updatedAt`),
+  };
+}
+
 export function chunkKey(world, dimension, chunkX, chunkZ) {
   return `chunks/v1/${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(chunkX, "chunkX")}/${numberOrThrow(chunkZ, "chunkZ")}.json`;
 }
@@ -926,6 +1036,10 @@ export function chunkRegionKey(world, dimension, regionX, regionZ) {
 
 export function worldMetaKey(world, dimension) {
   return `${WORLD_META_PREFIX}${cleanSegment(world)}/${cleanSegment(dimension)}.json`;
+}
+
+export function landKey(world, dimension) {
+  return `${LAND_PREFIX}${cleanSegment(world)}/${cleanSegment(dimension)}.json`;
 }
 
 function chunkPrefix(world, dimension, chunkX) {
@@ -1168,6 +1282,29 @@ function cleanBlockId(value) {
     throw new Error("invalid block id");
   }
   return cleaned;
+}
+
+function cleanText(value, maxLength, required = true) {
+  const text = String(value || "").trim();
+  if (required && text.length === 0) {
+    throw new Error("text value is required");
+  }
+  return text.slice(0, maxLength);
+}
+
+function normalizeStringArray(value, field, maxLength) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item, index) => cleanText(item, maxLength, false)).filter((item, index) => {
+    if (item.length > 0) {
+      return true;
+    }
+    if (value[index] !== "" && value[index] != null) {
+      throw new Error(`${field}[${index}] must be a string`);
+    }
+    return false;
+  });
 }
 
 function normalizeTopBlocks(value) {

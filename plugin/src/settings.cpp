@@ -112,6 +112,7 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.server_id = stringValue(source, "server_id", settings.server_id);
     settings.background_log_file = stringValue(source, "background_log_file", settings.background_log_file);
     settings.baseline_index_file = stringValue(source, "baseline_index_file", settings.baseline_index_file);
+    settings.land_config_file = stringValue(source, "land_config_file", settings.land_config_file);
     settings.dimensions = dimensionsValue(source, settings.dimensions);
     settings.scan_radius_chunks = intValue(source, "scan_radius_chunks", settings.scan_radius_chunks);
     settings.chunk_refresh_seconds =
@@ -130,12 +131,14 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.chunk_upload_flush_seconds =
         intValue(source, "chunk_upload_flush_seconds", settings.chunk_upload_flush_seconds);
     settings.dirty_block_push_seconds = intValue(source, "dirty_block_push_seconds", settings.dirty_block_push_seconds);
+    settings.land_push_seconds = intValue(source, "land_push_seconds", settings.land_push_seconds);
     settings.max_dirty_blocks_per_push = intValue(source, "max_dirty_blocks_per_push", settings.max_dirty_blocks_per_push);
     settings.max_upload_queue_size = intValue(source, "max_upload_queue_size", settings.max_upload_queue_size);
     settings.upload_chunks = legacyBoolValue(source, "upload_chunks", "upload_tiles", settings.upload_chunks);
     settings.auto_seed_chunks = boolValue(source, "auto_seed_chunks", settings.auto_seed_chunks);
     settings.upload_dirty_blocks = boolValue(source, "upload_dirty_blocks", settings.upload_dirty_blocks);
     settings.upload_players = boolValue(source, "upload_players", settings.upload_players);
+    settings.upload_lands = boolValue(source, "upload_lands", settings.upload_lands);
 
     settings.scan_radius_chunks = std::clamp(settings.scan_radius_chunks, 0, 16);
     settings.chunk_refresh_seconds = std::clamp(settings.chunk_refresh_seconds, 5, 3600);
@@ -149,6 +152,7 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.chunk_upload_batch_size = std::clamp(settings.chunk_upload_batch_size, 1, 128);
     settings.chunk_upload_flush_seconds = std::clamp(settings.chunk_upload_flush_seconds, 1, 60);
     settings.dirty_block_push_seconds = std::clamp(settings.dirty_block_push_seconds, 1, 60);
+    settings.land_push_seconds = std::clamp(settings.land_push_seconds, 10, 3600);
     settings.max_dirty_blocks_per_push = std::clamp(settings.max_dirty_blocks_per_push, 1, 512);
     settings.max_upload_queue_size = std::clamp(settings.max_upload_queue_size, 1, 4096);
     return settings;
@@ -164,6 +168,7 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"server_id\": \"vvnas\",\n"
         << "  \"background_log_file\": \"live_map.log\",\n"
         << "  \"baseline_index_file\": \"chunk_baselines.tsv\",\n"
+        << "  \"land_config_file\": \"/vol1/1000/bedrock_server/plugins/land/land.json\",\n"
         << "  \"dimensions\": [\"Overworld\", \"Nether\", \"TheEnd\"],\n"
         << "  \"scan_radius_chunks\": 8,\n"
         << "  \"chunk_refresh_seconds\": 20,\n"
@@ -177,12 +182,14 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"chunk_upload_batch_size\": 32,\n"
         << "  \"chunk_upload_flush_seconds\": 10,\n"
         << "  \"dirty_block_push_seconds\": 1,\n"
+        << "  \"land_push_seconds\": 60,\n"
         << "  \"max_dirty_blocks_per_push\": 64,\n"
         << "  \"max_upload_queue_size\": 256,\n"
         << "  \"upload_chunks\": true,\n"
         << "  \"auto_seed_chunks\": false,\n"
         << "  \"upload_dirty_blocks\": true,\n"
-        << "  \"upload_players\": true\n"
+        << "  \"upload_players\": true,\n"
+        << "  \"upload_lands\": true\n"
         << "}\n";
 }
 

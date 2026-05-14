@@ -78,6 +78,38 @@ export interface WorldMeta {
   topBlocks: Record<string, number>;
 }
 
+export interface LandClaim {
+  id: string;
+  owner: string;
+  name: string;
+  world: string;
+  dimension: string;
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  minZ: number;
+  maxZ: number;
+  teleport: {
+    x: number;
+    y: number;
+    z: number;
+  };
+  members: string[];
+  parent: string;
+  children: string[];
+  nested: boolean;
+  updatedAt: number;
+}
+
+export interface LandResponse {
+  version: number;
+  world: string;
+  dimension: string;
+  claims: LandClaim[];
+  updatedAt: number;
+}
+
 export interface BlockUpdate {
   localX: number;
   localZ: number;
@@ -106,8 +138,15 @@ export interface BlockUpdatesMessage {
   updatedAt: number;
 }
 
+export interface LandsUpdatedMessage {
+  type: "lands_updated";
+  world: string;
+  dimension: string;
+  updatedAt: number;
+}
+
 export interface LiveMessage {
-  type: "player_snapshot" | "chunk_ready" | "block_updates" | "heartbeat";
+  type: "player_snapshot" | "chunk_ready" | "block_updates" | "lands_updated" | "heartbeat";
   players?: PlayerState[];
   world?: string;
   dimension?: string;
@@ -165,6 +204,36 @@ export async function fetchTextureManifest(): Promise<TextureManifest> {
     throw new Error(`Failed to load texture manifest: ${response.status}`);
   }
   return (await response.json()) as TextureManifest;
+}
+
+export function landsUrl(world: string, dimension: string, cacheBust?: string | number): string {
+  const params = new URLSearchParams({ world, dimension });
+  if (cacheBust !== undefined) {
+    params.set("_", String(cacheBust));
+  }
+  return `/api/lands?${params.toString()}`;
+}
+
+export async function fetchLands(world: string, dimension: string, cacheBust?: string | number): Promise<LandResponse> {
+  try {
+    const response = await fetch(landsUrl(world, dimension, cacheBust), { cache: cacheBust === undefined ? "default" : "no-store" });
+    if (!response.ok) {
+      throw new Error(`Failed to load lands: ${response.status}`);
+    }
+    return (await response.json()) as LandResponse;
+  } catch (error) {
+    if (import.meta.env.DEV) {
+      const { mockLands } = await import("./mockData");
+      return {
+        version: 1,
+        world,
+        dimension,
+        claims: mockLands.filter((claim) => segmentKey(claim.world) === segmentKey(world) && claim.dimension === dimension),
+        updatedAt: Date.now(),
+      };
+    }
+    throw error;
+  }
 }
 
 export function textureAtlasUrl(manifest: TextureManifest): string {

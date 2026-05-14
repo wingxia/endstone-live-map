@@ -21,6 +21,7 @@ cat > "$DATA_DIR/live_map.json" <<JSON
   "server_id": "vvnas",
   "background_log_file": "live_map.log",
   "baseline_index_file": "chunk_baselines.tsv",
+  "land_config_file": "/vol1/1000/bedrock_server/plugins/land/land.json",
   "dimensions": ["Overworld", "Nether", "TheEnd"],
   "scan_radius_chunks": 8,
   "chunk_refresh_seconds": 20,
@@ -34,12 +35,14 @@ cat > "$DATA_DIR/live_map.json" <<JSON
   "chunk_upload_batch_size": 32,
   "chunk_upload_flush_seconds": 10,
   "dirty_block_push_seconds": 1,
+  "land_push_seconds": 60,
   "max_dirty_blocks_per_push": 64,
   "max_upload_queue_size": 256,
   "upload_chunks": true,
   "auto_seed_chunks": false,
   "upload_dirty_blocks": true,
-  "upload_players": true
+  "upload_players": true,
+  "upload_lands": true
 }
 JSON
 

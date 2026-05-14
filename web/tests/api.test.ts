@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { chunkUrl, segmentKey, textureAtlasUrl, type WorldMeta } from "../src/api";
+import { chunkUrl, landsUrl, segmentKey, textureAtlasUrl, type WorldMeta } from "../src/api";
 import { blockColumnIndex, blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "../src/ui/coords";
 import { chunkRangeForTile, fallbackTextureColor, usesMapTint } from "../src/ui/chunkLayer";
 import { isMapDecorationBlock, isPlantBlock } from "../src/ui/mapBlocks";
@@ -17,6 +17,10 @@ describe("api helpers", () => {
         maxChunkZ: 2,
       }),
     ).toBe("/api/chunks?world=world&dimension=Overworld&minChunkX=-1&maxChunkX=1&minChunkZ=0&maxChunkZ=2");
+  });
+
+  it("builds land query urls for the selected dimension", () => {
+    expect(landsUrl("Bedrock level", "Overworld", 123)).toBe("/api/lands?world=Bedrock+level&dimension=Overworld&_=123");
   });
 
   it("uses manifest atlas paths and deterministic fallback colors", () => {

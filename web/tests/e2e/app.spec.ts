@@ -2,6 +2,9 @@ import { expect, test, type Page } from "@playwright/test";
 
 test("loads the map application shell", async ({ page }) => {
   await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
   await page.route("**/api/worlds", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -63,12 +66,16 @@ test("loads the map application shell", async ({ page }) => {
   await expect(page.getByTestId("coordinate-hud")).toContainText("方块");
   await expect(page.getByLabel("地图状态")).toContainText("区块");
   await expect(page.getByRole("heading", { name: "在线玩家" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "领地标注" })).toBeVisible();
 });
 
 test("does not request chunk data before a world import exists", async ({ page }) => {
   let chunkRequests = 0;
 
   await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
   await page.route("**/api/worlds", async (route) => {
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ worlds: [] }) });
   });
@@ -104,6 +111,9 @@ test("keeps negative-z chunks rendered across zoom changes", async ({ page }) =>
   };
 
   await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
   await page.route("**/api/worlds", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -183,6 +193,9 @@ test("renders plant and cutout overlays without dark tile holes", async ({ page 
   };
 
   await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
   await page.route("**/api/worlds", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -225,10 +238,109 @@ test("renders plant and cutout overlays without dark tile holes", async ({ page 
   await expect.poll(() => firstChunkTileHasNoDarkHoles(page)).toBe(true);
 });
 
+test("renders land claims, point claims, and teleport markers", async ({ page }) => {
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        worlds: [
+          {
+            version: 1,
+            world: "Bedrock level",
+            dimension: "Overworld",
+            status: "complete",
+            chunkCount: 1,
+            importedAt: 1,
+            updatedAt: 1,
+            bounds: {
+              minChunkX: -24,
+              maxChunkX: -14,
+              minChunkZ: -38,
+              maxChunkZ: -28,
+              minBlockX: -384,
+              maxBlockX: -209,
+              minBlockZ: -608,
+              maxBlockZ: -449,
+            },
+            topBlocks: { "minecraft:grass_block": 256 },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({ status: 404, body: "texture manifest not found" });
+  });
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        world: "Bedrock_level",
+        dimension: "Overworld",
+        updatedAt: 123,
+        claims: [
+          {
+            id: "GieZi8670:主城区:Overworld",
+            owner: "GieZi8670",
+            name: "主城区",
+            world: "Bedrock_level",
+            dimension: "Overworld",
+            minX: -375,
+            maxX: -227,
+            minY: 70,
+            maxY: 300,
+            minZ: -580,
+            maxZ: -473,
+            teleport: { x: -352, y: 70, z: -479 },
+            members: ["wingxia"],
+            parent: "",
+            children: ["猪人塔"],
+            nested: false,
+            updatedAt: 123,
+          },
+          {
+            id: "GieZi8670:白色青蛙:Overworld",
+            owner: "GieZi8670",
+            name: "白色青蛙",
+            world: "Bedrock_level",
+            dimension: "Overworld",
+            minX: -330,
+            maxX: -330,
+            minY: 63,
+            maxY: 63,
+            minZ: -540,
+            maxZ: -540,
+            teleport: { x: -330, y: 63, z: -540 },
+            members: [],
+            parent: "",
+            children: [],
+            nested: false,
+            updatedAt: 123,
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("主城区")).toBeVisible();
+  await expect(page.getByText("白色青蛙")).toBeVisible();
+  await expect(page.getByLabel("地图状态")).toContainText("2");
+  await expect.poll(() => page.locator(".leaflet-interactive").count()).toBeGreaterThanOrEqual(3);
+});
+
 test("requests live player chunks before a world import exists", async ({ page }) => {
   let chunkRequests = 0;
 
   await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
   await page.addInitScript(() => {
     class MockWebSocket extends EventTarget {
       static CONNECTING = 0;
@@ -297,6 +409,9 @@ test("requests live player chunks before a world import exists", async ({ page }
 
 test("does not reset user zoom on live player refresh", async ({ page }) => {
   await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
   await page.addInitScript(() => {
     class MockWebSocket extends EventTarget {
       static CONNECTING = 0;
