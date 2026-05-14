@@ -3,15 +3,20 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 #include <vector>
 
 namespace livemap {
 
 constexpr int kChunkSize = 16;
 constexpr int kChunkBlockCount = kChunkSize * kChunkSize;
+
+using BlockStateValue = std::variant<bool, int, std::string>;
+using BlockStateMap = std::map<std::string, BlockStateValue>;
 
 struct ChunkCoord {
     std::string world;
@@ -85,12 +90,14 @@ struct ChunkSnapshot {
     std::vector<std::string> palette;
     std::array<std::uint16_t, kChunkBlockCount> blocks{};
     std::array<int, kChunkBlockCount> heights{};
+    std::array<BlockStateMap, kChunkBlockCount> block_states{};
     std::array<std::uint16_t, kChunkBlockCount> overlay_blocks{};
     std::array<int, kChunkBlockCount> overlay_heights = [] {
         std::array<int, kChunkBlockCount> values{};
         values.fill(-64);
         return values;
     }();
+    std::array<BlockStateMap, kChunkBlockCount> overlay_states{};
     std::int64_t updated_at_ms{};
 };
 
@@ -99,8 +106,10 @@ struct BlockColumnUpdate {
     int local_z{};
     std::string block;
     int height{};
+    BlockStateMap state;
     std::string overlay_block = "minecraft:air";
     int overlay_height = -64;
+    BlockStateMap overlay_state;
 };
 
 struct BlockUpdateBatch {

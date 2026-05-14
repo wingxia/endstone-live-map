@@ -4,6 +4,8 @@
 #include <fstream>
 #include <sstream>
 #include <string_view>
+#include <type_traits>
+#include <variant>
 
 namespace livemap {
 namespace {
@@ -26,6 +28,31 @@ void mixFingerprintString(std::uint64_t &hash, std::string_view value)
     mixFingerprintUint64(hash, static_cast<std::uint64_t>(value.size()));
     for (const auto ch : value) {
         mixFingerprintByte(hash, static_cast<std::uint8_t>(ch));
+    }
+}
+
+void mixFingerprintBlockStateMap(std::uint64_t &hash, const BlockStateMap &states)
+{
+    mixFingerprintUint64(hash, static_cast<std::uint64_t>(states.size()));
+    for (const auto &[key, value] : states) {
+        mixFingerprintString(hash, key);
+        std::visit(
+            [&hash](const auto &item) {
+                using Item = std::decay_t<decltype(item)>;
+                if constexpr (std::is_same_v<Item, bool>) {
+                    mixFingerprintByte(hash, 1);
+                    mixFingerprintByte(hash, item ? 1 : 0);
+                }
+                else if constexpr (std::is_same_v<Item, int>) {
+                    mixFingerprintByte(hash, 2);
+                    mixFingerprintUint64(hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(item)));
+                }
+                else {
+                    mixFingerprintByte(hash, 3);
+                    mixFingerprintString(hash, item);
+                }
+            },
+            value);
     }
 }
 
@@ -78,6 +105,18 @@ std::uint64_t fingerprintChunkSnapshot(const ChunkSnapshot &snapshot)
     for (const auto height : snapshot.heights) {
         mixFingerprintUint64(hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(height)));
     }
+    for (const auto &states : snapshot.block_states) {
+        mixFingerprintBlockStateMap(hash, states);
+    }
+    for (const auto block : snapshot.overlay_blocks) {
+        mixFingerprintUint64(hash, static_cast<std::uint64_t>(block));
+    }
+    for (const auto height : snapshot.overlay_heights) {
+        mixFingerprintUint64(hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(height)));
+    }
+    for (const auto &states : snapshot.overlay_states) {
+        mixFingerprintBlockStateMap(hash, states);
+    }
     return hash;
 }
 
@@ -103,6 +142,21 @@ void applyBlockUpdatesToSnapshot(ChunkSnapshot &snapshot, const std::vector<Bloc
         const auto index = update.local_z * kChunkSize + update.local_x;
         snapshot.blocks[index] = palette_index;
         snapshot.heights[index] = update.height;
+        snapshot.block_states[index] = update.state;
+
+        auto overlay_palette_it = std::find(snapshot.palette.begin(), snapshot.palette.end(), update.overlay_block);
+        std::uint16_t overlay_palette_index{};
+        if (overlay_palette_it == snapshot.palette.end()) {
+            overlay_palette_index = static_cast<std::uint16_t>(snapshot.palette.size());
+            snapshot.palette.push_back(update.overlay_block);
+        }
+        else {
+            overlay_palette_index =
+                static_cast<std::uint16_t>(std::distance(snapshot.palette.begin(), overlay_palette_it));
+        }
+        snapshot.overlay_blocks[index] = overlay_palette_index;
+        snapshot.overlay_heights[index] = update.overlay_height;
+        snapshot.overlay_states[index] = update.overlay_state;
     }
     snapshot.updated_at_ms = updated_at_ms;
 }

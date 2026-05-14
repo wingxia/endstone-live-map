@@ -1,6 +1,9 @@
 #include "livemap/protocol.hpp"
 
+#include <array>
+#include <type_traits>
 #include <sstream>
+#include <variant>
 
 namespace livemap {
 
@@ -46,6 +49,51 @@ std::string jsonEscape(std::string_view value)
     return out;
 }
 
+void writeJsonValue(std::ostringstream &out, const BlockStateValue &value)
+{
+    std::visit(
+        [&out](const auto &item) {
+            using Item = std::decay_t<decltype(item)>;
+            if constexpr (std::is_same_v<Item, bool>) {
+                out << (item ? "true" : "false");
+            }
+            else if constexpr (std::is_same_v<Item, int>) {
+                out << item;
+            }
+            else {
+                out << '"' << jsonEscape(item) << '"';
+            }
+        },
+        value);
+}
+
+void writeJsonStateMap(std::ostringstream &out, const BlockStateMap &states)
+{
+    out << '{';
+    bool first = true;
+    for (const auto &[key, value] : states) {
+        if (!first) {
+            out << ',';
+        }
+        first = false;
+        out << '"' << jsonEscape(key) << "\":";
+        writeJsonValue(out, value);
+    }
+    out << '}';
+}
+
+void writeJsonStateArray(std::ostringstream &out, const std::array<BlockStateMap, kChunkBlockCount> &states)
+{
+    out << '[';
+    for (std::size_t i = 0; i < states.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        writeJsonStateMap(out, states[i]);
+    }
+    out << ']';
+}
+
 std::string serializePlayerSnapshot(const std::vector<PlayerState> &players)
 {
     std::ostringstream out;
@@ -89,7 +137,9 @@ std::string serializeChunkSnapshot(const ChunkSnapshot &snapshot)
         }
         out << snapshot.heights[i];
     }
-    out << "],\"overlayBlocks\":[";
+    out << "],\"blockStates\":";
+    writeJsonStateArray(out, snapshot.block_states);
+    out << ",\"overlayBlocks\":[";
     for (std::size_t i = 0; i < snapshot.overlay_blocks.size(); ++i) {
         if (i != 0) {
             out << ',';
@@ -103,7 +153,9 @@ std::string serializeChunkSnapshot(const ChunkSnapshot &snapshot)
         }
         out << snapshot.overlay_heights[i];
     }
-    out << "],\"updatedAt\":" << snapshot.updated_at_ms << '}';
+    out << "],\"overlayStates\":";
+    writeJsonStateArray(out, snapshot.overlay_states);
+    out << ",\"updatedAt\":" << snapshot.updated_at_ms << '}';
     return out.str();
 }
 
@@ -132,8 +184,12 @@ std::string serializeBlockUpdateBatch(const BlockUpdateBatch &batch)
             out << ',';
         }
         out << "{\"localX\":" << update.local_x << ",\"localZ\":" << update.local_z << ",\"block\":\""
-            << jsonEscape(update.block) << "\",\"height\":" << update.height << ",\"overlayBlock\":\""
-            << jsonEscape(update.overlay_block) << "\",\"overlayHeight\":" << update.overlay_height << '}';
+            << jsonEscape(update.block) << "\",\"height\":" << update.height << ",\"state\":";
+        writeJsonStateMap(out, update.state);
+        out << ",\"overlayBlock\":\"" << jsonEscape(update.overlay_block) << "\",\"overlayHeight\":"
+            << update.overlay_height << ",\"overlayState\":";
+        writeJsonStateMap(out, update.overlay_state);
+        out << '}';
     }
     out << "],\"updatedAt\":" << batch.updated_at_ms << '}';
     return out.str();

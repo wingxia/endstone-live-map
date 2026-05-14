@@ -22,6 +22,9 @@ function layerWithBlocks(entries) {
     13: block("minecraft:horn_coral"),
     14: block("minecraft:sea_pickle"),
     15: block("minecraft:cherry_leaves"),
+    16: block("minecraft:cake", { bite_counter: 3 }),
+    17: block("minecraft:oak_trapdoor", { direction: 1, open_bit: true }),
+    18: block("minecraft:end_rod", { facing_direction: 0 }),
   };
   for (const entry of entries) {
     block_indices[offsetToSubchunkIndex(entry.x, entry.y, entry.z)] = entry.paletteIndex;
@@ -32,8 +35,15 @@ function layerWithBlocks(entries) {
   };
 }
 
-function block(name) {
-  return { value: { name: { value: name } } };
+function block(name, states = {}) {
+  return {
+    value: {
+      name: { value: name },
+      states: {
+        value: Object.fromEntries(Object.entries(states).map(([key, value]) => [key, { value }])),
+      },
+    },
+  };
 }
 
 describe("chunk snapshot importer helpers", () => {
@@ -207,6 +217,41 @@ describe("chunk snapshot importer helpers", () => {
     expect(snapshot.palette[snapshot.blocks[8 * 16 + 8]]).toBe("minecraft:cherry_leaves");
     expect(snapshot.heights[8 * 16 + 8]).toBe(12);
     expect(snapshot.palette[snapshot.overlayBlocks[8 * 16 + 8]]).toBe("minecraft:air");
+  });
+
+  it("preserves state maps for stateful partial blocks", () => {
+    const snapshot = buildChunkSnapshot({
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkX: 0,
+      chunkZ: 0,
+      subchunks: [
+        {
+          y: 0,
+          layers: [
+            layerWithBlocks([
+              { x: 1, y: 5, z: 1, paletteIndex: 16 },
+              { x: 1, y: 4, z: 1, paletteIndex: 2 },
+              { x: 2, y: 5, z: 2, paletteIndex: 17 },
+              { x: 2, y: 4, z: 2, paletteIndex: 2 },
+              { x: 3, y: 5, z: 3, paletteIndex: 18 },
+              { x: 3, y: 4, z: 3, paletteIndex: 2 },
+            ]),
+          ],
+        },
+      ],
+      updatedAt: 100,
+    });
+
+    expect(snapshot.palette[snapshot.blocks[1 * 16 + 1]]).toBe("minecraft:grass_block");
+    expect(snapshot.palette[snapshot.overlayBlocks[1 * 16 + 1]]).toBe("minecraft:cake");
+    expect(snapshot.overlayStates[1 * 16 + 1]).toEqual({ bite_counter: 3 });
+    expect(snapshot.palette[snapshot.overlayBlocks[2 * 16 + 2]]).toBe("minecraft:oak_trapdoor");
+    expect(snapshot.overlayStates[2 * 16 + 2]).toEqual({ direction: 1, open_bit: true });
+    expect(snapshot.palette[snapshot.blocks[2 * 16 + 2]]).toBe("minecraft:grass_block");
+    expect(snapshot.palette[snapshot.blocks[3 * 16 + 3]]).toBe("minecraft:grass_block");
+    expect(snapshot.palette[snapshot.overlayBlocks[3 * 16 + 3]]).toBe("minecraft:end_rod");
+    expect(snapshot.overlayStates[3 * 16 + 3]).toEqual({ facing_direction: 0 });
   });
 
   it("summarizes and merges world metadata", () => {

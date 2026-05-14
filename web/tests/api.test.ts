@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { chunkUrl, landsUrl, segmentKey, textureAtlasUrl, type WorldMeta } from "../src/api";
+import { chunkUrl, landsUrl, segmentKey, textureAtlasUrl, type BlockUpdate, type ChunkSnapshot, type WorldMeta } from "../src/api";
 import { blockColumnIndex, blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "../src/ui/coords";
 import { chunkRangeForTile, fallbackTextureColor, usesMapTint } from "../src/ui/chunkLayer";
 import { isMapDecorationBlock, isPlantBlock } from "../src/ui/mapBlocks";
@@ -39,6 +39,8 @@ describe("api helpers", () => {
     expect(isPlantBlock("minecraft:dirt_with_roots")).toBe(false);
     expect(isMapDecorationBlock("minecraft:glass_pane")).toBe(true);
     expect(isMapDecorationBlock("minecraft:oak_trapdoor")).toBe(true);
+    expect(isMapDecorationBlock("minecraft:cake")).toBe(true);
+    expect(isMapDecorationBlock("minecraft:end_rod")).toBe(true);
     expect(isMapDecorationBlock("minecraft:lantern")).toBe(true);
     expect(isMapDecorationBlock("minecraft:soul_lantern")).toBe(true);
     expect(isMapDecorationBlock("minecraft:sea_lantern")).toBe(false);
@@ -55,6 +57,38 @@ describe("api helpers", () => {
     expect(isMapDecorationBlock("minecraft:stone")).toBe(false);
     expect(isMapDecorationBlock("minecraft:glass")).toBe(false);
     expect(segmentKey("Bedrock level")).toBe("Bedrock_level");
+  });
+
+  it("accepts optional block state fields on chunks and updates", () => {
+    const chunk: ChunkSnapshot = {
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkX: 0,
+      chunkZ: 0,
+      palette: ["minecraft:cake", "minecraft:air"],
+      blocks: Array.from({ length: 256 }, () => 0),
+      heights: Array.from({ length: 256 }, () => 64),
+      blockStates: Array.from({ length: 256 }, () => ({})),
+      overlayBlocks: Array.from({ length: 256 }, () => 1),
+      overlayHeights: Array.from({ length: 256 }, () => -64),
+      overlayStates: Array.from({ length: 256 }, () => ({})),
+      updatedAt: 1,
+    };
+    chunk.blockStates![0] = { bite_counter: 3 };
+    expect(chunk.blockStates![0]).toEqual({ bite_counter: 3 });
+
+    const update: BlockUpdate = {
+      localX: 0,
+      localZ: 0,
+      block: "minecraft:oak_trapdoor",
+      height: 64,
+      state: { direction: 1, open_bit: true },
+      overlayBlock: "minecraft:end_rod",
+      overlayHeight: 65,
+      overlayState: { facing_direction: 0 },
+    };
+    expect(update.state?.open_bit).toBe(true);
+    expect(update.overlayState?.facing_direction).toBe(0);
   });
 
   it("models imported world bounds for map fitting", () => {

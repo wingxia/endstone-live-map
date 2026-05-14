@@ -32,11 +32,38 @@ export function blockNameFromPaletteEntry(entry) {
   return entry?.value?.name?.value || entry?.name?.value || entry?.name || "minecraft:air";
 }
 
+export function blockStatesFromPaletteEntry(entry) {
+  const rawStates = entry?.value?.states?.value || entry?.states?.value || entry?.states || {};
+  if (!rawStates || typeof rawStates !== "object") {
+    return {};
+  }
+  const normalized = {};
+  for (const [key, rawValue] of Object.entries(rawStates)) {
+    const value = rawValue?.value ?? rawValue;
+    if (typeof value === "boolean" || typeof value === "string") {
+      normalized[key] = value;
+    } else if (typeof value === "number" && Number.isFinite(value)) {
+      normalized[key] = Math.trunc(value);
+    }
+  }
+  return normalized;
+}
+
 export function blockNameAt(layer, localX, localY, localZ) {
   const offset = offsetToSubchunkIndex(localX, localY, localZ);
   const paletteIndex = layer?.block_indices?.value?.value?.[offset] ?? 0;
   const paletteEntry = layer?.palette?.value?.[String(paletteIndex)];
   return blockNameFromPaletteEntry(paletteEntry);
+}
+
+export function blockAt(layer, localX, localY, localZ) {
+  const offset = offsetToSubchunkIndex(localX, localY, localZ);
+  const paletteIndex = layer?.block_indices?.value?.value?.[offset] ?? 0;
+  const paletteEntry = layer?.palette?.value?.[String(paletteIndex)];
+  return {
+    name: blockNameFromPaletteEntry(paletteEntry),
+    states: blockStatesFromPaletteEntry(paletteEntry),
+  };
 }
 
 export function buildChunkSnapshot({ world = DEFAULT_WORLD, dimension, chunkX, chunkZ, subchunks, updatedAt = Date.now(), includeLiquids = true }) {
@@ -45,8 +72,10 @@ export function buildChunkSnapshot({ world = DEFAULT_WORLD, dimension, chunkX, c
   const paletteIndexes = new Map();
   const blocks = Array.from({ length: CHUNK_BLOCK_COUNT }, () => 0);
   const heights = Array.from({ length: CHUNK_BLOCK_COUNT }, () => -64);
+  const blockStates = Array.from({ length: CHUNK_BLOCK_COUNT }, () => ({}));
   const overlayBlocks = Array.from({ length: CHUNK_BLOCK_COUNT }, () => 0);
   const overlayHeights = Array.from({ length: CHUNK_BLOCK_COUNT }, () => -64);
+  const overlayStates = Array.from({ length: CHUNK_BLOCK_COUNT }, () => ({}));
 
   const paletteIndex = (blockId) => {
     const id = normalizeBlockId(blockId);
@@ -70,16 +99,18 @@ export function buildChunkSnapshot({ world = DEFAULT_WORLD, dimension, chunkX, c
           continue;
         }
         for (let localY = CHUNK_SIZE - 1; localY >= 0; localY -= 1) {
-          const block = blockNameAt(layer, localX, localY, localZ);
+          const { name: block, states } = blockAt(layer, localX, localY, localZ);
           const y = subchunk.y * CHUNK_SIZE + localY;
           if (!overlayFound && isMapDecorationBlock(block)) {
             overlayBlocks[columnIndex] = paletteIndex(block);
             overlayHeights[columnIndex] = y;
+            overlayStates[columnIndex] = states;
             overlayFound = true;
           }
           if (isVisibleTopBlock(block, includeLiquids)) {
             blocks[columnIndex] = paletteIndex(block);
             heights[columnIndex] = y;
+            blockStates[columnIndex] = states;
             localY = -1;
             break;
           }
@@ -99,8 +130,10 @@ export function buildChunkSnapshot({ world = DEFAULT_WORLD, dimension, chunkX, c
     palette,
     blocks,
     heights,
+    blockStates,
     overlayBlocks,
     overlayHeights,
+    overlayStates,
     updatedAt,
   };
 }

@@ -27,6 +27,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <variant>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -47,6 +48,7 @@ std::int64_t nowMs()
 struct ColumnTop {
     std::string block = "minecraft:air";
     int height = -64;
+    livemap::BlockStateMap state;
 };
 
 struct ColumnSample {
@@ -74,6 +76,37 @@ std::string chunkName(const livemap::ChunkCoord &coord)
 livemap::ChunkCoord chunkCoordForSnapshot(const livemap::ChunkSnapshot &snapshot)
 {
     return {snapshot.world, snapshot.dimension, snapshot.chunk_x, snapshot.chunk_z};
+}
+
+livemap::BlockStateMap blockStateMapFromEndstone(const endstone::BlockStates &states)
+{
+    livemap::BlockStateMap normalized;
+    for (const auto &[key, value] : states) {
+        std::visit(
+            [&normalized, &key](const auto &item) {
+                using Item = std::decay_t<decltype(item)>;
+                if constexpr (std::is_same_v<Item, bool>) {
+                    normalized[key] = item;
+                }
+                else if constexpr (std::is_same_v<Item, int>) {
+                    normalized[key] = item;
+                }
+                else {
+                    normalized[key] = item;
+                }
+            },
+            value);
+    }
+    return normalized;
+}
+
+livemap::BlockStateMap blockStatesForBlock(const endstone::Block &block)
+{
+    const auto data = block.getData();
+    if (data == nullptr) {
+        return {};
+    }
+    return blockStateMapFromEndstone(data->getBlockStates());
 }
 
 struct UploadJob {
@@ -668,11 +701,11 @@ private:
                 }
                 const auto type = block->getType();
                 if (!found_overlay && livemap::isMapDecorationBlock(type)) {
-                    sample.overlay = {type, block->getY()};
+                    sample.overlay = {type, block->getY(), blockStatesForBlock(*block)};
                     found_overlay = true;
                 }
                 if (livemap::isMapSurfaceBlock(type)) {
-                    sample.surface = {type, block->getY()};
+                    sample.surface = {type, block->getY(), blockStatesForBlock(*block)};
                     return sample;
                 }
             }
@@ -738,8 +771,10 @@ private:
                 }
                 snapshot.blocks[index] = palette_index(column->surface.block);
                 snapshot.heights[index] = column->surface.height;
+                snapshot.block_states[index] = column->surface.state;
                 snapshot.overlay_blocks[index] = palette_index(column->overlay.block);
                 snapshot.overlay_heights[index] = column->overlay.height;
+                snapshot.overlay_states[index] = column->overlay.state;
             }
         }
         return snapshot;
@@ -1190,8 +1225,10 @@ private:
                 livemap::localChunkCoord(dirty.coord.z, chunk.z),
                 current.block,
                 current.height,
+                current.state,
                 overlay.block,
                 overlay.height,
+                overlay.state,
             });
         }
 

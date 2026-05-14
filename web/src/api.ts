@@ -19,8 +19,10 @@ export interface ChunkSnapshot {
   palette: string[];
   blocks: number[];
   heights: number[];
+  blockStates?: BlockStateMap[];
   overlayBlocks?: number[];
   overlayHeights?: number[];
+  overlayStates?: BlockStateMap[];
   updatedAt: number;
 }
 
@@ -115,9 +117,14 @@ export interface BlockUpdate {
   localZ: number;
   block: string;
   height: number;
+  state?: BlockStateMap;
   overlayBlock?: string;
   overlayHeight?: number;
+  overlayState?: BlockStateMap;
 }
+
+export type BlockStateValue = boolean | number | string;
+export type BlockStateMap = Record<string, BlockStateValue>;
 
 export interface ChunkReadyMessage {
   type: "chunk_ready";

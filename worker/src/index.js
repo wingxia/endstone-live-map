@@ -830,10 +830,12 @@ export function normalizeChunkSnapshot(payload) {
     return value;
   });
   const heights = normalizeFixedNumberArray(payload.heights, "heights", CHUNK_BLOCK_COUNT);
+  const blockStates = normalizeOptionalStateArray(payload.blockStates, "blockStates", CHUNK_BLOCK_COUNT);
   const overlayBlocks = normalizeOptionalPaletteArray(payload.overlayBlocks, "overlayBlocks", CHUNK_BLOCK_COUNT, palette);
   const overlayHeights = Array.isArray(payload.overlayHeights)
     ? normalizeFixedNumberArray(payload.overlayHeights, "overlayHeights", CHUNK_BLOCK_COUNT)
     : Array.from({ length: CHUNK_BLOCK_COUNT }, () => -64);
+  const overlayStates = normalizeOptionalStateArray(payload.overlayStates, "overlayStates", CHUNK_BLOCK_COUNT);
 
   return {
     world: cleanSegment(payload.world || "world"),
@@ -843,8 +845,10 @@ export function normalizeChunkSnapshot(payload) {
     palette,
     blocks,
     heights,
+    blockStates,
     overlayBlocks,
     overlayHeights,
+    overlayStates,
     updatedAt: numberOrThrow(payload.updatedAt ?? Date.now(), "updatedAt"),
   };
 }
@@ -884,8 +888,10 @@ function normalizeBlockUpdate(update) {
     localZ,
     block: cleanBlockId(update.block || "minecraft:air"),
     height: numberOrThrow(update.height, "updates.height"),
+    state: normalizeBlockStateMap(update.state || update.blockState || {}, "updates.state"),
     overlayBlock: cleanBlockId(update.overlayBlock || "minecraft:air"),
     overlayHeight: numberOrThrow(update.overlayHeight ?? -64, "updates.overlayHeight"),
+    overlayState: normalizeBlockStateMap(update.overlayState || {}, "updates.overlayState"),
   };
 }
 
@@ -1160,15 +1166,19 @@ function applyBlockUpdatesToChunk(chunk, updates) {
     if (
       chunk.blocks[index] === paletteIndex &&
       chunk.heights[index] === update.height &&
+      sameBlockStateMap(chunk.blockStates[index], update.state) &&
       chunk.overlayBlocks[index] === overlayPaletteIndex &&
-      chunk.overlayHeights[index] === update.overlayHeight
+      chunk.overlayHeights[index] === update.overlayHeight &&
+      sameBlockStateMap(chunk.overlayStates[index], update.overlayState)
     ) {
       continue;
     }
     chunk.blocks[index] = paletteIndex;
     chunk.heights[index] = update.height;
+    chunk.blockStates[index] = update.state;
     chunk.overlayBlocks[index] = overlayPaletteIndex;
     chunk.overlayHeights[index] = update.overlayHeight;
+    chunk.overlayStates[index] = update.overlayState;
     applied.push(update);
   }
   return applied;
@@ -1206,20 +1216,30 @@ export function diffChunkSnapshots(previous, next) {
   const updates = [];
   const previousOverlayBlocks = Array.isArray(previous.overlayBlocks) ? previous.overlayBlocks : [];
   const previousOverlayHeights = Array.isArray(previous.overlayHeights) ? previous.overlayHeights : [];
+  const previousBlockStates = Array.isArray(previous.blockStates) ? previous.blockStates : [];
+  const previousOverlayStates = Array.isArray(previous.overlayStates) ? previous.overlayStates : [];
   const nextOverlayBlocks = Array.isArray(next.overlayBlocks) ? next.overlayBlocks : [];
   const nextOverlayHeights = Array.isArray(next.overlayHeights) ? next.overlayHeights : [];
+  const nextBlockStates = Array.isArray(next.blockStates) ? next.blockStates : [];
+  const nextOverlayStates = Array.isArray(next.overlayStates) ? next.overlayStates : [];
   for (let index = 0; index < CHUNK_BLOCK_COUNT; index += 1) {
     const previousBlock = previous.palette[previous.blocks[index]] || "minecraft:air";
     const nextBlock = next.palette[next.blocks[index]] || "minecraft:air";
+    const previousState = previousBlockStates[index] || {};
+    const nextState = nextBlockStates[index] || {};
     const previousOverlayHeight = previousOverlayHeights[index] ?? -64;
     const nextOverlayHeight = nextOverlayHeights[index] ?? -64;
     const previousOverlayBlock = previousOverlayHeight > -64 ? previous.palette[previousOverlayBlocks[index]] || "minecraft:air" : "minecraft:air";
     const nextOverlayBlock = nextOverlayHeight > -64 ? next.palette[nextOverlayBlocks[index]] || "minecraft:air" : "minecraft:air";
+    const previousOverlayState = previousOverlayHeight > -64 ? previousOverlayStates[index] || {} : {};
+    const nextOverlayState = nextOverlayHeight > -64 ? nextOverlayStates[index] || {} : {};
     if (
       previousBlock === nextBlock &&
       previous.heights[index] === next.heights[index] &&
+      sameBlockStateMap(previousState, nextState) &&
       previousOverlayBlock === nextOverlayBlock &&
-      previousOverlayHeight === nextOverlayHeight
+      previousOverlayHeight === nextOverlayHeight &&
+      sameBlockStateMap(previousOverlayState, nextOverlayState)
     ) {
       continue;
     }
@@ -1228,8 +1248,10 @@ export function diffChunkSnapshots(previous, next) {
       localZ: Math.floor(index / 16),
       block: nextBlock,
       height: next.heights[index],
+      state: nextState,
       overlayBlock: nextOverlayBlock,
       overlayHeight: nextOverlayHeight,
+      overlayState: nextOverlayState,
     });
   }
   return updates;
@@ -1266,6 +1288,48 @@ function normalizeOptionalPaletteArray(value, field, length, palette) {
     }
     return item;
   });
+}
+
+function normalizeOptionalStateArray(value, field, length) {
+  if (!Array.isArray(value)) {
+    return Array.from({ length }, () => ({}));
+  }
+  if (value.length !== length) {
+    throw new Error(`${field} must contain ${length} entries`);
+  }
+  return value.map((item, index) => normalizeBlockStateMap(item || {}, `${field}[${index}]`));
+}
+
+function normalizeBlockStateMap(value, field) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${field} must be an object`);
+  }
+  const result = {};
+  for (const [key, rawValue] of Object.entries(value)) {
+    const stateKey = String(key || "").trim().replace(/[^A-Za-z0-9_.:-]/g, "_").slice(0, 80);
+    if (!stateKey) {
+      throw new Error(`${field} has an invalid key`);
+    }
+    if (typeof rawValue === "boolean") {
+      result[stateKey] = rawValue;
+    } else if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+      result[stateKey] = Math.trunc(rawValue);
+    } else if (typeof rawValue === "string") {
+      result[stateKey] = rawValue.slice(0, 120);
+    } else {
+      throw new Error(`${field}.${stateKey} must be a boolean, number, or string`);
+    }
+  }
+  return result;
+}
+
+function sameBlockStateMap(left, right) {
+  const leftKeys = Object.keys(left || {});
+  const rightKeys = Object.keys(right || {});
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+  return leftKeys.every((key) => Object.prototype.hasOwnProperty.call(right || {}, key) && left[key] === right[key]);
 }
 
 function cleanSegment(value) {

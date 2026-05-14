@@ -358,6 +358,80 @@ test("renders cherry leaves from the atlas and flat overlays over the base block
   await expect.poll(() => firstChunkTileHasColor(page, [196, 92, 46])).toBe(true);
 });
 
+test("renders stateful partial blocks without dark base holes", async ({ page }) => {
+  const targetChunk = {
+    world: "Bedrock level",
+    dimension: "Overworld",
+    chunkX: 0,
+    chunkZ: 0,
+    palette: ["minecraft:grass_block", "minecraft:cake", "minecraft:oak_trapdoor", "minecraft:end_rod"],
+    blocks: Array.from({ length: 256 }, () => 0),
+    heights: Array.from({ length: 256 }, () => 64),
+    overlayBlocks: Array.from({ length: 256 }, (_, index) => {
+      if (index === 0) return 1;
+      if (index === 1) return 2;
+      if (index === 2) return 3;
+      return 0;
+    }),
+    overlayHeights: Array.from({ length: 256 }, (_, index) => (index <= 2 ? 65 : -64)),
+    overlayStates: Array.from({ length: 256 }, (_, index) => {
+      if (index === 0) return { bite_counter: 4 };
+      if (index === 1) return { direction: 1, open_bit: true };
+      if (index === 2) return { facing_direction: 0 };
+      return {};
+    }),
+    updatedAt: 1,
+  };
+
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        worlds: [
+          {
+            version: 1,
+            world: "Bedrock level",
+            dimension: "Overworld",
+            status: "complete",
+            chunkCount: 1,
+            importedAt: 1,
+            updatedAt: 1,
+            bounds: {
+              minChunkX: 0,
+              maxChunkX: 0,
+              minChunkZ: 0,
+              maxChunkZ: 0,
+              minBlockX: 0,
+              maxBlockX: 15,
+              minBlockZ: 0,
+              maxBlockZ: 15,
+            },
+            topBlocks: { "minecraft:grass_block": 253, "minecraft:cake": 1, "minecraft:oak_trapdoor": 1, "minecraft:end_rod": 1 },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [targetChunk], missing: [] }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({ status: 404, body: "texture manifest not found" });
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => firstChunkTileHasColor(page, [95, 159, 63])).toBe(true);
+  await expect.poll(() => firstChunkTileHasColor(page, [244, 231, 215])).toBe(true);
+  await expect.poll(() => firstChunkTileHasColor(page, [139, 129, 116])).toBe(true);
+  await expect.poll(() => firstChunkTileHasColor(page, [233, 227, 196])).toBe(true);
+  await expect.poll(() => firstChunkTileHasNoDarkHoles(page)).toBe(true);
+});
+
 test("requests live player chunks before a world import exists", async ({ page }) => {
   let chunkRequests = 0;
 

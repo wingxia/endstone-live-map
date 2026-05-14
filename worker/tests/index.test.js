@@ -140,6 +140,8 @@ function createChunk(overrides = {}) {
     heights: Array.from({ length: 256 }, () => 64),
     overlayBlocks: Array.from({ length: 256 }, () => 2),
     overlayHeights: Array.from({ length: 256 }, () => -64),
+    blockStates: Array.from({ length: 256 }, () => ({})),
+    overlayStates: Array.from({ length: 256 }, () => ({})),
     updatedAt: 10,
     ...overrides,
   };
@@ -148,8 +150,9 @@ function createChunk(overrides = {}) {
 describe("worker helpers", () => {
   it("normalizes chunk payloads and keys", () => {
     const chunk = normalizeChunkSnapshot(createChunk({ world: "my world", chunkX: -1 }));
-    expect(chunk).toMatchObject({ world: "my_world", chunkX: -1, blocks: expect.any(Array), overlayBlocks: expect.any(Array) });
+    expect(chunk).toMatchObject({ world: "my_world", chunkX: -1, blocks: expect.any(Array), blockStates: expect.any(Array), overlayBlocks: expect.any(Array) });
     expect(normalizeChunkSnapshot(createChunk({ overlayBlocks: undefined, overlayHeights: undefined })).overlayHeights[0]).toBe(-64);
+    expect(normalizeChunkSnapshot(createChunk({ blockStates: undefined, overlayStates: undefined })).blockStates[0]).toEqual({});
     expect(chunkKey("world", "Overworld", -1, 2)).toBe("chunks/v1/world/Overworld/-1/2.json");
     expect(normalizeChunkBatchPayload({ chunks: [createChunk()], broadcast: true })).toMatchObject({ broadcast: true, chunks: [expect.any(Object)] });
     expect(normalizeChunkBatchPayload({ chunks: [createChunk()], storage: "region" })).toMatchObject({ storage: "region" });
@@ -161,9 +164,33 @@ describe("worker helpers", () => {
         dimension: "Overworld",
         chunkX: 0,
         chunkZ: 0,
-        updates: [{ localX: 1, localZ: 2, block: "minecraft:stone", height: 70, overlayBlock: "minecraft:poppy", overlayHeight: 71 }],
+        updates: [
+          {
+            localX: 1,
+            localZ: 2,
+            block: "minecraft:stone",
+            height: 70,
+            state: { bite_counter: 2 },
+            overlayBlock: "minecraft:poppy",
+            overlayHeight: 71,
+            overlayState: { facing_direction: 1 },
+          },
+        ],
       }),
-    ).toMatchObject({ updates: [{ localX: 1, localZ: 2, block: "minecraft:stone", height: 70, overlayBlock: "minecraft:poppy", overlayHeight: 71 }] });
+    ).toMatchObject({
+      updates: [
+        {
+          localX: 1,
+          localZ: 2,
+          block: "minecraft:stone",
+          height: 70,
+          state: { bite_counter: 2 },
+          overlayBlock: "minecraft:poppy",
+          overlayHeight: 71,
+          overlayState: { facing_direction: 1 },
+        },
+      ],
+    });
   });
 
   it("detects block updates between chunk snapshots", () => {
@@ -172,7 +199,33 @@ describe("worker helpers", () => {
     next.blocks[17] = 1;
     next.heights[17] = 63;
     expect(diffChunkSnapshots(previous, next)).toEqual([
-      { localX: 1, localZ: 1, block: "minecraft:water", height: 63, overlayBlock: "minecraft:air", overlayHeight: -64 },
+      { localX: 1, localZ: 1, block: "minecraft:water", height: 63, state: {}, overlayBlock: "minecraft:air", overlayHeight: -64, overlayState: {} },
+    ]);
+  });
+
+  it("detects state-only updates between chunk snapshots", () => {
+    const previous = createChunk({ palette: ["minecraft:cake", "minecraft:air"], blocks: Array.from({ length: 256 }, () => 0) });
+    const next = createChunk({
+      ...previous,
+      blocks: [...previous.blocks],
+      heights: [...previous.heights],
+      blockStates: previous.blockStates.map((state) => ({ ...state })),
+      overlayBlocks: [...previous.overlayBlocks],
+      overlayHeights: [...previous.overlayHeights],
+      overlayStates: previous.overlayStates.map((state) => ({ ...state })),
+    });
+    next.blockStates[17] = { bite_counter: 3 };
+    expect(diffChunkSnapshots(previous, next)).toEqual([
+      {
+        localX: 1,
+        localZ: 1,
+        block: "minecraft:cake",
+        height: 64,
+        state: { bite_counter: 3 },
+        overlayBlock: "minecraft:air",
+        overlayHeight: -64,
+        overlayState: {},
+      },
     ]);
   });
 
@@ -187,8 +240,18 @@ describe("worker helpers", () => {
     });
     next.overlayBlocks[17] = 3;
     next.overlayHeights[17] = 65;
+    next.overlayStates[17] = { facing_direction: 1 };
     expect(diffChunkSnapshots(previous, next)).toEqual([
-      { localX: 1, localZ: 1, block: "minecraft:grass_block", height: 64, overlayBlock: "minecraft:poppy", overlayHeight: 65 },
+      {
+        localX: 1,
+        localZ: 1,
+        block: "minecraft:grass_block",
+        height: 64,
+        state: {},
+        overlayBlock: "minecraft:poppy",
+        overlayHeight: 65,
+        overlayState: { facing_direction: 1 },
+      },
     ]);
   });
 
@@ -344,7 +407,18 @@ describe("worker routes", () => {
           dimension: "Overworld",
           chunkX: 0,
           chunkZ: 0,
-          updates: [{ localX: 2, localZ: 3, block: "minecraft:stone", height: 71, overlayBlock: "minecraft:poppy", overlayHeight: 72 }],
+          updates: [
+            {
+              localX: 2,
+              localZ: 3,
+              block: "minecraft:oak_trapdoor",
+              height: 71,
+              state: { direction: 1, open_bit: true },
+              overlayBlock: "minecraft:poppy",
+              overlayHeight: 72,
+              overlayState: { facing_direction: 1 },
+            },
+          ],
           updatedAt: 20,
         }),
       }),
@@ -356,10 +430,12 @@ describe("worker routes", () => {
     expect(env.live.messages.at(-1)).toContain("block_updates");
     const stored = await env.MAP_DATA.objects.get("chunks/v1/world/Overworld/0/0.json").json();
     const index = 3 * 16 + 2;
-    expect(stored.palette[stored.blocks[index]]).toBe("minecraft:stone");
+    expect(stored.palette[stored.blocks[index]]).toBe("minecraft:oak_trapdoor");
     expect(stored.heights[index]).toBe(71);
+    expect(stored.blockStates[index]).toEqual({ direction: 1, open_bit: true });
     expect(stored.palette[stored.overlayBlocks[index]]).toBe("minecraft:poppy");
     expect(stored.overlayHeights[index]).toBe(72);
+    expect(stored.overlayStates[index]).toEqual({ facing_direction: 1 });
   });
 
   it("reports missing base chunks for dirty block updates", async () => {

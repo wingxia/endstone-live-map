@@ -5,6 +5,7 @@ import {
   fetchTextureManifest,
   segmentKey,
   textureAtlasUrl,
+  type BlockStateMap,
   type BlockUpdatesMessage,
   type ChunkReadyMessage,
   type ChunkSnapshot,
@@ -125,6 +126,8 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
         const index = blockColumnIndex(update.localX, update.localZ);
         chunk.blocks[index] = paletteIndex;
         chunk.heights[index] = update.height;
+        chunk.blockStates = fixedStateArray(chunk.blockStates);
+        chunk.blockStates[index] = update.state || {};
         if (update.overlayBlock !== undefined || chunk.overlayBlocks !== undefined || chunk.overlayHeights !== undefined) {
           const overlayBlock = update.overlayBlock || "minecraft:air";
           const overlayHeight = update.overlayHeight ?? -64;
@@ -136,6 +139,8 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
           chunk.overlayHeights = fixedChunkArray(chunk.overlayHeights, -64);
           chunk.overlayBlocks[index] = overlayPaletteIndex;
           chunk.overlayHeights[index] = overlayHeight;
+          chunk.overlayStates = fixedStateArray(chunk.overlayStates);
+          chunk.overlayStates[index] = update.overlayState || {};
         }
       }
       this.refreshVisibleTiles({ chunkX: message.chunkX, chunkZ: message.chunkZ });
@@ -332,12 +337,13 @@ function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: T
       }
       const index = blockColumnIndex(localX, localZ);
       const blockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
+      const blockState = blockStateAt(chunk, index);
       const x = (worldX - range.minBlockX) * range.scale;
       const y = (worldZ - range.minBlockZ) * range.scale;
-      drawBlock(ctx, atlas, blockId, x, y, range.scale, "base");
+      drawBlock(ctx, atlas, blockId, blockState, x, y, range.scale, "base");
       const overlayBlockId = overlayBlockAt(chunk, index);
       if (overlayBlockId && overlayBlockId !== "minecraft:air") {
-        drawBlock(ctx, atlas, overlayBlockId, x, y, range.scale, "overlay");
+        drawBlock(ctx, atlas, overlayBlockId, overlayStateAt(chunk, index), x, y, range.scale, "overlay");
       }
     }
   }
@@ -361,7 +367,19 @@ function tileIntersectsChunk(coords: Pick<Coords, "x" | "y" | "z">, chunk: { chu
   return chunk.chunkX >= range.minChunkX && chunk.chunkX <= range.maxChunkX && chunk.chunkZ >= range.minChunkZ && chunk.chunkZ <= range.maxChunkZ;
 }
 
-function drawBlock(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId: string, x: number, y: number, size: number, layer: "base" | "overlay" = "base") {
+function drawBlock(
+  ctx: CanvasRenderingContext2D,
+  atlas: AtlasResource,
+  blockId: string,
+  state: BlockStateMap,
+  x: number,
+  y: number,
+  size: number,
+  layer: "base" | "overlay" = "base",
+) {
+  if (drawStatefulPartialBlock(ctx, atlas, blockId, state, x, y, size, layer)) {
+    return;
+  }
   if (isPlantBlock(blockId)) {
     drawPlantMarker(ctx, atlas, blockId, x, y, size, layer);
     return;
@@ -390,6 +408,122 @@ function drawBlock(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId:
 
 function drawAtlasEntry(ctx: CanvasRenderingContext2D, image: HTMLImageElement, entry: TextureAtlasEntry, x: number, y: number, size: number) {
   ctx.drawImage(image, entry.x, entry.y, entry.w, entry.h, x, y, size, size);
+}
+
+function drawStatefulPartialBlock(
+  ctx: CanvasRenderingContext2D,
+  atlas: AtlasResource,
+  blockId: string,
+  state: BlockStateMap,
+  x: number,
+  y: number,
+  size: number,
+  layer: "base" | "overlay",
+) {
+  const id = blockId.toLowerCase();
+  if (id === "minecraft:cake" || id.endsWith(":cake") || id === "cake") {
+    drawCakeBlock(ctx, blockId, state, x, y, size, layer);
+    return true;
+  }
+  if (id === "minecraft:end_rod" || id.endsWith(":end_rod") || id === "end_rod") {
+    drawEndRodBlock(ctx, blockId, state, x, y, size, layer);
+    return true;
+  }
+  if (id.includes("trapdoor")) {
+    drawTrapdoorBlock(ctx, atlas, blockId, state, x, y, size, layer);
+    return true;
+  }
+  return false;
+}
+
+function drawCakeBlock(ctx: CanvasRenderingContext2D, blockId: string, state: BlockStateMap, x: number, y: number, size: number, layer: "base" | "overlay") {
+  if (layer === "base") {
+    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillRect(x, y, size, size);
+  }
+  const inset = Math.max(1, Math.floor(size * 0.12));
+  const width = Math.max(1, size - inset * 2);
+  const height = Math.max(1, size - inset * 2);
+  const bite = Math.max(0, Math.min(6, stateNumber(state, "bite_counter", stateNumber(state, "bites", 0))));
+  const biteWidth = bite > 0 ? Math.max(1, Math.round((width * bite) / 7)) : 0;
+  const bodyWidth = Math.max(1, width - biteWidth);
+  ctx.fillStyle = "#f4e7d7";
+  ctx.fillRect(x + inset, y + inset, bodyWidth, height);
+  ctx.fillStyle = "#c84b58";
+  const spot = Math.max(1, Math.floor(size * 0.12));
+  if (bodyWidth > spot * 2) {
+    ctx.fillRect(x + inset + Math.floor(bodyWidth * 0.25), y + inset + Math.floor(height * 0.22), spot, spot);
+    ctx.fillRect(x + inset + Math.floor(bodyWidth * 0.62), y + inset + Math.floor(height * 0.5), spot, spot);
+  }
+}
+
+function drawEndRodBlock(ctx: CanvasRenderingContext2D, blockId: string, state: BlockStateMap, x: number, y: number, size: number, layer: "base" | "overlay") {
+  if (layer === "base") {
+    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillRect(x, y, size, size);
+  }
+  const vertical = isVerticalFacing(stateValue(state, "facing_direction", stateValue(state, "facing", "up")));
+  const rodLength = Math.max(2, Math.floor(size * 0.78));
+  const rodWidth = Math.max(1, Math.floor(size * 0.18));
+  const cap = Math.max(1, Math.floor(size * 0.28));
+  ctx.fillStyle = "#e9e3c4";
+  if (vertical) {
+    const rodX = x + Math.floor((size - rodWidth) / 2);
+    const rodY = y + Math.floor((size - rodLength) / 2);
+    ctx.fillRect(rodX, rodY, rodWidth, rodLength);
+    ctx.fillStyle = "#fff7d8";
+    ctx.fillRect(x + Math.floor((size - cap) / 2), y + Math.floor((size - cap) / 2), cap, cap);
+  } else {
+    const rodX = x + Math.floor((size - rodLength) / 2);
+    const rodY = y + Math.floor((size - rodWidth) / 2);
+    ctx.fillRect(rodX, rodY, rodLength, rodWidth);
+    ctx.fillStyle = "#fff7d8";
+    ctx.fillRect(x + Math.floor((size - cap) / 2), y + Math.floor((size - cap) / 2), cap, cap);
+  }
+}
+
+function drawTrapdoorBlock(
+  ctx: CanvasRenderingContext2D,
+  atlas: AtlasResource,
+  blockId: string,
+  state: BlockStateMap,
+  x: number,
+  y: number,
+  size: number,
+  layer: "base" | "overlay",
+) {
+  if (layer === "base") {
+    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillRect(x, y, size, size);
+  }
+  const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
+  const open = stateBool(state, "open_bit", stateBool(state, "open", false));
+  const half = String(stateValue(state, "upside_down_bit", stateValue(state, "half", "bottom"))).toLowerCase();
+  const facing = stateValue(state, "direction", stateValue(state, "facing_direction", stateValue(state, "facing", "south")));
+  if (!open) {
+    const inset = Math.max(0, Math.floor(size * 0.08));
+    const thickness = half === "top" || half === "true" || half === "1" ? Math.max(1, Math.floor(size * 0.72)) : Math.max(1, Math.floor(size * 0.82));
+    if (entry && atlas.image) {
+      drawAtlasEntry(ctx, atlas.image, entry, x + inset, y + inset, Math.max(1, size - inset * 2));
+    } else {
+      ctx.fillStyle = fallbackTextureColor(blockId);
+      ctx.fillRect(x + inset, y + inset, Math.max(1, size - inset * 2), thickness);
+    }
+    return;
+  }
+
+  const edge = facingEdge(facing);
+  const thickness = Math.max(1, Math.floor(size * 0.2));
+  ctx.fillStyle = fallbackTextureColor(blockId);
+  if (edge === "north") {
+    ctx.fillRect(x, y, size, thickness);
+  } else if (edge === "south") {
+    ctx.fillRect(x, y + size - thickness, size, thickness);
+  } else if (edge === "west") {
+    ctx.fillRect(x, y, thickness, size);
+  } else {
+    ctx.fillRect(x + size - thickness, y, thickness, size);
+  }
 }
 
 function drawPlantMarker(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId: string, x: number, y: number, size: number, layer: "base" | "overlay") {
@@ -430,11 +564,26 @@ function overlayBlockAt(chunk: ChunkSnapshot, index: number) {
   return chunk.palette[overlayBlocks[index]] || "minecraft:air";
 }
 
+function blockStateAt(chunk: ChunkSnapshot, index: number): BlockStateMap {
+  return chunk.blockStates?.[index] || {};
+}
+
+function overlayStateAt(chunk: ChunkSnapshot, index: number): BlockStateMap {
+  return chunk.overlayStates?.[index] || {};
+}
+
 function fixedChunkArray(values: number[] | undefined, fallback: number) {
   if (values && values.length === 256) {
     return values;
   }
   return Array.from({ length: 256 }, () => fallback);
+}
+
+function fixedStateArray(values: BlockStateMap[] | undefined) {
+  if (values && values.length === 256) {
+    return values;
+  }
+  return Array.from({ length: 256 }, () => ({}));
 }
 
 function airPaletteIndex(chunk: ChunkSnapshot) {
@@ -479,7 +628,9 @@ function decorationInset(blockId: string, size: number) {
 function isTinyDecorationBlock(id: string) {
   return (
     id.includes("button") ||
+    id.includes("cake") ||
     id.includes("candle") ||
+    id.includes("end_rod") ||
     id.includes("flower_pot") ||
     id.includes("sea_pickle") ||
     id.includes("torch") ||
@@ -500,10 +651,58 @@ function isSmallDecorationBlock(id: string) {
     id.includes("brewing_stand") ||
     id.includes("conduit") ||
     id.includes("coral") ||
+    id.includes("end_rod") ||
     id.includes("head") ||
     id.includes("lantern") ||
     id.includes("skull")
   );
+}
+
+function stateValue(state: BlockStateMap, key: string, fallback: unknown) {
+  return Object.prototype.hasOwnProperty.call(state, key) ? state[key] : fallback;
+}
+
+function stateNumber(state: BlockStateMap, key: string, fallback: number) {
+  const value = stateValue(state, key, fallback);
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function stateBool(state: BlockStateMap, key: string, fallback: boolean) {
+  const value = stateValue(state, key, fallback);
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  const text = String(value).toLowerCase();
+  if (text === "true" || text === "1") {
+    return true;
+  }
+  if (text === "false" || text === "0") {
+    return false;
+  }
+  return fallback;
+}
+
+function isVerticalFacing(value: unknown) {
+  const text = String(value).toLowerCase();
+  return text === "0" || text === "1" || text === "up" || text === "down";
+}
+
+function facingEdge(value: unknown): "north" | "south" | "east" | "west" {
+  const text = String(value).toLowerCase();
+  if (text === "2" || text === "north") {
+    return "north";
+  }
+  if (text === "3" || text === "east") {
+    return "east";
+  }
+  if (text === "1" || text === "west") {
+    return "west";
+  }
+  return "south";
 }
 
 function drawDecorationGlyph(ctx: CanvasRenderingContext2D, blockId: string, x: number, y: number, size: number, layer: "base" | "overlay") {
