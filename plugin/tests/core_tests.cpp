@@ -128,7 +128,12 @@ void testLandConfigParsing()
             "tpposx": "-352",
             "tpposy": "70",
             "tpposz": "-479",
-            "tppublic": true,
+            "permission": [
+              {"containter": "false"},
+              {"build": "false"},
+              {"mine": "false"},
+              {"tp": "true"}
+            ],
             "in": false,
             "son": ["猪人塔"]
           }
@@ -142,7 +147,12 @@ void testLandConfigParsing()
             "tpposx": "-317",
             "tpposy": "75",
             "tpposz": "-534",
-            "tppublic": false,
+            "permission": [
+              {"containter": "false"},
+              {"build": "false"},
+              {"mine": "false"},
+              {"tp": "false"}
+            ],
             "in": true,
             "father": "主城区",
             "son": []
@@ -162,6 +172,20 @@ void testLandConfigParsing()
           }
         },
         {
+          "布尔公开": {
+            "posa": "8, 63, 9",
+            "posb": "16, 80, 20",
+            "dim": "Overworld",
+            "member": [],
+            "tpposx": "12",
+            "tpposy": "64",
+            "tpposz": "14",
+            "tppublic": true,
+            "in": false,
+            "son": []
+          }
+        },
+        {
           "缺字段": {
             "posa": "0, 0, 0",
             "posb": "1, 1, 1",
@@ -172,7 +196,7 @@ void testLandConfigParsing()
     })json";
 
     const auto parsed = livemap::parseLandConfig(json, "Bedrock level", 123);
-    assert(parsed.claims.size() == 3);
+    assert(parsed.claims.size() == 4);
     assert(parsed.skipped_entries == 1);
     assert(parsed.claims[0].owner == "GieZi8670");
     assert(parsed.claims[0].name == "主城区");
@@ -197,6 +221,7 @@ void testLandConfigParsing()
     assert(!parsed.claims[2].public_teleport);
     assert(parsed.claims[2].min_x == parsed.claims[2].max_x);
     assert(parsed.claims[2].min_z == parsed.claims[2].max_z);
+    assert(parsed.claims[3].public_teleport);
 
     const auto serialized = livemap::serializeLandBatch(parsed.claims);
     assert(serialized.find("\"claims\"") != std::string::npos);

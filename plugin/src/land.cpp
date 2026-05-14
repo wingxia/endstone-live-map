@@ -324,6 +324,51 @@ bool boolField(const JsonValue &value, const std::string &key)
     return field != nullptr && field->isBool() && field->bool_value;
 }
 
+std::optional<bool> boolLikeValue(const JsonValue &value)
+{
+    if (value.isBool()) {
+        return value.bool_value;
+    }
+    if (value.isString()) {
+        std::string normalized;
+        normalized.reserve(value.string_value.size());
+        for (const char ch : value.string_value) {
+            normalized.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+        }
+        if (normalized == "true") {
+            return true;
+        }
+        if (normalized == "false") {
+            return false;
+        }
+    }
+    return std::nullopt;
+}
+
+bool publicTeleportEnabled(const JsonValue &config)
+{
+    if (const auto *field = objectField(config, "tppublic")) {
+        if (const auto parsed = boolLikeValue(*field)) {
+            return *parsed;
+        }
+    }
+
+    const auto *permissions = objectField(config, "permission");
+    if (permissions == nullptr || !permissions->isArray()) {
+        return false;
+    }
+    for (const auto &permission : permissions->array_value) {
+        const auto *tp = objectField(permission, "tp");
+        if (tp == nullptr) {
+            continue;
+        }
+        if (const auto parsed = boolLikeValue(*tp)) {
+            return *parsed;
+        }
+    }
+    return false;
+}
+
 std::vector<std::string> stringArrayField(const JsonValue &value, const std::string &key)
 {
     std::vector<std::string> values;
@@ -406,7 +451,7 @@ std::optional<LandClaim> parseClaim(const std::string &owner, const std::string 
     claim.parent = stringField(config, "father");
     claim.children = stringArrayField(config, "son");
     claim.nested = boolField(config, "in") || !claim.parent.empty();
-    claim.public_teleport = boolField(config, "tppublic");
+    claim.public_teleport = publicTeleportEnabled(config);
     claim.updated_at_ms = updated_at_ms;
     return claim;
 }
