@@ -84,17 +84,18 @@ livemap::BlockStateMap blockStateMapFromEndstone(const endstone::BlockStates &st
 {
     livemap::BlockStateMap normalized;
     for (const auto &[key, value] : states) {
+        const std::string state_key = key;
         std::visit(
-            [&normalized, &key](const auto &item) {
+            [&normalized, &state_key](const auto &item) {
                 using Item = std::decay_t<decltype(item)>;
                 if constexpr (std::is_same_v<Item, bool>) {
-                    normalized[key] = item;
+                    normalized[state_key] = item;
                 }
                 else if constexpr (std::is_same_v<Item, int>) {
-                    normalized[key] = item;
+                    normalized[state_key] = item;
                 }
                 else {
-                    normalized[key] = item;
+                    normalized[state_key] = item;
                 }
             },
             value);
