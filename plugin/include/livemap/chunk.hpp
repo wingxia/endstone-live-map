@@ -101,6 +101,8 @@ struct ChunkSnapshot {
     std::int64_t updated_at_ms{};
 };
 
+[[nodiscard]] bool isEmptyChunkSnapshot(const ChunkSnapshot &snapshot);
+
 struct BlockColumnUpdate {
     int local_x{};
     int local_z{};

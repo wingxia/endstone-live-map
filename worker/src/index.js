@@ -268,6 +268,10 @@ async function handleChunkUpload(request, env) {
   }
 
   const snapshot = normalizeChunkSnapshot(await request.json());
+  const emptySnapshots = rejectedEmptyChunkSnapshots([snapshot]);
+  if (emptySnapshots.length > 0) {
+    return json({ ok: true, skippedEmpty: 1, rejected: emptySnapshots, updates: 0 });
+  }
   const result = await putChunkSnapshot(bucket, snapshot, { env, broadcast: true, diffForViewers: true });
   await updateWorldMetaForChunks(bucket, [snapshot]);
   return json({ ok: true, key: result.key, updates: result.updates });
@@ -288,26 +292,34 @@ async function handleChunkBatchUpload(request, env) {
   const snapshots = rawChunks.map((chunk) => normalizeChunkSnapshot(chunk));
   const broadcast = payload.broadcast === true;
   const storage = payload.storage === "region" || payload.storage === "regions" ? "region" : "chunk";
+  const emptySnapshots = rejectedEmptyChunkSnapshots(snapshots);
+  const writableSnapshots = snapshots.filter((snapshot) => !isEmptyChunkSnapshot(snapshot));
+  if (writableSnapshots.length < 1) {
+    return json({ ok: true, storage, chunks: 0, skippedEmpty: emptySnapshots.length, rejected: emptySnapshots, keys: [], updates: 0 });
+  }
 
   if (storage === "region" && !broadcast) {
-    const results = await putChunkRegionSnapshots(bucket, snapshots);
-    await updateWorldMetaForChunks(bucket, snapshots);
+    const results = await putChunkRegionSnapshots(bucket, writableSnapshots);
+    await updateWorldMetaForChunks(bucket, writableSnapshots);
     return json({
       ok: true,
       storage,
-      chunks: snapshots.length,
+      chunks: writableSnapshots.length,
+      skippedEmpty: emptySnapshots.length,
       regions: results.length,
       keys: results.map((result) => result.key),
     });
   }
 
-  const results = await mapWithConcurrency(snapshots, BATCH_WRITE_CONCURRENCY, (snapshot) => putChunkSnapshot(bucket, snapshot, { env, broadcast, diffForViewers: broadcast }));
-  await updateWorldMetaForChunks(bucket, snapshots);
+  const results = await mapWithConcurrency(writableSnapshots, BATCH_WRITE_CONCURRENCY, (snapshot) => putChunkSnapshot(bucket, snapshot, { env, broadcast, diffForViewers: broadcast }));
+  await updateWorldMetaForChunks(bucket, writableSnapshots);
 
   return json({
     ok: true,
     storage,
     chunks: results.length,
+    skippedEmpty: emptySnapshots.length,
+    rejected: emptySnapshots,
     keys: results.map((result) => result.key),
     updates: results.reduce((sum, result) => sum + result.updates, 0),
   });
@@ -397,6 +409,37 @@ async function putChunkSnapshot(bucket, snapshot, options) {
   }
 
   return { key, updates: updates.length };
+}
+
+function rejectedEmptyChunkSnapshots(snapshots) {
+  return snapshots
+    .filter((snapshot) => isEmptyChunkSnapshot(snapshot))
+    .map((snapshot) => ({
+      key: chunkKey(snapshot.world, snapshot.dimension, snapshot.chunkX, snapshot.chunkZ),
+      world: snapshot.world,
+      dimension: snapshot.dimension,
+      chunkX: snapshot.chunkX,
+      chunkZ: snapshot.chunkZ,
+    }));
+}
+
+function isEmptyChunkSnapshot(snapshot) {
+  for (let index = 0; index < CHUNK_BLOCK_COUNT; index += 1) {
+    const block = snapshot.palette[snapshot.blocks[index]] || "minecraft:air";
+    if (!isAirBlock(block) || snapshot.heights[index] > -64) {
+      return false;
+    }
+    const overlayBlock = snapshot.palette[snapshot.overlayBlocks[index]] || "minecraft:air";
+    if (!isAirBlock(overlayBlock) && snapshot.overlayHeights[index] > -64) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isAirBlock(block) {
+  const id = String(block || "minecraft:air").toLowerCase();
+  return id === "minecraft:air" || id === "minecraft:cave_air" || id === "minecraft:void_air" || id === "air" || id === "cave_air" || id === "void_air";
 }
 
 async function handleChunksGet(url, env) {

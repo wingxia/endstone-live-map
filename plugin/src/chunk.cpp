@@ -3,7 +3,9 @@
 #include "livemap/tile_math.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <functional>
+#include <string>
 #include <tuple>
 
 namespace livemap {
@@ -82,6 +84,37 @@ BlockColumnCoord columnForBlock(std::string world, std::string dimension, int bl
 int localChunkCoord(int block, int chunk)
 {
     return block - chunk * kChunkSize;
+}
+
+namespace {
+
+bool isAirBlock(std::string block)
+{
+    std::transform(block.begin(), block.end(), block.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return block == "minecraft:air" || block == "minecraft:cave_air" || block == "minecraft:void_air" ||
+           block == "air" || block == "cave_air" || block == "void_air";
+}
+
+}  // namespace
+
+bool isEmptyChunkSnapshot(const ChunkSnapshot &snapshot)
+{
+    for (int index = 0; index < kChunkBlockCount; ++index) {
+        const auto block_index = snapshot.blocks[static_cast<std::size_t>(index)];
+        const auto block = block_index < snapshot.palette.size() ? snapshot.palette[block_index] : "minecraft:air";
+        if (!isAirBlock(block) || snapshot.heights[static_cast<std::size_t>(index)] > -64) {
+            return false;
+        }
+        const auto overlay_index = snapshot.overlay_blocks[static_cast<std::size_t>(index)];
+        const auto overlay_block =
+            overlay_index < snapshot.palette.size() ? snapshot.palette[overlay_index] : "minecraft:air";
+        if (!isAirBlock(overlay_block) && snapshot.overlay_heights[static_cast<std::size_t>(index)] > -64) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool DirtyChunkTracker::markBlock(const std::string &world, const std::string &dimension, int block_x, int block_z)

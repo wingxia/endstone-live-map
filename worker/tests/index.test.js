@@ -147,6 +147,17 @@ function createChunk(overrides = {}) {
   };
 }
 
+function createEmptyChunk(overrides = {}) {
+  return createChunk({
+    palette: ["minecraft:air"],
+    blocks: Array.from({ length: 256 }, () => 0),
+    heights: Array.from({ length: 256 }, () => -64),
+    overlayBlocks: Array.from({ length: 256 }, () => 0),
+    overlayHeights: Array.from({ length: 256 }, () => -64),
+    ...overrides,
+  });
+}
+
 describe("worker helpers", () => {
   it("normalizes chunk payloads and keys", () => {
     const chunk = normalizeChunkSnapshot(createChunk({ world: "my world", chunkX: -1 }));
@@ -413,6 +424,45 @@ describe("worker routes", () => {
     expect(env.live.messages.some((message) => String(message).includes("block_updates"))).toBe(true);
   });
 
+  it("skips all-air chunk uploads before they can become map data", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk()), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(createEmptyChunk({ updatedAt: 20 })),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, skippedEmpty: 1, rejected: [{ chunkX: 0, chunkZ: 0 }], updates: 0 });
+    const stored = await env.MAP_DATA.objects.get("chunks/v1/world/Overworld/0/0.json").json();
+    expect(stored.palette).toContain("minecraft:grass_block");
+  });
+
+  it("skips all-air chunk uploads even when no previous terrain exists", async () => {
+    const env = createEnv();
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(createEmptyChunk()),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, skippedEmpty: 1, rejected: [{ chunkX: 0, chunkZ: 0 }], updates: 0 });
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(false);
+  });
+
   it("applies authenticated dirty block updates to existing chunk snapshots", async () => {
     const env = createEnv();
     await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk()), {
@@ -512,6 +562,46 @@ describe("worker routes", () => {
       ],
     });
     expect(env.live.messages).toHaveLength(0);
+  });
+
+  it("skips all-air chunk batch entries before they can become map data", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/1/0.json", JSON.stringify(createChunk({ chunkX: 1 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/batch", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ chunks: [createEmptyChunk({ chunkX: 1, updatedAt: 20 })] }),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, chunks: 0, skippedEmpty: 1, rejected: [{ chunkX: 1, chunkZ: 0 }], keys: [], updates: 0 });
+    const stored = await env.MAP_DATA.objects.get("chunks/v1/world/Overworld/1/0.json").json();
+    expect(stored.palette).toContain("minecraft:grass_block");
+  });
+
+  it("stores good chunk batch entries while skipping all-air entries", async () => {
+    const env = createEnv();
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/batch", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ chunks: [createChunk({ chunkX: 2 }), createEmptyChunk({ chunkX: 3 })] }),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, chunks: 1, skippedEmpty: 1, rejected: [{ chunkX: 3, chunkZ: 0 }] });
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/2/0.json")).toBe(true);
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/3/0.json")).toBe(false);
   });
 
   it("rejects oversized chunk batch uploads", async () => {

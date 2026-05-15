@@ -1358,6 +1358,12 @@ private:
                 enqueueSeedChunk(coord, false);
                 continue;
             }
+            if (livemap::isEmptyChunkSnapshot(*snapshot)) {
+                background_log_.warning("Skipped empty live map chunk sample for ", chunkName(coord),
+                                        "; chunk will be retried later.");
+                enqueueSeedChunk(coord, false);
+                continue;
+            }
             cacheChunkSnapshot(*snapshot);
 
             force_flush = force_flush || queued.force;

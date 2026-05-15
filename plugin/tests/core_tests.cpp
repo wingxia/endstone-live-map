@@ -109,6 +109,29 @@ void testChunkMath()
     assert(column.z == -17);
 }
 
+void testEmptyChunkSnapshotDetection()
+{
+    livemap::ChunkSnapshot empty;
+    empty.palette = {"minecraft:air"};
+    empty.blocks.fill(0);
+    empty.heights.fill(-64);
+    empty.overlay_blocks.fill(0);
+    empty.overlay_heights.fill(-64);
+    assert(livemap::isEmptyChunkSnapshot(empty));
+
+    auto terrain = empty;
+    terrain.palette = {"minecraft:air", "minecraft:grass_block"};
+    terrain.blocks[3] = 1;
+    terrain.heights[3] = 64;
+    assert(!livemap::isEmptyChunkSnapshot(terrain));
+
+    auto overlay = empty;
+    overlay.palette = {"minecraft:air", "minecraft:poppy"};
+    overlay.overlay_blocks[3] = 1;
+    overlay.overlay_heights[3] = 65;
+    assert(!livemap::isEmptyChunkSnapshot(overlay));
+}
+
 void testMapBlockClassification()
 {
     assert(!livemap::isMapSurfaceBlock("minecraft:air"));
@@ -525,6 +548,7 @@ int main()
 {
     testTileMath();
     testChunkMath();
+    testEmptyChunkSnapshotDetection();
     testMapBlockClassification();
     testLandConfigParsing();
     testDirtyTracker();
