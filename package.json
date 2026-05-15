@@ -3,8 +3,7 @@
   "private": true,
   "workspaces": [
     "web",
-    "worker",
-    "tools/importer"
+    "worker"
   ],
   "scripts": {
     "build": "npm run build -w web && npm run build -w worker",
@@ -14,8 +13,7 @@
     "deploy": "npm run build && npm run deploy -w worker",
     "cf:whoami": "npm exec -w worker -- wrangler whoami",
     "textures:atlas": "node scripts/build-texture-atlas.mjs",
-    "textures:upload": "node scripts/upload-textures.mjs",
-    "importer:dry-run": "node tools/importer/import-bedrock-world.mjs --dry-run"
+    "textures:upload": "node scripts/upload-textures.mjs"
   },
   "engines": {
     "node": ">=22"
