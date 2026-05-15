@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { chunkUrl, landsUrl, segmentKey, textureAtlasUrl, type BlockUpdate, type ChunkSnapshot, type WorldMeta } from "../src/api";
 import { blockColumnIndex, blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "../src/ui/coords";
-import { chunkRangeForTile, fallbackTextureColor, usesMapTint, usesTransparentTextureUnderlay } from "../src/ui/chunkLayer";
+import { chunkFetchRanges, chunkRangeForTile, fallbackTextureColor, usesMapTint, usesTransparentTextureUnderlay } from "../src/ui/chunkLayer";
 import { isMapDecorationBlock, isPlantBlock } from "../src/ui/mapBlocks";
 
 describe("api helpers", () => {
@@ -162,6 +162,27 @@ describe("api helpers", () => {
       minChunkZ: -34,
       maxChunkZ: -34,
     });
+  });
+
+  it("coalesces low-zoom chunk fetches without exceeding the worker limit", () => {
+    const chunks = Array.from({ length: 16 * 16 }, (_, index) => ({
+      chunkX: index % 16,
+      chunkZ: Math.floor(index / 16),
+    }));
+
+    expect(chunkFetchRanges(chunks)).toEqual([{ minChunkX: 0, maxChunkX: 15, minChunkZ: 0, maxChunkZ: 15 }]);
+  });
+
+  it("splits coalesced chunk fetches at the worker range limit", () => {
+    const chunks = Array.from({ length: 16 * 17 }, (_, index) => ({
+      chunkX: index % 16,
+      chunkZ: Math.floor(index / 16),
+    }));
+
+    expect(chunkFetchRanges(chunks)).toEqual([
+      { minChunkX: 0, maxChunkX: 15, minChunkZ: 0, maxChunkZ: 15 },
+      { minChunkX: 0, maxChunkX: 15, minChunkZ: 16, maxChunkZ: 16 },
+    ]);
   });
 
   it("converts Minecraft coordinates to the Leaflet CRS without flipping X", () => {

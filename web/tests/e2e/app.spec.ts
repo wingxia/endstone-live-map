@@ -1,4 +1,37 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
+
+type TestChunk = {
+  world: string;
+  dimension: string;
+  chunkX: number;
+  chunkZ: number;
+  palette: string[];
+  blocks: number[];
+  heights: number[];
+  updatedAt: number;
+};
+
+type TestWorld = {
+  version: number;
+  world: string;
+  dimension: string;
+  status: string;
+  chunkCount: number;
+  importedAt: number;
+  updatedAt: number;
+  bounds: {
+    minChunkX: number;
+    maxChunkX: number;
+    minChunkZ: number;
+    maxChunkZ: number;
+    minBlockX: number;
+    maxBlockX: number;
+    minBlockZ: number;
+    maxBlockZ: number;
+  };
+  sampleChunks?: Array<{ chunkX: number; chunkZ: number }>;
+  topBlocks: Record<string, number>;
+};
 
 test("loads the map application shell", async ({ page }) => {
   await page.route("**/api/live", async (route) => route.abort());
@@ -65,8 +98,77 @@ test("loads the map application shell", async ({ page }) => {
   await expect(page.getByTestId("coordinate-hud")).toContainText("区块");
   await expect(page.getByTestId("coordinate-hud")).toContainText("方块");
   await expect(page.getByLabel("地图状态")).toContainText("区块");
+  await expect(page.getByLabel("地图状态")).toContainText("在线");
+  await expect(page.getByLabel("地图状态")).toContainText("领地");
   await expect(page.getByRole("heading", { name: "在线玩家" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "领地标注" })).toBeVisible();
+});
+
+test("copies locked map coordinates as x, y, z values", async ({ page }) => {
+  await mockBasicMap(page, {
+    chunk: {
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkX: 0,
+      chunkZ: 0,
+      palette: ["minecraft:grass_block"],
+      blocks: Array.from({ length: 256 }, () => 0),
+      heights: Array.from({ length: 256 }, () => 65),
+      updatedAt: 1,
+    },
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await page.evaluate(() => {
+    const values: string[] = [];
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          values.push(text);
+        },
+      },
+    });
+    (window as unknown as { __copiedCoordinates: string[] }).__copiedCoordinates = values;
+  });
+
+  await page.mouse.click(150, 150);
+  await page.getByTestId("coordinate-copy").click();
+
+  const copied = await page.evaluate(() => (window as unknown as { __copiedCoordinates: string[] }).__copiedCoordinates.at(-1));
+  expect(copied).toMatch(/^-?\d+, \d+, -?\d+$/);
+  expect(copied).not.toContain("X");
+  expect(copied).not.toContain("Y");
+  expect(copied).not.toContain("Z");
+  await expect(page.getByTestId("coordinate-copy")).toHaveAccessibleName(/已复制/);
+});
+
+test("keeps mobile portrait map controls compact and non-overlapping", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockBasicMap(page);
+  await page.goto("/");
+
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect(page.getByTestId("coordinate-copy")).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Overworld/ })).toBeVisible();
+  const overlap = await elementsOverlap(page, ".map-hud", ".coordinate-hud");
+  expect(overlap).toBe(false);
+  const mapCoverage = await hudMapCoverage(page);
+  expect(mapCoverage).toBeLessThan(0.26);
+});
+
+test("keeps mobile landscape hud clear of the main map view", async ({ page }) => {
+  await page.setViewportSize({ width: 844, height: 390 });
+  await mockBasicMap(page);
+  await page.goto("/");
+
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect(page.getByTestId("coordinate-copy")).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Overworld/ })).toBeVisible();
+  const overlap = await elementsOverlap(page, ".map-hud", ".coordinate-hud");
+  expect(overlap).toBe(false);
+  const mapCoverage = await hudMapCoverage(page);
+  expect(mapCoverage).toBeLessThan(0.3);
 });
 
 test("does not request chunk data before a world import exists", async ({ page }) => {
@@ -366,6 +468,87 @@ test("renders visible chunks progressively before slow neighboring chunk request
   await expect(page.getByTestId("map-canvas")).toBeVisible();
   await expect.poll(() => slowRequestCount).toBeGreaterThan(0);
   await expect.poll(() => pageHasGrassPixels(page), { timeout: 2_000 }).toBe(true);
+});
+
+test("coalesces mobile zoomed-out chunk loading and keeps dragging responsive", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const chunkQueries: Array<{ minChunkX: number; maxChunkX: number; minChunkZ: number; maxChunkZ: number }> = [];
+  const grassChunk = {
+    world: "Bedrock level",
+    dimension: "Overworld",
+    chunkX: 0,
+    chunkZ: 0,
+    palette: ["minecraft:grass_block"],
+    blocks: Array.from({ length: 256 }, () => 0),
+    heights: Array.from({ length: 256 }, () => 64),
+    updatedAt: 1,
+  };
+
+  await mockBasicMap(page, {
+    world: {
+      version: 1,
+      world: "Bedrock level",
+      dimension: "Overworld",
+      status: "complete",
+      chunkCount: 289,
+      importedAt: 1,
+      updatedAt: 1,
+      bounds: {
+        minChunkX: -64,
+        maxChunkX: 64,
+        minChunkZ: -64,
+        maxChunkZ: 64,
+        minBlockX: -1024,
+        maxBlockX: 1039,
+        minBlockZ: -1024,
+        maxBlockZ: 1039,
+      },
+      sampleChunks: [{ chunkX: 0, chunkZ: 0 }],
+      topBlocks: { "minecraft:grass_block": 256 },
+    },
+    chunkRoute: async (route) => {
+      const url = new URL(route.request().url());
+      const query = {
+        minChunkX: Number(url.searchParams.get("minChunkX")),
+        maxChunkX: Number(url.searchParams.get("maxChunkX")),
+        minChunkZ: Number(url.searchParams.get("minChunkZ")),
+        maxChunkZ: Number(url.searchParams.get("maxChunkZ")),
+      };
+      chunkQueries.push(query);
+      const includesGrass =
+        query.minChunkX <= grassChunk.chunkX &&
+        query.maxChunkX >= grassChunk.chunkX &&
+        query.minChunkZ <= grassChunk.chunkZ &&
+        query.maxChunkZ >= grassChunk.chunkZ;
+      const missing: Array<{ chunkX: number; chunkZ: number }> = [];
+      for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
+        for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
+          if (!(includesGrass && chunkX === grassChunk.chunkX && chunkZ === grassChunk.chunkZ)) {
+            missing.push({ chunkX, chunkZ });
+          }
+        }
+      }
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: includesGrass ? [grassChunk] : [], missing }) });
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
+
+  for (let index = 0; index < 4; index += 1) {
+    await page.getByRole("button", { name: "Zoom out" }).click();
+  }
+  await page.waitForTimeout(250);
+  const largestRange = Math.max(...chunkQueries.map(rangeChunkCount));
+  expect(largestRange).toBeGreaterThan(1);
+  expect(Math.max(...chunkQueries.map(rangeChunkCount))).toBeLessThanOrEqual(256);
+  expect(chunkQueries.filter((query) => rangeChunkCount(query) > 1).length).toBeLessThanOrEqual(12);
+
+  const before = await mapPaneTransform(page);
+  await dragMap(page, 260, 220, 90, 220);
+  await expect.poll(() => mapPaneTransform(page)).not.toBe(before);
+  await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
 });
 
 test("keeps first load scoped to the initial viewport instead of fitting every imported chunk", async ({ page }) => {
@@ -1299,6 +1482,113 @@ async function pageHasGrassPixels(page: Page) {
       return false;
     });
   });
+}
+
+async function mockBasicMap(
+  page: Page,
+  options: {
+    world?: TestWorld;
+    chunk?: TestChunk;
+    chunkRoute?: (route: Route) => Promise<void>;
+  } = {},
+) {
+  const chunk =
+    options.chunk ||
+    ({
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkX: 0,
+      chunkZ: 0,
+      palette: ["minecraft:grass_block"],
+      blocks: Array.from({ length: 256 }, () => 0),
+      heights: Array.from({ length: 256 }, () => 64),
+      updatedAt: 1,
+    } satisfies TestChunk);
+  const world =
+    options.world ||
+    ({
+      version: 1,
+      world: "Bedrock level",
+      dimension: "Overworld",
+      status: "complete",
+      chunkCount: 1,
+      importedAt: 1,
+      updatedAt: 1,
+      bounds: {
+        minChunkX: chunk.chunkX,
+        maxChunkX: chunk.chunkX,
+        minChunkZ: chunk.chunkZ,
+        maxChunkZ: chunk.chunkZ,
+        minBlockX: chunk.chunkX * 16,
+        maxBlockX: chunk.chunkX * 16 + 15,
+        minBlockZ: chunk.chunkZ * 16,
+        maxBlockZ: chunk.chunkZ * 16 + 15,
+      },
+      sampleChunks: [{ chunkX: chunk.chunkX, chunkZ: chunk.chunkZ }],
+      topBlocks: { "minecraft:grass_block": 256 },
+    } satisfies TestWorld);
+
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ worlds: [world] }) });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    if (options.chunkRoute) {
+      await options.chunkRoute(route);
+      return;
+    }
+    const url = new URL(route.request().url());
+    const query = {
+      minChunkX: Number(url.searchParams.get("minChunkX")),
+      maxChunkX: Number(url.searchParams.get("maxChunkX")),
+      minChunkZ: Number(url.searchParams.get("minChunkZ")),
+      maxChunkZ: Number(url.searchParams.get("maxChunkZ")),
+    };
+    const includesChunk = queryIncludesChunk(query, chunk.chunkX, chunk.chunkZ);
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: includesChunk ? [chunk] : [], missing: [] }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({ status: 404, body: "texture manifest not found" });
+  });
+}
+
+async function elementsOverlap(page: Page, firstSelector: string, secondSelector: string) {
+  return page.evaluate(
+    ([first, second]) => {
+      const firstEl = document.querySelector(first);
+      const secondEl = document.querySelector(second);
+      if (!firstEl || !secondEl) {
+        return false;
+      }
+      const a = firstEl.getBoundingClientRect();
+      const b = secondEl.getBoundingClientRect();
+      return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    },
+    [firstSelector, secondSelector],
+  );
+}
+
+async function hudMapCoverage(page: Page) {
+  return page.evaluate(() => {
+    const map = document.querySelector(".map-surface")?.getBoundingClientRect();
+    const huds = [...document.querySelectorAll(".map-hud, .coordinate-hud")].map((el) => el.getBoundingClientRect());
+    if (!map) {
+      return 1;
+    }
+    const hudArea = huds.reduce((sum, rect) => sum + rect.width * rect.height, 0);
+    return hudArea / (map.width * map.height);
+  });
+}
+
+async function mapPaneTransform(page: Page) {
+  return page.evaluate(() => window.getComputedStyle(document.querySelector(".leaflet-map-pane") as Element).transform);
+}
+
+function rangeChunkCount(query: { minChunkX: number; maxChunkX: number; minChunkZ: number; maxChunkZ: number }) {
+  return (query.maxChunkX - query.minChunkX + 1) * (query.maxChunkZ - query.minChunkZ + 1);
 }
 
 async function pageHasVisibleGrassTile(page: Page) {

@@ -34,6 +34,7 @@ textarea {
   min-width: 0;
   min-height: 100vh;
   border-right: 1px solid #26313c;
+  overflow: hidden;
 }
 
 .map-canvas {
@@ -48,11 +49,12 @@ textarea {
   top: 16px;
   z-index: 500;
   display: grid;
-  grid-template-columns: repeat(9, auto);
-  gap: 8px;
+  grid-template-columns: repeat(4, auto);
+  gap: 0;
   align-items: center;
   min-height: 38px;
-  padding: 8px 10px;
+  max-width: calc(100% - 32px);
+  padding: 5px;
   border: 1px solid rgba(94, 113, 129, 0.42);
   border-radius: 8px;
   background: rgba(13, 19, 26, 0.82);
@@ -62,9 +64,37 @@ textarea {
   font-size: 12px;
 }
 
+.map-hud-item {
+  display: grid;
+  gap: 2px;
+  min-width: 70px;
+  padding: 5px 10px;
+  border-left: 1px solid rgba(94, 113, 129, 0.26);
+}
+
+.map-hud-item:first-child {
+  border-left: 0;
+}
+
+.map-hud-item span {
+  color: #8192a2;
+  font-size: 11px;
+  line-height: 1;
+}
+
 .map-hud strong {
   color: #58d39c;
   font-size: 14px;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.map-hud-dimension {
+  min-width: 104px;
+}
+
+.map-hud-dimension strong {
+  color: #e7edf3;
 }
 
 .coordinate-hud {
@@ -73,7 +103,7 @@ textarea {
   bottom: 16px;
   z-index: 500;
   display: grid;
-  grid-template-columns: repeat(5, auto);
+  grid-template-columns: auto repeat(5, auto);
   gap: 10px;
   align-items: center;
   max-width: min(760px, calc(100% - 32px));
@@ -85,6 +115,56 @@ textarea {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
   backdrop-filter: blur(12px);
   font-size: 12px;
+}
+
+.coordinate-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 104px;
+  min-height: 42px;
+  padding: 6px 10px;
+  border: 1px solid #2e473f;
+  border-radius: 7px;
+  background: #17332e;
+  color: #bdf4d8;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    transform 140ms ease;
+}
+
+.coordinate-copy:hover {
+  border-color: #58d39c;
+  background: #1d413a;
+}
+
+.coordinate-copy:active {
+  transform: translateY(1px);
+}
+
+.coordinate-copy:focus-visible {
+  outline: 2px solid #58d39c;
+  outline-offset: 2px;
+}
+
+.coordinate-copy span {
+  color: #90d4b5;
+}
+
+.coordinate-copy strong {
+  color: #f0fff8;
+}
+
+.coordinate-copy em {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #bdf4d8;
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1;
 }
 
 .coordinate-hud div {
@@ -332,20 +412,116 @@ h2 {
 
   .map-hud {
     left: 10px;
-    right: 10px;
     top: 10px;
-    grid-template-columns: auto auto auto auto auto;
+    grid-template-columns: repeat(2, minmax(66px, auto));
+    max-width: min(268px, calc(100% - 20px));
+    padding: 4px;
+    font-size: 11px;
+  }
+
+  .map-hud-item {
+    min-width: 0;
+    padding: 5px 7px;
+    border-left: 0;
+  }
+
+  .map-hud-item:nth-child(2n) {
+    border-left: 1px solid rgba(94, 113, 129, 0.22);
+  }
+
+  .map-hud-item:nth-child(n + 3) {
+    border-top: 1px solid rgba(94, 113, 129, 0.22);
+  }
+
+  .map-hud-item span {
+    font-size: 10px;
+  }
+
+  .map-hud strong {
+    font-size: 12px;
+  }
+
+  .map-hud-dimension {
+    min-width: 0;
   }
 
   .coordinate-hud {
     left: 10px;
-    right: 10px;
     bottom: 10px;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    max-width: none;
+    grid-template-columns: auto repeat(2, minmax(0, auto));
+    gap: 6px 8px;
+    max-width: min(336px, calc(100% - 20px));
+    padding: 7px;
+    font-size: 11px;
+  }
+
+  .coordinate-copy {
+    grid-row: span 2;
+    min-width: 112px;
+    min-height: 44px;
+    padding: 6px 8px;
+  }
+
+  .coordinate-copy em {
+    font-size: 0;
+  }
+
+  .coordinate-copy em svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .coordinate-hud strong {
+    font-size: 12px;
+  }
+
+  .coordinate-primary {
+    min-width: 112px;
+  }
+
+  .coordinate-block {
+    max-width: 168px;
+    min-width: 0;
   }
 
   .side-panel {
     max-height: none;
+  }
+}
+
+@media (max-width: 900px) and (orientation: landscape), (max-height: 520px) and (max-width: 1100px) {
+  .map-surface {
+    min-height: 54vh;
+  }
+
+  .map-canvas {
+    height: 54vh;
+  }
+
+  .map-hud {
+    grid-template-columns: repeat(4, auto);
+    max-width: min(360px, calc(100% - 20px));
+  }
+
+  .map-hud-item {
+    border-top: 0;
+    border-left: 1px solid rgba(94, 113, 129, 0.22);
+  }
+
+  .map-hud-item:first-child {
+    border-left: 0;
+  }
+
+  .coordinate-hud {
+    grid-template-columns: auto auto auto;
+    max-width: min(390px, calc(100% - 20px));
+  }
+
+  .coordinate-copy {
+    grid-row: auto;
+  }
+
+  .coordinate-block {
+    display: none;
   }
 }

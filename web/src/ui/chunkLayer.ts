@@ -20,6 +20,7 @@ const TILE_SIZE = 256;
 const MIN_ZOOM = 0;
 const MAX_ZOOM = 4;
 const TILE_KEEP_BUFFER = 2;
+const MAX_CHUNKS_PER_FETCH = 256;
 
 export const INITIAL_MAP_ZOOM = 4;
 
@@ -89,6 +90,8 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     private readonly chunkCache = new Map<string, ChunkSnapshot>();
     private readonly missingChunkCache = new Set<string>();
     private readonly pendingChunkRequests = new Map<string, Promise<void>>();
+    private pendingRedrawRanges: ChunkFetchRange[] = [];
+    private pendingRedrawFrame = 0;
     private dataVersion = 0;
     private atlasPromise: Promise<AtlasResource> | null = null;
 
@@ -269,7 +272,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       const fetchRequests = chunkFetchRanges(uncachedChunks).map((range) =>
         this.fetchChunkRange(context, range, {
           cacheBust,
-          onSettled: () => this.redrawVisibleTilesForRange(context, range),
+          onSettled: () => this.queueVisibleTileRedrawForRange(context, range),
         }),
       );
       return Promise.all([...pendingRequests, ...fetchRequests]).then(() => undefined);
@@ -334,13 +337,29 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       drawTileChunks(ctx, chunks, tileRange, atlas);
     }
 
-    private redrawVisibleTilesForRange(context: TileDrawContext, range: ChunkFetchRange) {
+    private queueVisibleTileRedrawForRange(context: TileDrawContext, range: ChunkFetchRange) {
       if (!this.isCurrentTileContext(context)) {
+        return;
+      }
+      this.pendingRedrawRanges.push(range);
+      if (this.pendingRedrawFrame) {
+        return;
+      }
+      this.pendingRedrawFrame = window.requestAnimationFrame(() => {
+        this.pendingRedrawFrame = 0;
+        const ranges = this.pendingRedrawRanges;
+        this.pendingRedrawRanges = [];
+        this.redrawVisibleTilesForRanges(context, ranges);
+      });
+    }
+
+    private redrawVisibleTilesForRanges(context: TileDrawContext, ranges: ChunkFetchRange[]) {
+      if (!this.isCurrentTileContext(context) || ranges.length === 0) {
         return;
       }
       const internals = this as unknown as GridLayerInternals;
       for (const tile of Object.values(internals._tiles || {})) {
-        if (!tile.current || !(tile.el instanceof HTMLCanvasElement) || !tileIntersectsChunkRange(tile.coords, range)) {
+        if (!tile.current || !(tile.el instanceof HTMLCanvasElement) || !ranges.some((range) => tileIntersectsChunkRange(tile.coords, range))) {
           continue;
         }
         void this.drawTile(tile.el, tile.coords, this.currentDrawContext(), { preserveExisting: true }).catch(() => undefined);
@@ -419,7 +438,7 @@ interface TileChunkRange {
   scale: number;
 }
 
-interface ChunkFetchRange {
+export interface ChunkFetchRange {
   minChunkX: number;
   maxChunkX: number;
   minChunkZ: number;
@@ -493,15 +512,15 @@ function chunksFromCache(cache: Map<string, ChunkSnapshot>, world: string, dimen
   return chunks;
 }
 
-function chunkFetchRanges(chunks: Array<{ chunkX: number; chunkZ: number }>): ChunkFetchRange[] {
+export function chunkFetchRanges(chunks: Array<{ chunkX: number; chunkZ: number }>): ChunkFetchRange[] {
   const byZ = new Map<number, number[]>();
   for (const chunk of chunks) {
     const row = byZ.get(chunk.chunkZ) || [];
     row.push(chunk.chunkX);
     byZ.set(chunk.chunkZ, row);
   }
-  const ranges: ChunkFetchRange[] = [];
-  for (const [chunkZ, chunkXs] of byZ) {
+  const rowRanges: ChunkFetchRange[] = [];
+  for (const [chunkZ, chunkXs] of [...byZ.entries()].sort((a, b) => a[0] - b[0])) {
     chunkXs.sort((a, b) => a - b);
     let start = chunkXs[0];
     let end = start;
@@ -511,13 +530,38 @@ function chunkFetchRanges(chunks: Array<{ chunkX: number; chunkZ: number }>): Ch
         end = chunkX;
         continue;
       }
-      ranges.push({ minChunkX: start, maxChunkX: end, minChunkZ: chunkZ, maxChunkZ: chunkZ });
+      rowRanges.push({ minChunkX: start, maxChunkX: end, minChunkZ: chunkZ, maxChunkZ: chunkZ });
       start = chunkX;
       end = chunkX;
     }
-    ranges.push({ minChunkX: start, maxChunkX: end, minChunkZ: chunkZ, maxChunkZ: chunkZ });
+    rowRanges.push({ minChunkX: start, maxChunkX: end, minChunkZ: chunkZ, maxChunkZ: chunkZ });
+  }
+
+  const ranges: ChunkFetchRange[] = [];
+  for (const rowRange of rowRanges) {
+    const previous = ranges.at(-1);
+    if (
+      previous &&
+      previous.minChunkX === rowRange.minChunkX &&
+      previous.maxChunkX === rowRange.maxChunkX &&
+      previous.maxChunkZ + 1 === rowRange.minChunkZ &&
+      chunkCountForRange({
+        minChunkX: previous.minChunkX,
+        maxChunkX: previous.maxChunkX,
+        minChunkZ: previous.minChunkZ,
+        maxChunkZ: rowRange.maxChunkZ,
+      }) <= MAX_CHUNKS_PER_FETCH
+    ) {
+      previous.maxChunkZ = rowRange.maxChunkZ;
+      continue;
+    }
+    ranges.push({ ...rowRange });
   }
   return ranges;
+}
+
+function chunkCountForRange(range: ChunkFetchRange) {
+  return (range.maxChunkX - range.minChunkX + 1) * (range.maxChunkZ - range.minChunkZ + 1);
 }
 
 function chunkKeysForRange(world: string, dimension: string, range: ChunkFetchRange) {

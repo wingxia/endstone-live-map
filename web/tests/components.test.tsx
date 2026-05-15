@@ -3,7 +3,18 @@ import { describe, expect, it } from "vitest";
 
 import { PlayerList } from "../src/ui/PlayerList";
 import { LandList } from "../src/ui/LandList";
+import { coordinateCopyText } from "../src/ui/MapCanvas";
 import type { LandClaim } from "../src/api";
+
+describe("MapCanvas coordinate helpers", () => {
+  it("formats copied coordinates as bare x, y, z values", () => {
+    expect(coordinateCopyText({ x: 44, height: 65, z: 80 })).toBe("44, 65, 80");
+  });
+
+  it("falls back to y=0 before block height is loaded", () => {
+    expect(coordinateCopyText({ x: -12, height: Number.NaN, z: 35 })).toBe("-12, 0, 35");
+  });
+});
 
 describe("PlayerList", () => {
   it("shows online player coordinates", () => {

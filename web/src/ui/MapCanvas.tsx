@@ -1,3 +1,4 @@
+import { Clipboard, ClipboardCheck } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type LandClaim, type PlayerState, type WorldMeta } from "../api";
@@ -39,6 +40,7 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
   } | null>(null);
   const [coordinate, setCoordinate] = useState<CoordinateState>(() => buildCoordinateState(0, 0, null, false));
   const [mapReady, setMapReady] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const lockedRef = useRef(false);
   const autoFitKeyRef = useRef("");
 
@@ -249,16 +251,46 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
     };
   }, [mapReady, players]);
 
+  useEffect(() => {
+    if (copyState === "idle") {
+      return;
+    }
+    const resetTimer = window.setTimeout(() => setCopyState("idle"), 1400);
+    return () => window.clearTimeout(resetTimer);
+  }, [copyState]);
+
+  const copyText = coordinateCopyText(coordinate);
+  const copyLabel = copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败" : "复制坐标";
+
+  const handleCopyCoordinate = async () => {
+    try {
+      await navigator.clipboard.writeText(copyText);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  };
+
   return (
     <>
       <div ref={mapRef} className="map-canvas" data-testid="map-canvas" />
       <div className="coordinate-hud" data-testid="coordinate-hud" aria-label="当前地图坐标">
-        <div>
+        <button
+          type="button"
+          className="coordinate-copy coordinate-primary"
+          aria-label={`${copyLabel}: ${copyText}`}
+          data-testid="coordinate-copy"
+          onClick={handleCopyCoordinate}
+        >
           <span>{coordinate.locked ? "已锁定" : "指针"}</span>
           <strong>
             X {coordinate.x}, Z {coordinate.z}
           </strong>
-        </div>
+          <em>
+            {copyState === "copied" ? <ClipboardCheck size={14} aria-hidden="true" /> : <Clipboard size={14} aria-hidden="true" />}
+            {copyLabel}
+          </em>
+        </button>
         <div>
           <span>Y</span>
           <strong>{Number.isFinite(coordinate.height) ? coordinate.height : "--"}</strong>
@@ -302,6 +334,11 @@ function buildCoordinateState(
     block: block?.block || "未加载",
     locked,
   };
+}
+
+export function coordinateCopyText(coordinate: { x: number; height: number; z: number }): string {
+  const y = Number.isFinite(coordinate.height) ? coordinate.height : 0;
+  return `${coordinate.x}, ${y}, ${coordinate.z}`;
 }
 
 function isWorldMetaForMap(worldMeta: WorldMeta | null, world: string, dimension: string): worldMeta is WorldMeta {

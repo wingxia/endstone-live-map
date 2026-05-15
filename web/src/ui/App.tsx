@@ -78,13 +78,22 @@ export function App() {
           focusTarget={focusTarget}
         />
         <div className="map-hud" aria-label="地图状态">
-          <span>{selectedDimension}</span>
-          <strong>{selectedWorldMeta ? selectedWorldMeta.chunkCount.toLocaleString() : "0"}</strong>
-          <span>区块</span>
-          <strong>{selectedPlayers.length}</strong>
-          <span>在线</span>
-          <strong>{publicLands.length}</strong>
-          <span>领地</span>
+          <div className="map-hud-item map-hud-dimension">
+            <span>维度</span>
+            <strong>{selectedDimension}</strong>
+          </div>
+          <div className="map-hud-item">
+            <span>区块</span>
+            <strong>{selectedWorldMeta ? selectedWorldMeta.chunkCount.toLocaleString() : "0"}</strong>
+          </div>
+          <div className="map-hud-item">
+            <span>在线</span>
+            <strong>{selectedPlayers.length}</strong>
+          </div>
+          <div className="map-hud-item">
+            <span>领地</span>
+            <strong>{publicLands.length}</strong>
+          </div>
         </div>
       </section>
 
