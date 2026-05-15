@@ -6,6 +6,7 @@
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
 #include "livemap/tile_math.hpp"
+#include "livemap/upload_queue.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -57,6 +58,39 @@ void testDirtyBlockTracker()
     assert(tracker.size() == 1);
     tracker.clear();
     assert(tracker.empty());
+}
+
+void testUploadPriorityQueue()
+{
+    livemap::PrioritizedUploadQueue<int> queue;
+    assert(queue.push(1, livemap::UploadPriority::Low, 3));
+    assert(queue.push(2, livemap::UploadPriority::Normal, 3));
+    assert(queue.push(3, livemap::UploadPriority::High, 3));
+    assert(!queue.push(4, livemap::UploadPriority::High, 3));
+    assert(queue.size() == 3);
+
+    auto first = queue.pop();
+    auto second = queue.pop();
+    auto third = queue.pop();
+    assert(first.has_value() && *first == 3);
+    assert(second.has_value() && *second == 2);
+    assert(third.has_value() && *third == 1);
+    assert(!queue.pop().has_value());
+}
+
+void testLatestUploadSlot()
+{
+    livemap::LatestUploadSlot<int> slot;
+    assert(slot.empty());
+    assert(!slot.replace(10));
+    assert(slot.size() == 1);
+    assert(slot.replace(20));
+    assert(slot.replacedCount() == 1);
+
+    auto item = slot.take();
+    assert(item.has_value() && *item == 20);
+    assert(slot.empty());
+    assert(!slot.take().has_value());
 }
 
 void testChunkMath()
@@ -495,6 +529,8 @@ int main()
     testLandConfigParsing();
     testDirtyTracker();
     testDirtyBlockTracker();
+    testUploadPriorityQueue();
+    testLatestUploadSlot();
     testProtocol();
     testBase64();
     testChunkSnapshotFingerprint();

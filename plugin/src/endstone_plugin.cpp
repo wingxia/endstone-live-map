@@ -5,6 +5,7 @@
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
 #include "livemap/tile_math.hpp"
+#include "livemap/upload_queue.hpp"
 
 #include <endstone/endstone.hpp>
 
@@ -127,6 +128,7 @@ struct UploadJob {
     std::vector<livemap::ChunkSnapshot> snapshots;
     std::size_t update_count{};
     bool resample_after_success{};
+    std::int64_t queued_at_ms{};
 };
 
 struct UploadResult {
@@ -135,6 +137,9 @@ struct UploadResult {
     std::vector<livemap::ChunkSnapshot> snapshots;
     std::size_t update_count{};
     bool resample_after_success{};
+    std::int64_t queued_at_ms{};
+    std::int64_t started_at_ms{};
+    std::int64_t finished_at_ms{};
     livemap::TransportResult transport;
 };
 
@@ -224,12 +229,14 @@ public:
 
     bool enqueue(UploadJob job)
     {
+        const auto priority = priorityFor(job.kind);
+        job.queued_at_ms = nowMs();
         {
             std::scoped_lock lock(mutex_);
             if (stopping_ || jobs_.size() >= max_queue_size_) {
                 return false;
             }
-            jobs_.push_back(std::move(job));
+            jobs_.push(std::move(job), priority, max_queue_size_);
         }
         cv_.notify_one();
         return true;
@@ -280,25 +287,159 @@ private:
                 if (stopping_ && jobs_.empty()) {
                     return;
                 }
-                job = std::move(jobs_.front());
-                jobs_.pop_front();
+                auto next = jobs_.pop();
+                if (!next.has_value()) {
+                    continue;
+                }
+                job = std::move(*next);
             }
 
+            const auto started_at_ms = nowMs();
             auto transport = livemap::postPluginJson(settings_, job.path, job.json);
+            const auto finished_at_ms = nowMs();
             {
                 std::scoped_lock lock(mutex_);
                 results_.push_back({job.kind, std::move(job.chunks), std::move(job.snapshots), job.update_count,
-                                    job.resample_after_success, std::move(transport)});
+                                    job.resample_after_success, job.queued_at_ms, started_at_ms, finished_at_ms,
+                                    std::move(transport)});
             }
         }
+    }
+
+    [[nodiscard]] static livemap::UploadPriority priorityFor(UploadJob::Kind kind)
+    {
+        switch (kind) {
+        case UploadJob::Kind::BlockUpdates:
+            return livemap::UploadPriority::High;
+        case UploadJob::Kind::ChunkBatch:
+            return livemap::UploadPriority::Normal;
+        case UploadJob::Kind::Lands:
+            return livemap::UploadPriority::Low;
+        case UploadJob::Kind::PlayerSnapshot:
+            return livemap::UploadPriority::High;
+        }
+        return livemap::UploadPriority::Normal;
     }
 
     livemap::LiveMapSettings settings_;
     std::size_t max_queue_size_{};
     mutable std::mutex mutex_;
     std::condition_variable cv_;
-    std::deque<UploadJob> jobs_;
+    livemap::PrioritizedUploadQueue<UploadJob> jobs_;
     std::deque<UploadResult> results_;
+    bool stopping_ = false;
+    std::thread worker_;
+};
+
+class LatestUploadDispatcher {
+public:
+    LatestUploadDispatcher(livemap::LiveMapSettings settings, std::string path)
+        : settings_(std::move(settings)), path_(std::move(path)), worker_([this] { workerLoop(); })
+    {
+    }
+
+    ~LatestUploadDispatcher()
+    {
+        stop();
+    }
+
+    LatestUploadDispatcher(const LatestUploadDispatcher &) = delete;
+    LatestUploadDispatcher &operator=(const LatestUploadDispatcher &) = delete;
+
+    void publish(std::string json, std::size_t item_count)
+    {
+        {
+            std::scoped_lock lock(mutex_);
+            const bool replaced = pending_.replace({std::move(json), item_count, nowMs()});
+            if (replaced) {
+                ++replaced_count_;
+            }
+        }
+        cv_.notify_one();
+    }
+
+    std::vector<UploadResult> drainResults()
+    {
+        std::scoped_lock lock(mutex_);
+        std::vector<UploadResult> results;
+        results.reserve(results_.size());
+        while (!results_.empty()) {
+            results.push_back(std::move(results_.front()));
+            results_.pop_front();
+        }
+        return results;
+    }
+
+    [[nodiscard]] std::size_t pendingJobs() const
+    {
+        std::scoped_lock lock(mutex_);
+        return pending_.size();
+    }
+
+    [[nodiscard]] std::size_t replacedCount() const
+    {
+        std::scoped_lock lock(mutex_);
+        return replaced_count_;
+    }
+
+    void stop()
+    {
+        {
+            std::scoped_lock lock(mutex_);
+            if (stopping_) {
+                return;
+            }
+            stopping_ = true;
+            pending_.clear();
+        }
+        cv_.notify_one();
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+private:
+    struct PendingPayload {
+        std::string json;
+        std::size_t item_count{};
+        std::int64_t queued_at_ms{};
+    };
+
+    void workerLoop()
+    {
+        while (true) {
+            PendingPayload payload;
+            {
+                std::unique_lock lock(mutex_);
+                cv_.wait(lock, [this] { return stopping_ || !pending_.empty(); });
+                if (stopping_ && pending_.empty()) {
+                    return;
+                }
+                auto next = pending_.take();
+                if (!next.has_value()) {
+                    continue;
+                }
+                payload = std::move(*next);
+            }
+
+            const auto started_at_ms = nowMs();
+            auto transport = livemap::postPluginJson(settings_, path_, payload.json);
+            const auto finished_at_ms = nowMs();
+            {
+                std::scoped_lock lock(mutex_);
+                results_.push_back({UploadJob::Kind::PlayerSnapshot, {}, {}, payload.item_count, false,
+                                    payload.queued_at_ms, started_at_ms, finished_at_ms, std::move(transport)});
+            }
+        }
+    }
+
+    livemap::LiveMapSettings settings_;
+    std::string path_;
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    livemap::LatestUploadSlot<PendingPayload> pending_;
+    std::deque<UploadResult> results_;
+    std::size_t replaced_count_ = 0;
     bool stopping_ = false;
     std::thread worker_;
 };
@@ -343,6 +484,7 @@ public:
         loadChunkBaselines();
         upload_dispatcher_ =
             std::make_unique<UploadDispatcher>(settings_, static_cast<std::size_t>(settings_.max_upload_queue_size));
+        player_dispatcher_ = std::make_unique<LatestUploadDispatcher>(settings_, "/api/plugin/live");
         active_ = true;
         listener_ = std::make_unique<LiveMapListener>(*this);
         registerEvent(&LiveMapListener::onBlockPlace, *listener_, endstone::EventPriority::Monitor, true);
@@ -401,6 +543,10 @@ public:
         processUploadResults();
         if (upload_dispatcher_ != nullptr) {
             upload_dispatcher_->stop();
+        }
+        if (player_dispatcher_ != nullptr) {
+            player_dispatcher_->stop();
+            processPlayerUploadResults();
         }
         persistChunkBaselines();
         background_log_.info("Endstone Live Map disabled");
@@ -660,10 +806,11 @@ private:
             return;
         }
 
-        if (!enqueueUpload({UploadJob::Kind::PlayerSnapshot, "/api/plugin/live",
-                            livemap::serializePlayerSnapshot(players), {}, {}, 0, false})) {
-            background_log_.warning("Dropped live map player snapshot because upload queue is full.");
+        if (player_dispatcher_ == nullptr) {
+            background_log_.warning("Dropped live map player snapshot because player upload dispatcher is unavailable.");
+            return;
         }
+        player_dispatcher_->publish(livemap::serializePlayerSnapshot(players), players.size());
     }
 
     void publishLands()
@@ -1068,8 +1215,34 @@ private:
         return transport.curl_code != 0 || transport.response_code == 0 || transport.response_code >= 500;
     }
 
+    void processPlayerUploadResults()
+    {
+        if (player_dispatcher_ == nullptr) {
+            return;
+        }
+
+        for (auto &result : player_dispatcher_->drainResults()) {
+            const auto wait_ms = std::max<std::int64_t>(0, result.started_at_ms - result.queued_at_ms);
+            const auto duration_ms = std::max<std::int64_t>(0, result.finished_at_ms - result.started_at_ms);
+            if (result.transport.ok) {
+                background_log_.info("Uploaded player snapshot for ", result.update_count, " player(s) HTTP ",
+                                     result.transport.response_code, " wait=", wait_ms, "ms duration=", duration_ms,
+                                     "ms pending=", player_dispatcher_->pendingJobs(), " replaced=",
+                                     player_dispatcher_->replacedCount(), ".");
+                continue;
+            }
+            getLogger().error("Failed to upload player snapshot HTTP {} curl {} error={}",
+                              result.transport.response_code, result.transport.curl_code, result.transport.error);
+            background_log_.warning("Dropped latest player snapshot upload for ", result.update_count,
+                                    " player(s) HTTP ", result.transport.response_code, " curl ",
+                                    result.transport.curl_code, " wait=", wait_ms, "ms duration=", duration_ms,
+                                    "ms; next snapshot will replace it.");
+        }
+    }
+
     void processUploadResults()
     {
+        processPlayerUploadResults();
         if (upload_dispatcher_ == nullptr) {
             return;
         }
@@ -1102,12 +1275,6 @@ private:
                     background_log_.info("Uploaded ", result.update_count, " land claim(s) HTTP ",
                                          result.transport.response_code, ".");
                 }
-                continue;
-            }
-
-            if (result.kind == UploadJob::Kind::PlayerSnapshot) {
-                getLogger().error("Failed to upload player snapshot HTTP {} curl {} error={}",
-                                  result.transport.response_code, result.transport.curl_code, result.transport.error);
                 continue;
             }
 
@@ -1324,6 +1491,7 @@ private:
     std::shared_ptr<endstone::Task> land_task_;
     std::shared_ptr<endstone::Task> upload_result_task_;
     std::unique_ptr<UploadDispatcher> upload_dispatcher_;
+    std::unique_ptr<LatestUploadDispatcher> player_dispatcher_;
     mutable std::mutex state_mutex_;
     std::atomic_bool active_{false};
     livemap::DirtyBlockTracker dirty_blocks_;
