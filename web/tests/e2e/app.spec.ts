@@ -33,6 +33,11 @@ type TestWorld = {
   topBlocks: Record<string, number>;
 };
 
+const GRASS_TILE_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4AWN47yr2HwAGYAKXL4eRBgAAAABJRU5ErkJggg==",
+  "base64",
+);
+
 test("loads the map application shell", async ({ page }) => {
   await page.route("**/api/live", async (route) => route.abort());
   await page.route("**/api/lands?**", async (route) => {
@@ -185,6 +190,9 @@ test("does not request chunk data before a world import exists", async ({ page }
     chunkRequests += 1;
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
   });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    await route.fulfill({ status: 404, body: "tile not found" });
+  });
   await page.route("**/api/textures/manifest", async (route) => {
     await route.fulfill({ status: 404, body: "texture manifest not found" });
   });
@@ -264,6 +272,9 @@ test("keeps negative-z chunks rendered across zoom changes", async ({ page }) =>
       body: JSON.stringify({ chunks: includesTarget ? [targetChunk] : [], missing: [] }),
     });
   });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    await route.fulfill({ contentType: "image/png", body: GRASS_TILE_PNG });
+  });
   await page.route("**/api/textures/manifest", async (route) => {
     await route.fulfill({ status: 404, body: "texture manifest not found" });
   });
@@ -274,7 +285,7 @@ test("keeps negative-z chunks rendered across zoom changes", async ({ page }) =>
   await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
 
   await page.getByRole("button", { name: "Zoom out" }).click();
-  await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
+  await expect.poll(() => pageHasGrassImageTile(page)).toBe(true);
   await page.getByRole("button", { name: "Zoom in" }).click();
   await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
   expect(chunkQueries.some((query) => query.minChunkX <= 0 && query.maxChunkX >= 0 && query.minChunkZ <= -1 && query.maxChunkZ >= -1)).toBe(true);
@@ -473,6 +484,7 @@ test("renders visible chunks progressively before slow neighboring chunk request
 test("coalesces mobile zoomed-out chunk loading and keeps dragging responsive", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const chunkQueries: Array<{ minChunkX: number; maxChunkX: number; minChunkZ: number; maxChunkZ: number }> = [];
+  const imageTileRequests: string[] = [];
   const grassChunk = {
     world: "Bedrock level",
     dimension: "Overworld",
@@ -531,23 +543,74 @@ test("coalesces mobile zoomed-out chunk loading and keeps dragging responsive", 
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: includesGrass ? [grassChunk] : [], missing }) });
     },
   });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    imageTileRequests.push(route.request().url());
+    await route.fulfill({ contentType: "image/png", body: GRASS_TILE_PNG });
+  });
 
   await page.goto("/");
   await expect(page.getByTestId("map-canvas")).toBeVisible();
   await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
+  const chunkRequestsBeforeZoomOut = chunkQueries.length;
 
   for (let index = 0; index < 4; index += 1) {
     await page.getByRole("button", { name: "Zoom out" }).click();
   }
   await page.waitForTimeout(250);
-  const largestRange = Math.max(...chunkQueries.map(rangeChunkCount));
-  expect(largestRange).toBeGreaterThan(1);
-  expect(Math.max(...chunkQueries.map(rangeChunkCount))).toBeLessThanOrEqual(256);
-  expect(chunkQueries.filter((query) => rangeChunkCount(query) > 1).length).toBeLessThanOrEqual(12);
+  expect(chunkQueries.length).toBe(chunkRequestsBeforeZoomOut);
+  expect(imageTileRequests.some((url) => url.includes("/api/map-tiles/Bedrock_level/Overworld/z"))).toBe(true);
+  await expect.poll(() => pageHasGrassImageTile(page)).toBe(true);
 
   const before = await mapPaneTransform(page);
   await dragMap(page, 260, 220, 90, 220);
   await expect.poll(() => mapPaneTransform(page)).not.toBe(before);
+  await expect.poll(() => pageHasGrassImageTile(page)).toBe(true);
+});
+
+test("uses low zoom image tiles and keeps max zoom chunk JSON rendering", async ({ page }) => {
+  const chunkRequests: string[] = [];
+  const imageTileRequests: string[] = [];
+  await mockBasicMap(page, {
+    chunkRoute: async (route) => {
+      chunkRequests.push(route.request().url());
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          chunks: [
+            {
+              world: "Bedrock level",
+              dimension: "Overworld",
+              chunkX: 0,
+              chunkZ: 0,
+              palette: ["minecraft:grass_block"],
+              blocks: Array.from({ length: 256 }, () => 0),
+              heights: Array.from({ length: 256 }, () => 64),
+              updatedAt: 1,
+            },
+          ],
+          missing: [],
+        }),
+      });
+    },
+  });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    imageTileRequests.push(route.request().url());
+    await route.fulfill({ contentType: "image/png", body: GRASS_TILE_PNG });
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => chunkRequests.length).toBeGreaterThan(0);
+  await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
+  const maxZoomChunkRequests = chunkRequests.length;
+
+  await page.getByRole("button", { name: "Zoom out" }).click();
+  await expect.poll(() => imageTileRequests.some((url) => url.includes("/api/map-tiles/Bedrock_level/Overworld/z3/"))).toBe(true);
+  await page.waitForTimeout(250);
+  expect(chunkRequests.length).toBe(maxZoomChunkRequests);
+  await expect.poll(() => pageHasGrassImageTile(page)).toBe(true);
+
+  await page.getByRole("button", { name: "Zoom in" }).click();
   await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
 });
 
@@ -698,6 +761,53 @@ test("renders fallback map colors before the texture atlas finishes loading", as
   await page.goto("/");
   await expect(page.getByTestId("map-canvas")).toBeVisible();
   await expect.poll(() => pageHasGrassPixels(page), { timeout: 2_000 }).toBe(true);
+});
+
+test("adds height shading to max zoom canvas rendering", async ({ page }) => {
+  const shadedChunk = {
+    world: "Bedrock level",
+    dimension: "Overworld",
+    chunkX: 0,
+    chunkZ: 0,
+    palette: ["minecraft:grass_block"],
+    blocks: Array.from({ length: 256 }, () => 0),
+    heights: Array.from({ length: 256 }, (_, index) => {
+      const z = Math.floor(index / 16);
+      if (z < 4) return 48;
+      if (z > 11) return 155;
+      return 64;
+    }),
+    updatedAt: 1,
+  };
+
+  await mockBasicMap(page, {
+    chunk: shadedChunk,
+    world: {
+      version: 1,
+      world: "Bedrock level",
+      dimension: "Overworld",
+      status: "complete",
+      chunkCount: 1,
+      importedAt: 1,
+      updatedAt: 1,
+      bounds: {
+        minChunkX: 0,
+        maxChunkX: 0,
+        minChunkZ: 0,
+        maxChunkZ: 0,
+        minBlockX: 0,
+        maxBlockX: 15,
+        minBlockZ: 0,
+        maxBlockZ: 15,
+      },
+      sampleChunks: [{ chunkX: 0, chunkZ: 0 }],
+      topBlocks: { "minecraft:grass_block": 256 },
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => pageHasHeightShading(page)).toBe(true);
 });
 
 test("renders plant and cutout overlays without dark tile holes", async ({ page }) => {
@@ -1033,8 +1143,9 @@ test("renders stateful partial blocks without dark base holes", async ({ page })
   await expect.poll(() => firstChunkTileHasNoDarkHoles(page)).toBe(true);
 });
 
-test("requests live player chunks before a world import exists", async ({ page }) => {
+test("does not request chunk data before a world import exists when only live players are known", async ({ page }) => {
   let chunkRequests = 0;
+  let imageTileRequests = 0;
 
   await page.route("**/api/live", async (route) => route.abort());
   await page.route("**/api/lands?**", async (route) => {
@@ -1096,6 +1207,10 @@ test("requests live player chunks before a world import exists", async ({ page }
     chunkRequests += 1;
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
   });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    imageTileRequests += 1;
+    await route.fulfill({ status: 404, body: "tile not found" });
+  });
   await page.route("**/api/textures/manifest", async (route) => {
     await route.fulfill({ status: 404, body: "texture manifest not found" });
   });
@@ -1103,7 +1218,9 @@ test("requests live player chunks before a world import exists", async ({ page }
   await page.goto("/");
   await expect(page.getByText("Wing")).toBeVisible();
   await expect(page.getByTestId("map-empty-state")).toHaveCount(0);
-  await expect.poll(() => chunkRequests).toBeGreaterThan(0);
+  await page.waitForTimeout(1000);
+  expect(chunkRequests).toBe(0);
+  expect(imageTileRequests).toBeGreaterThan(0);
 });
 
 test("does not reset user zoom on live player refresh", async ({ page }) => {
@@ -1328,6 +1445,7 @@ test("renders land claims, point claims, and teleport markers", async ({ page })
 
 test("centers the map on clicked players and public land teleports", async ({ page }) => {
   const chunkQueries: Array<{ minChunkX: number; maxChunkX: number; minChunkZ: number; maxChunkZ: number }> = [];
+  const imageTileRequests: string[] = [];
 
   await page.addInitScript(() => {
     class MockWebSocket extends EventTarget {
@@ -1417,6 +1535,10 @@ test("centers the map on clicked players and public land teleports", async ({ pa
     });
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
   });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    imageTileRequests.push(route.request().url());
+    await route.fulfill({ status: 404, body: "tile not found" });
+  });
   await page.route("**/api/textures/manifest", async (route) => {
     await route.fulfill({ status: 404, body: "texture manifest not found" });
   });
@@ -1459,15 +1581,17 @@ test("centers the map on clicked players and public land teleports", async ({ pa
   await expect(page.getByText("主城区")).toBeVisible();
 
   await page.getByRole("button", { name: /Wing/ }).click();
-  await expect.poll(() => chunkQueries.some((query) => queryIncludesChunk(query, 32, -16))).toBe(true);
+  await expect.poll(() => chunkQueries.some((query) => queryIncludesChunk(query, 32, -16)) || mapTileRequestsIncludeChunk(imageTileRequests, 32, -16)).toBe(true);
 
   await page.getByRole("button", { name: /主城区/ }).click();
-  await expect.poll(() => chunkQueries.some((query) => queryIncludesChunk(query, -22, -30))).toBe(true);
+  await expect.poll(() => chunkQueries.some((query) => queryIncludesChunk(query, -22, -30)) || mapTileRequestsIncludeChunk(imageTileRequests, -22, -30)).toBe(true);
 });
 
 async function pageHasGrassPixels(page: Page) {
   return page.evaluate(() => {
-    const grass = [95, 159, 63];
+    const grass: [number, number, number] = [95, 159, 63];
+    const closeColor = (r: number, g: number, b: number, target: [number, number, number], tolerance: number) =>
+      Math.abs(r - target[0]) <= tolerance && Math.abs(g - target[1]) <= tolerance && Math.abs(b - target[2]) <= tolerance;
     return [...document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")].some((canvas) => {
       const ctx = canvas.getContext("2d");
       if (!ctx) {
@@ -1475,12 +1599,59 @@ async function pageHasGrassPixels(page: Page) {
       }
       const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
       for (let index = 0; index < data.length; index += 4) {
-        if (data[index] === grass[0] && data[index + 1] === grass[1] && data[index + 2] === grass[2] && data[index + 3] === 255) {
+        if (data[index + 3] === 255 && closeColor(data[index], data[index + 1], data[index + 2], grass, 48)) {
           return true;
         }
       }
       return false;
     });
+  });
+}
+
+async function pageHasGrassImageTile(page: Page) {
+  return page.evaluate(() =>
+    [...document.querySelectorAll<HTMLImageElement>("img.chunk-image-tile")].some((image) => {
+      const style = window.getComputedStyle(image);
+      const rect = image.getBoundingClientRect();
+      return (
+        image.complete &&
+        image.naturalWidth > 0 &&
+        style.visibility !== "hidden" &&
+        style.display !== "none" &&
+        Number(style.opacity) > 0 &&
+        rect.right > 0 &&
+        rect.bottom > 0 &&
+        rect.left < window.innerWidth &&
+        rect.top < window.innerHeight
+      );
+    }),
+  );
+}
+
+async function pageHasHeightShading(page: Page) {
+  return page.evaluate(() => {
+    const brightness = (index: number, data: Uint8ClampedArray) => data[index] + data[index + 1] + data[index + 2];
+    for (const canvas of document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")) {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        continue;
+      }
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let minBrightness = Infinity;
+      let maxBrightness = -Infinity;
+      for (let index = 0; index < data.length; index += 4) {
+        if (data[index + 3] !== 255 || data[index + 1] < data[index] || data[index + 1] < data[index + 2]) {
+          continue;
+        }
+        const value = brightness(index, data);
+        minBrightness = Math.min(minBrightness, value);
+        maxBrightness = Math.max(maxBrightness, value);
+      }
+      if (maxBrightness - minBrightness > 35) {
+        return true;
+      }
+    }
+    return false;
   });
 }
 
@@ -1587,13 +1758,11 @@ async function mapPaneTransform(page: Page) {
   return page.evaluate(() => window.getComputedStyle(document.querySelector(".leaflet-map-pane") as Element).transform);
 }
 
-function rangeChunkCount(query: { minChunkX: number; maxChunkX: number; minChunkZ: number; maxChunkZ: number }) {
-  return (query.maxChunkX - query.minChunkX + 1) * (query.maxChunkZ - query.minChunkZ + 1);
-}
-
 async function pageHasVisibleGrassTile(page: Page) {
   return page.evaluate(() => {
-    const grass = [95, 159, 63];
+    const grass: [number, number, number] = [95, 159, 63];
+    const closeColor = (r: number, g: number, b: number, target: [number, number, number], tolerance: number) =>
+      Math.abs(r - target[0]) <= tolerance && Math.abs(g - target[1]) <= tolerance && Math.abs(b - target[2]) <= tolerance;
     return [...document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")].some((canvas) => {
       const style = window.getComputedStyle(canvas);
       if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0) {
@@ -1609,7 +1778,7 @@ async function pageHasVisibleGrassTile(page: Page) {
       }
       const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
       for (let index = 0; index < data.length; index += 4) {
-        if (data[index] === grass[0] && data[index + 1] === grass[1] && data[index + 2] === grass[2] && data[index + 3] === 255) {
+        if (data[index + 3] === 255 && closeColor(data[index], data[index + 1], data[index + 2], grass, 48)) {
           return true;
         }
       }
@@ -1633,10 +1802,26 @@ function queryIncludesChunk(
   return query.minChunkX <= chunkX && query.maxChunkX >= chunkX && query.minChunkZ <= chunkZ && query.maxChunkZ >= chunkZ;
 }
 
+function mapTileRequestsIncludeChunk(urls: string[], chunkX: number, chunkZ: number) {
+  return urls.some((value) => {
+    const match = /\/api\/map-tiles\/[^/]+\/[^/]+\/z([0-3])\/(-?\d+)\/(-?\d+)\.png/.exec(value);
+    if (!match) {
+      return false;
+    }
+    const zoom = Number(match[1]);
+    const tileX = Number(match[2]);
+    const tileZ = Number(match[3]);
+    const chunksPerTile = 2 ** (4 - zoom);
+    return chunkX >= tileX * chunksPerTile && chunkX <= tileX * chunksPerTile + chunksPerTile - 1 && chunkZ >= tileZ * chunksPerTile && chunkZ <= tileZ * chunksPerTile + chunksPerTile - 1;
+  });
+}
+
 async function firstChunkTileHasNoDarkHoles(page: Page) {
   return page.evaluate(() => {
     const dark = [23, 32, 42];
-    const grass = [95, 159, 63];
+    const grass: [number, number, number] = [95, 159, 63];
+    const closeColor = (r: number, g: number, b: number, target: [number, number, number], tolerance: number) =>
+      Math.abs(r - target[0]) <= tolerance && Math.abs(g - target[1]) <= tolerance && Math.abs(b - target[2]) <= tolerance;
     for (const canvas of document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")) {
       const ctx = canvas.getContext("2d");
       if (!ctx) {
@@ -1655,7 +1840,7 @@ async function firstChunkTileHasNoDarkHoles(page: Page) {
             if (data[index] === dark[0] && data[index + 1] === dark[1] && data[index + 2] === dark[2]) {
               darkPixels += 1;
             }
-            if (data[index] === grass[0] && data[index + 1] === grass[1] && data[index + 2] === grass[2]) {
+            if (closeColor(data[index], data[index + 1], data[index + 2], grass, 48)) {
               grassPixels += 1;
             }
           }
@@ -1672,8 +1857,10 @@ async function firstChunkTileHasNoDarkHoles(page: Page) {
 async function leafBlockHasSolidFallbackUnderlay(page: Page) {
   return page.evaluate(() => {
     const dark = [23, 32, 42];
-    const atlas = [31, 91, 45];
-    const fallback = [63, 127, 56];
+    const atlas: [number, number, number] = [31, 91, 45];
+    const fallback: [number, number, number] = [63, 127, 56];
+    const closeColor = (r: number, g: number, b: number, target: [number, number, number], tolerance: number) =>
+      Math.abs(r - target[0]) <= tolerance && Math.abs(g - target[1]) <= tolerance && Math.abs(b - target[2]) <= tolerance;
     for (const canvas of document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")) {
       const ctx = canvas.getContext("2d");
       if (!ctx) {
@@ -1693,10 +1880,10 @@ async function leafBlockHasSolidFallbackUnderlay(page: Page) {
             if (data[index] === dark[0] && data[index + 1] === dark[1] && data[index + 2] === dark[2]) {
               darkOrTransparentPixels += 1;
             }
-            if (data[index] === atlas[0] && data[index + 1] === atlas[1] && data[index + 2] === atlas[2]) {
+            if (closeColor(data[index], data[index + 1], data[index + 2], atlas, 48)) {
               atlasPixels += 1;
             }
-            if (data[index] === fallback[0] && data[index + 1] === fallback[1] && data[index + 2] === fallback[2]) {
+            if (closeColor(data[index], data[index + 1], data[index + 2], fallback, 48)) {
               fallbackPixels += 1;
             }
           }
@@ -1712,6 +1899,8 @@ async function leafBlockHasSolidFallbackUnderlay(page: Page) {
 
 async function firstChunkTileHasColor(page: Page, color: [number, number, number]) {
   return page.evaluate(([r, g, b]) => {
+    const closeColor = (red: number, green: number, blue: number, target: [number, number, number], tolerance: number) =>
+      Math.abs(red - target[0]) <= tolerance && Math.abs(green - target[1]) <= tolerance && Math.abs(blue - target[2]) <= tolerance;
     for (const canvas of document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")) {
       const ctx = canvas.getContext("2d");
       if (!ctx) {
@@ -1719,7 +1908,7 @@ async function firstChunkTileHasColor(page: Page, color: [number, number, number
       }
       const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
       for (let index = 0; index < data.length; index += 4) {
-        if (data[index] === r && data[index + 1] === g && data[index + 2] === b && data[index + 3] === 255) {
+        if (data[index + 3] === 255 && closeColor(data[index], data[index + 1], data[index + 2], [r, g, b], 48)) {
           return true;
         }
       }

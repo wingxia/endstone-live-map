@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { chunkUrl, landsUrl, segmentKey, textureAtlasUrl, type BlockUpdate, type ChunkSnapshot, type WorldMeta } from "../src/api";
+import { chunkUrl, landsUrl, mapImageTileUrl, segmentKey, textureAtlasUrl, type BlockUpdate, type ChunkSnapshot, type WorldMeta } from "../src/api";
 import { blockColumnIndex, blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "../src/ui/coords";
-import { chunkFetchRanges, chunkRangeForTile, fallbackTextureColor, usesMapTint, usesTransparentTextureUnderlay } from "../src/ui/chunkLayer";
+import { chunkFetchRanges, chunkRangeForTile, fallbackTextureColor, isImageTileZoom, lowZoomTileCoverage, usesMapTint, usesTransparentTextureUnderlay } from "../src/ui/chunkLayer";
 import { isMapDecorationBlock, isPlantBlock } from "../src/ui/mapBlocks";
 
 describe("api helpers", () => {
@@ -21,6 +21,11 @@ describe("api helpers", () => {
 
   it("builds land query urls for the selected dimension", () => {
     expect(landsUrl("Bedrock level", "Overworld", 123)).toBe("/api/lands?world=Bedrock+level&dimension=Overworld&_=123");
+  });
+
+  it("builds low zoom map image tile urls", () => {
+    expect(mapImageTileUrl("Bedrock level", "Overworld", 3, -1, 2)).toBe("/api/map-tiles/Bedrock_level/Overworld/z3/-1/2.png");
+    expect(mapImageTileUrl("Bedrock level", "Overworld", 0, 0, 0, 123)).toBe("/api/map-tiles/Bedrock_level/Overworld/z0/0/0.png?_=123");
   });
 
   it("uses manifest atlas paths and deterministic fallback colors", () => {
@@ -162,6 +167,21 @@ describe("api helpers", () => {
       minChunkZ: -34,
       maxChunkZ: -34,
     });
+    expect(lowZoomTileCoverage({ x: -1, y: 0, z: 0 })).toEqual({
+      minChunkX: -16,
+      maxChunkX: -1,
+      minChunkZ: 0,
+      maxChunkZ: 15,
+    });
+    expect(lowZoomTileCoverage({ x: 0, y: 0, z: 3 })).toEqual({
+      minChunkX: 0,
+      maxChunkX: 1,
+      minChunkZ: 0,
+      maxChunkZ: 1,
+    });
+    expect(isImageTileZoom(0)).toBe(true);
+    expect(isImageTileZoom(3)).toBe(true);
+    expect(isImageTileZoom(4)).toBe(false);
   });
 
   it("coalesces low-zoom chunk fetches without exceeding the worker limit", () => {

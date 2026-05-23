@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
+import { PNG } from "pngjs";
 
 import worker, {
+  chunkRangeForMapTile,
   chunkRegionKey,
   chunkKey,
   diffChunkSnapshots,
+  mapTileKey,
+  mapTilesForChunk,
   normalizeBlockUpdateBatch,
   normalizeCleanupPayload,
   normalizeChunkBatchPayload,
   normalizeChunkSnapshot,
   normalizeLandPayload,
+  normalizeMapTileBackfillPayload,
   normalizeMarkerPayload,
   normalizeWorldMeta,
   landKey,
@@ -16,9 +21,10 @@ import worker, {
 } from "../src/index.js";
 
 class MockR2Object {
-  constructor(body, contentType) {
+  constructor(body, contentType, customMetadata = {}) {
     this.body = body;
     this.contentType = contentType;
+    this.customMetadata = customMetadata;
   }
 
   writeHttpMetadata(headers) {
@@ -35,6 +41,14 @@ class MockR2Object {
   async json() {
     return JSON.parse(await this.text());
   }
+
+  async arrayBuffer() {
+    if (typeof this.body === "string") {
+      return new TextEncoder().encode(this.body).buffer;
+    }
+    const buffer = Buffer.from(this.body);
+    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+  }
 }
 
 class MockR2Bucket {
@@ -43,7 +57,7 @@ class MockR2Bucket {
   }
 
   async put(key, body, options = {}) {
-    this.objects.set(key, new MockR2Object(body, options.httpMetadata?.contentType || "application/octet-stream"));
+    this.objects.set(key, new MockR2Object(body, options.httpMetadata?.contentType || "application/octet-stream", options.customMetadata || {}));
   }
 
   async delete(key) {
@@ -158,6 +172,19 @@ function createEmptyChunk(overrides = {}) {
   });
 }
 
+function readPng(bytes) {
+  return PNG.sync.read(Buffer.from(bytes));
+}
+
+function pngPixel(png, x, y) {
+  const offset = (y * png.width + x) * 4;
+  return [png.data[offset], png.data[offset + 1], png.data[offset + 2], png.data[offset + 3]];
+}
+
+function brightness(pixel) {
+  return pixel[0] + pixel[1] + pixel[2];
+}
+
 describe("worker helpers", () => {
   it("normalizes chunk payloads and keys", () => {
     const chunk = normalizeChunkSnapshot(createChunk({ world: "my world", chunkX: -1 }));
@@ -168,6 +195,26 @@ describe("worker helpers", () => {
     expect(normalizeChunkBatchPayload({ chunks: [createChunk()], broadcast: true })).toMatchObject({ broadcast: true, chunks: [expect.any(Object)] });
     expect(normalizeChunkBatchPayload({ chunks: [createChunk()], storage: "region" })).toMatchObject({ storage: "region" });
     expect(chunkRegionKey("world", "Overworld", -1, 2)).toBe("chunk-regions/v1/world/Overworld/-1/2.json");
+    expect(mapTileKey("Bedrock level", "Overworld", 3, -1, 2)).toBe("map-tiles/v1/Bedrock_level/Overworld/z3/-1/2.png");
+    expect(mapTilesForChunk("world", "Overworld", -1, -17)).toEqual([
+      { world: "world", dimension: "Overworld", zoom: 0, tileX: -1, tileZ: -2 },
+      { world: "world", dimension: "Overworld", zoom: 1, tileX: -1, tileZ: -3 },
+      { world: "world", dimension: "Overworld", zoom: 2, tileX: -1, tileZ: -5 },
+      { world: "world", dimension: "Overworld", zoom: 3, tileX: -1, tileZ: -9 },
+    ]);
+    expect(chunkRangeForMapTile({ zoom: 0, tileX: -1, tileZ: 0 })).toMatchObject({
+      minChunkX: -16,
+      maxChunkX: -1,
+      minChunkZ: 0,
+      maxChunkZ: 15,
+      minBlockX: -256,
+      maxBlockX: -1,
+    });
+    expect(normalizeMapTileBackfillPayload({ minChunkX: -1, maxChunkX: 16, minChunkZ: 0, maxChunkZ: 0, limit: 999 })).toMatchObject({
+      zooms: [0, 1, 2, 3],
+      limit: 100,
+      dryRun: true,
+    });
     expect(() => normalizeChunkBatchPayload({ chunks: [] })).toThrow(/chunks/);
     expect(
       normalizeBlockUpdateBatch({
@@ -360,18 +407,37 @@ describe("worker helpers", () => {
 describe("worker routes", () => {
   it("accepts authenticated chunk uploads, stores R2 snapshots, and serves chunk ranges", async () => {
     const env = createEnv();
+    const heights = Array.from({ length: 256 }, (_, index) => 64 + Math.floor(index / 16) * 6);
     const upload = await worker.fetch(
       new Request("https://map.buhe.li/api/plugin/chunks", {
         method: "POST",
         headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-        body: JSON.stringify(createChunk()),
+        body: JSON.stringify(createChunk({ heights })),
       }),
       env,
       {},
     );
     expect(upload.status).toBe(200);
+    const uploadBody = await upload.json();
+    expect(uploadBody.tiles).toHaveLength(4);
     expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(true);
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z0/0/0.png")).toBe(true);
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z1/0/0.png")).toBe(true);
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z2/0/0.png")).toBe(true);
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(true);
     expect(env.live.messages.at(-1)).toContain("chunk_ready");
+    expect(env.live.messages.at(-1)).toContain("tileVersion");
+
+    const tile = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
+    expect(tile.status).toBe(200);
+    expect(tile.headers.get("Content-Type")).toBe("image/png");
+    expect(tile.headers.get("Cache-Control")).toContain("immutable");
+    const png = readPng(await tile.arrayBuffer());
+    expect(png.width).toBe(256);
+    expect(png.height).toBe(256);
+    expect(pngPixel(png, 4, 4)[3]).toBe(255);
+    expect(brightness(pngPixel(png, 4, 124))).toBeGreaterThan(brightness(pngPixel(png, 4, 4)));
+    expect(env.MAP_DATA.objects.get("map-tiles/v1/world/Overworld/z3/0/0.png").customMetadata.tileVersion).toBe("10");
 
     const chunks = await worker.fetch(
       new Request("https://map.buhe.li/api/chunks?world=world&dimension=Overworld&minChunkX=0&maxChunkX=0&minChunkZ=0&maxChunkZ=0"),
@@ -468,6 +534,16 @@ describe("worker routes", () => {
     await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk()), {
       httpMetadata: { contentType: "application/json" },
     });
+    await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false }),
+      }),
+      env,
+      {},
+    );
+    const before = Buffer.from(await env.MAP_DATA.objects.get("map-tiles/v1/world/Overworld/z3/0/0.png").arrayBuffer());
 
     const update = await worker.fetch(
       new Request("https://map.buhe.li/api/plugin/block-updates", {
@@ -497,8 +573,9 @@ describe("worker routes", () => {
       {},
     );
     expect(update.status).toBe(200);
-    expect(await update.json()).toMatchObject({ ok: true, missingBase: false, updates: 1 });
+    expect(await update.json()).toMatchObject({ ok: true, missingBase: false, updates: 1, tiles: expect.arrayContaining([expect.objectContaining({ zoom: 3, deleted: false })]) });
     expect(env.live.messages.at(-1)).toContain("block_updates");
+    expect(env.live.messages.at(-1)).toContain("tileVersion");
     const stored = await env.MAP_DATA.objects.get("chunks/v1/world/Overworld/0/0.json").json();
     const index = 3 * 16 + 2;
     expect(stored.palette[stored.blocks[index]]).toBe("minecraft:oak_trapdoor");
@@ -507,6 +584,8 @@ describe("worker routes", () => {
     expect(stored.palette[stored.overlayBlocks[index]]).toBe("minecraft:poppy");
     expect(stored.overlayHeights[index]).toBe(72);
     expect(stored.overlayStates[index]).toEqual({ facing_direction: 1 });
+    const after = Buffer.from(await env.MAP_DATA.objects.get("map-tiles/v1/world/Overworld/z3/0/0.png").arrayBuffer());
+    expect(Buffer.compare(before, after)).not.toBe(0);
   });
 
   it("reports missing base chunks for dirty block updates", async () => {
@@ -651,6 +730,96 @@ describe("worker routes", () => {
     const body = await chunks.json();
     expect(body.chunks).toHaveLength(2);
     expect(body.missing).toHaveLength(2);
+  });
+
+  it("backfills low zoom image tiles in batches and supports dry runs", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunk-regions/v1/world/Overworld/0/0.json", JSON.stringify({ version: 1, world: "world", dimension: "Overworld", chunks: [createChunk()] }), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const dryRun = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 4, minChunkZ: 0, maxChunkZ: 0, limit: 1, dryRun: true }),
+      }),
+      env,
+      {},
+    );
+    expect(await dryRun.json()).toMatchObject({ ok: true, dryRun: true, total: 3, matched: 1, written: 0, cursor: "1" });
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(false);
+
+    const real = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true }),
+      }),
+      env,
+      {},
+    );
+    expect(await real.json()).toMatchObject({ ok: true, dryRun: false, force: true, total: 1, matched: 1, written: 1, cursor: null });
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(true);
+  });
+
+  it("uses force backfill to rewrite newer low zoom image tiles", async () => {
+    const env = createEnv();
+    const key = "map-tiles/v1/world/Overworld/z3/0/0.png";
+    await env.MAP_DATA.put("chunk-regions/v1/world/Overworld/0/0.json", JSON.stringify({ version: 1, world: "world", dimension: "Overworld", chunks: [createChunk({ updatedAt: 10 })] }), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put(key, new Uint8Array([1, 2, 3]), {
+      httpMetadata: { contentType: "image/png" },
+      customMetadata: { tileVersion: "99" },
+    });
+
+    const skipped = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false }),
+      }),
+      env,
+      {},
+    );
+    expect(await skipped.json()).toMatchObject({ ok: true, tiles: [expect.objectContaining({ skipped: true })] });
+    expect(Buffer.from(await env.MAP_DATA.objects.get(key).arrayBuffer())).toEqual(Buffer.from([1, 2, 3]));
+
+    const forced = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true }),
+      }),
+      env,
+      {},
+    );
+    const forcedBody = await forced.json();
+    expect(forcedBody).toMatchObject({ ok: true, force: true, tiles: [expect.objectContaining({ deleted: false })] });
+    expect(forcedBody.tiles[0]).not.toHaveProperty("skipped");
+    expect(PNG.sync.read(Buffer.from(await env.MAP_DATA.objects.get(key).arrayBuffer())).width).toBe(256);
+    expect(env.MAP_DATA.objects.get(key).customMetadata.tileVersion).toBe("10");
+  });
+
+  it("deletes empty low zoom image tiles during rebuild", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("map-tiles/v1/world/Overworld/z3/0/0.png", new Uint8Array([1, 2, 3]), {
+      httpMetadata: { contentType: "image/png" },
+    });
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false }),
+      }),
+      env,
+      {},
+    );
+
+    expect(await response.json()).toMatchObject({ ok: true, tiles: [expect.objectContaining({ deleted: true })] });
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(false);
   });
 
   it("extends existing world metadata when live chunk uploads expand bounds", async () => {

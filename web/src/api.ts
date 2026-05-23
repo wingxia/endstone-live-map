@@ -138,6 +138,7 @@ export interface ChunkReadyMessage {
   chunkX: number;
   chunkZ: number;
   updatedAt: number;
+  tileVersion?: number;
 }
 
 export interface BlockUpdatesMessage {
@@ -148,6 +149,7 @@ export interface BlockUpdatesMessage {
   chunkZ: number;
   updates: BlockUpdate[];
   updatedAt: number;
+  tileVersion?: number;
 }
 
 export interface LandsUpdatedMessage {
@@ -181,6 +183,15 @@ export function chunkUrl(query: ChunkQuery, options: ChunkFetchOptions = {}): st
     params.set("_", String(options.cacheBust));
   }
   return `/api/chunks?${params.toString()}`;
+}
+
+export function mapImageTileUrl(world: string, dimension: string, zoom: number, tileX: number, tileZ: number, cacheBust?: string | number): string {
+  const params = new URLSearchParams();
+  if (cacheBust !== undefined) {
+    params.set("_", String(cacheBust));
+  }
+  const suffix = params.toString();
+  return `/api/map-tiles/${segmentKey(world)}/${segmentKey(dimension)}/z${zoom}/${tileX}/${tileZ}.png${suffix ? `?${suffix}` : ""}`;
 }
 
 export async function fetchChunks(query: ChunkQuery, options: ChunkFetchOptions = {}): Promise<ChunkResponse> {
