@@ -475,6 +475,30 @@ describe("worker routes", () => {
     expect(env.MAP_DATA.getCalls).toContain("chunks/v1/world/Overworld/1/0.json");
   });
 
+  it("reads direct chunk keys before region fallback for small ranges", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunk-regions/v1/world/Overworld/0/0.json", JSON.stringify({ version: 1, world: "world", dimension: "Overworld", chunks: [createChunk({ chunkX: 0, chunkZ: 0 })] }), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const chunks = await worker.fetch(
+      new Request("https://map.buhe.li/api/chunks?world=world&dimension=Overworld&minChunkX=0&maxChunkX=1&minChunkZ=0&maxChunkZ=1"),
+      env,
+      {},
+    );
+
+    const body = await chunks.json();
+    expect(body.chunks).toHaveLength(1);
+    expect(body.missing).toHaveLength(3);
+    expect(env.MAP_DATA.getCalls.slice(0, 4)).toEqual([
+      "chunks/v1/world/Overworld/0/0.json",
+      "chunks/v1/world/Overworld/1/0.json",
+      "chunks/v1/world/Overworld/0/1.json",
+      "chunks/v1/world/Overworld/1/1.json",
+    ]);
+    expect(env.MAP_DATA.getCalls).toContain("chunk-regions/v1/world/Overworld/0/0.json");
+  });
+
   it("broadcasts block updates when viewers are connected", async () => {
     const env = createEnv();
     env.live.sessions = 1;

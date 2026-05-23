@@ -1369,7 +1369,11 @@ async function readChunkRegions(bucket, query, chunksByCoord) {
 
 async function readChunksForRange(bucket, query) {
   const chunksByCoord = new Map();
-  await readChunkRegions(bucket, query, chunksByCoord);
+  const chunkCount = chunkCountForRange(query);
+
+  if (chunkCount > CHUNK_DIRECT_READ_LIMIT) {
+    await readChunkRegions(bucket, query, chunksByCoord);
+  }
 
   const missingKeys = [];
   for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
@@ -1387,7 +1391,16 @@ async function readChunksForRange(bucket, query) {
       chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
     }
   });
+
+  if (chunkCount <= CHUNK_DIRECT_READ_LIMIT) {
+    await readChunkRegions(bucket, query, chunksByCoord);
+  }
+
   return chunksByCoord;
+}
+
+function chunkCountForRange(query) {
+  return (query.maxChunkX - query.minChunkX + 1) * (query.maxChunkZ - query.minChunkZ + 1);
 }
 
 async function listChunkKeysForRange(bucket, query) {
