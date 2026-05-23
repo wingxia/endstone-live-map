@@ -582,7 +582,7 @@ async function handleMapTileBackfill(request, env) {
     key: mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ),
   }));
 
-  const results = payload.dryRun ? [] : await rebuildMapTiles(bucket, selected);
+  const results = payload.dryRun ? [] : await rebuildMapTiles(bucket, selected, { force: payload.force });
 
   return json({
     ok: true,
@@ -1441,17 +1441,17 @@ async function rebuildMapTilesForChunks(bucket, chunks) {
   return rebuildMapTiles(bucket, tiles);
 }
 
-async function rebuildMapTiles(bucket, tiles) {
-  return mapWithConcurrency(tiles, MAP_TILE_WRITE_CONCURRENCY, (tile) => rebuildMapTile(bucket, tile));
+async function rebuildMapTiles(bucket, tiles, options = {}) {
+  return mapWithConcurrency(tiles, MAP_TILE_WRITE_CONCURRENCY, (tile) => rebuildMapTile(bucket, tile, options));
 }
 
-async function rebuildMapTile(bucket, tile) {
+async function rebuildMapTile(bucket, tile, options = {}) {
   const range = chunkRangeForMapTile(tile);
   const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range });
   const { png, hasPixels, tileVersion } = renderMapTilePng(tile, chunksByCoord);
   const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
   const existingVersion = await mapTileObjectVersion(bucket, key);
-  if (existingVersion > tileVersion) {
+  if (!options.force && existingVersion > tileVersion) {
     return { ...tile, key, skipped: true, deleted: false, chunks: chunksByCoord.size };
   }
   if (!hasPixels) {

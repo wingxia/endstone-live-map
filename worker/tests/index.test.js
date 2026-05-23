@@ -763,6 +763,45 @@ describe("worker routes", () => {
     expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(true);
   });
 
+  it("uses force backfill to rewrite newer low zoom image tiles", async () => {
+    const env = createEnv();
+    const key = "map-tiles/v1/world/Overworld/z3/0/0.png";
+    await env.MAP_DATA.put("chunk-regions/v1/world/Overworld/0/0.json", JSON.stringify({ version: 1, world: "world", dimension: "Overworld", chunks: [createChunk({ updatedAt: 10 })] }), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put(key, new Uint8Array([1, 2, 3]), {
+      httpMetadata: { contentType: "image/png" },
+      customMetadata: { tileVersion: "99" },
+    });
+
+    const skipped = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false }),
+      }),
+      env,
+      {},
+    );
+    expect(await skipped.json()).toMatchObject({ ok: true, tiles: [expect.objectContaining({ skipped: true })] });
+    expect(Buffer.from(await env.MAP_DATA.objects.get(key).arrayBuffer())).toEqual(Buffer.from([1, 2, 3]));
+
+    const forced = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true }),
+      }),
+      env,
+      {},
+    );
+    const forcedBody = await forced.json();
+    expect(forcedBody).toMatchObject({ ok: true, force: true, tiles: [expect.objectContaining({ deleted: false })] });
+    expect(forcedBody.tiles[0]).not.toHaveProperty("skipped");
+    expect(PNG.sync.read(Buffer.from(await env.MAP_DATA.objects.get(key).arrayBuffer())).width).toBe(256);
+    expect(env.MAP_DATA.objects.get(key).customMetadata.tileVersion).toBe("10");
+  });
+
   it("deletes empty low zoom image tiles during rebuild", async () => {
     const env = createEnv();
     await env.MAP_DATA.put("map-tiles/v1/world/Overworld/z3/0/0.png", new Uint8Array([1, 2, 3]), {
