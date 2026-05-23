@@ -3,6 +3,7 @@ import type { Coords, DoneCallback, GridLayer } from "leaflet";
 import {
   fetchChunks,
   fetchTextureManifest,
+  mapImageTileUrl,
   segmentKey,
   textureAtlasUrl,
   type BlockStateMap,
@@ -19,6 +20,7 @@ const BLOCKS_PER_CHUNK = 16;
 const TILE_SIZE = 256;
 const MIN_ZOOM = 0;
 const MAX_ZOOM = 4;
+const IMAGE_TILE_MAX_ZOOM = 3;
 const TILE_KEEP_BUFFER = 2;
 const MAX_CHUNKS_PER_FETCH = 256;
 
@@ -93,6 +95,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     private pendingRedrawRanges: ChunkFetchRange[] = [];
     private pendingRedrawFrame = 0;
     private dataVersion = 0;
+    private imageTileVersion: string | number = 0;
     private atlasPromise: Promise<AtlasResource> | null = null;
 
     setActive(active: boolean) {
@@ -118,6 +121,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       this.missingChunkCache.clear();
       this.pendingChunkRequests.clear();
       this.dataVersion += 1;
+      this.imageTileVersion = this.dataVersion;
       this.redraw();
     }
 
@@ -129,6 +133,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       this.chunkCache.delete(key);
       this.missingChunkCache.delete(key);
       this.dataVersion += 1;
+      this.imageTileVersion = message.tileVersion || message.updatedAt || this.dataVersion;
       this.refreshVisibleTiles({ chunkX: message.chunkX, chunkZ: message.chunkZ }, { cacheBust: message.updatedAt || this.dataVersion });
     }
 
@@ -137,6 +142,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
         return;
       }
       this.dataVersion += 1;
+      this.imageTileVersion = message.tileVersion || message.updatedAt || this.dataVersion;
       const key = cacheKey(message.world, message.dimension, message.chunkX, message.chunkZ);
       this.missingChunkCache.delete(key);
       const chunk = this.chunkCache.get(key);
@@ -194,6 +200,9 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     }
 
     createTile(coords: Coords, done: DoneCallback): HTMLElement {
+      if (isImageTileZoom(coords.z)) {
+        return this.createImageTile(coords, done);
+      }
       const canvas = document.createElement("canvas");
       canvas.width = TILE_SIZE;
       canvas.height = TILE_SIZE;
@@ -203,6 +212,23 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       window.setTimeout(() => done(undefined, canvas), 0);
       void this.drawTile(canvas, coords, context).catch(() => drawEmptyTile(canvas, "#17202a"));
       return canvas;
+    }
+
+    private createImageTile(coords: Coords, done: DoneCallback): HTMLElement {
+      const image = document.createElement("img");
+      image.width = TILE_SIZE;
+      image.height = TILE_SIZE;
+      image.alt = "";
+      image.decoding = "async";
+      image.draggable = false;
+      image.className = "chunk-tile chunk-image-tile";
+      image.src = this.imageTileSrc(coords);
+      image.onload = () => done(undefined, image);
+      image.onerror = () => {
+        image.classList.add("chunk-image-tile-missing");
+        done(undefined, image);
+      };
+      return image;
     }
 
     private async drawTile(
@@ -359,10 +385,14 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       }
       const internals = this as unknown as GridLayerInternals;
       for (const tile of Object.values(internals._tiles || {})) {
-        if (!tile.current || !(tile.el instanceof HTMLCanvasElement) || !ranges.some((range) => tileIntersectsChunkRange(tile.coords, range))) {
+        if (!tile.current || !ranges.some((range) => tileIntersectsChunkRange(tile.coords, range))) {
           continue;
         }
-        void this.drawTile(tile.el, tile.coords, this.currentDrawContext(), { preserveExisting: true }).catch(() => undefined);
+        if (tile.el instanceof HTMLImageElement) {
+          this.refreshImageTile(tile.el, tile.coords);
+        } else if (tile.el instanceof HTMLCanvasElement) {
+          void this.drawTile(tile.el, tile.coords, this.currentDrawContext(), { preserveExisting: true }).catch(() => undefined);
+        }
       }
     }
 
@@ -370,15 +400,28 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       const internals = this as unknown as GridLayerInternals;
       let refreshed = false;
       for (const tile of Object.values(internals._tiles || {})) {
-        if (!tile.current || !(tile.el instanceof HTMLCanvasElement) || !tileIntersectsChunk(tile.coords, changedChunk)) {
+        if (!tile.current || !tileIntersectsChunk(tile.coords, changedChunk)) {
           continue;
         }
         refreshed = true;
-        void this.drawTile(tile.el, tile.coords, this.currentDrawContext(), { preserveExisting: true, cacheBust: options.cacheBust }).catch(() => undefined);
+        if (tile.el instanceof HTMLImageElement) {
+          this.refreshImageTile(tile.el, tile.coords);
+        } else if (tile.el instanceof HTMLCanvasElement) {
+          void this.drawTile(tile.el, tile.coords, this.currentDrawContext(), { preserveExisting: true, cacheBust: options.cacheBust }).catch(() => undefined);
+        }
       }
       if (!refreshed) {
         internals._update?.call(this);
       }
+    }
+
+    private refreshImageTile(image: HTMLImageElement, coords: Coords) {
+      image.classList.remove("chunk-image-tile-missing");
+      image.src = this.imageTileSrc(coords);
+    }
+
+    private imageTileSrc(coords: Coords) {
+      return mapImageTileUrl(this.worldName, this.dimensionName, coords.z, coords.x, coords.y, this.imageTileVersion);
     }
 
     private isOutsideKnownBounds(chunkX: number, chunkZ: number) {
@@ -466,6 +509,20 @@ export function chunkRangeForTile(coords: Pick<Coords, "x" | "y" | "z">): TileCh
     minChunkZ: floorDiv(minBlockZ, BLOCKS_PER_CHUNK),
     maxChunkZ: floorDiv(maxBlockZ, BLOCKS_PER_CHUNK),
     scale,
+  };
+}
+
+export function isImageTileZoom(zoom: number) {
+  return zoom >= MIN_ZOOM && zoom <= IMAGE_TILE_MAX_ZOOM;
+}
+
+export function lowZoomTileCoverage(coords: Pick<Coords, "x" | "y" | "z">): ChunkFetchRange {
+  const range = chunkRangeForTile(coords);
+  return {
+    minChunkX: range.minChunkX,
+    maxChunkX: range.maxChunkX,
+    minChunkZ: range.minChunkZ,
+    maxChunkZ: range.maxChunkZ,
   };
 }
 

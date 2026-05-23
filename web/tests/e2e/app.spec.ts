@@ -33,6 +33,11 @@ type TestWorld = {
   topBlocks: Record<string, number>;
 };
 
+const GRASS_TILE_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4AWN47yr2HwAGYAKXL4eRBgAAAABJRU5ErkJggg==",
+  "base64",
+);
+
 test("loads the map application shell", async ({ page }) => {
   await page.route("**/api/live", async (route) => route.abort());
   await page.route("**/api/lands?**", async (route) => {
@@ -185,6 +190,9 @@ test("does not request chunk data before a world import exists", async ({ page }
     chunkRequests += 1;
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
   });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    await route.fulfill({ status: 404, body: "tile not found" });
+  });
   await page.route("**/api/textures/manifest", async (route) => {
     await route.fulfill({ status: 404, body: "texture manifest not found" });
   });
@@ -264,6 +272,9 @@ test("keeps negative-z chunks rendered across zoom changes", async ({ page }) =>
       body: JSON.stringify({ chunks: includesTarget ? [targetChunk] : [], missing: [] }),
     });
   });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    await route.fulfill({ contentType: "image/png", body: GRASS_TILE_PNG });
+  });
   await page.route("**/api/textures/manifest", async (route) => {
     await route.fulfill({ status: 404, body: "texture manifest not found" });
   });
@@ -274,7 +285,7 @@ test("keeps negative-z chunks rendered across zoom changes", async ({ page }) =>
   await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
 
   await page.getByRole("button", { name: "Zoom out" }).click();
-  await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
+  await expect.poll(() => pageHasGrassImageTile(page)).toBe(true);
   await page.getByRole("button", { name: "Zoom in" }).click();
   await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
   expect(chunkQueries.some((query) => query.minChunkX <= 0 && query.maxChunkX >= 0 && query.minChunkZ <= -1 && query.maxChunkZ >= -1)).toBe(true);
@@ -473,6 +484,7 @@ test("renders visible chunks progressively before slow neighboring chunk request
 test("coalesces mobile zoomed-out chunk loading and keeps dragging responsive", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const chunkQueries: Array<{ minChunkX: number; maxChunkX: number; minChunkZ: number; maxChunkZ: number }> = [];
+  const imageTileRequests: string[] = [];
   const grassChunk = {
     world: "Bedrock level",
     dimension: "Overworld",
@@ -531,23 +543,74 @@ test("coalesces mobile zoomed-out chunk loading and keeps dragging responsive", 
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: includesGrass ? [grassChunk] : [], missing }) });
     },
   });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    imageTileRequests.push(route.request().url());
+    await route.fulfill({ contentType: "image/png", body: GRASS_TILE_PNG });
+  });
 
   await page.goto("/");
   await expect(page.getByTestId("map-canvas")).toBeVisible();
   await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
+  const chunkRequestsBeforeZoomOut = chunkQueries.length;
 
   for (let index = 0; index < 4; index += 1) {
     await page.getByRole("button", { name: "Zoom out" }).click();
   }
   await page.waitForTimeout(250);
-  const largestRange = Math.max(...chunkQueries.map(rangeChunkCount));
-  expect(largestRange).toBeGreaterThan(1);
-  expect(Math.max(...chunkQueries.map(rangeChunkCount))).toBeLessThanOrEqual(256);
-  expect(chunkQueries.filter((query) => rangeChunkCount(query) > 1).length).toBeLessThanOrEqual(12);
+  expect(chunkQueries.length).toBe(chunkRequestsBeforeZoomOut);
+  expect(imageTileRequests.some((url) => url.includes("/api/map-tiles/Bedrock_level/Overworld/z"))).toBe(true);
+  await expect.poll(() => pageHasGrassImageTile(page)).toBe(true);
 
   const before = await mapPaneTransform(page);
   await dragMap(page, 260, 220, 90, 220);
   await expect.poll(() => mapPaneTransform(page)).not.toBe(before);
+  await expect.poll(() => pageHasGrassImageTile(page)).toBe(true);
+});
+
+test("uses low zoom image tiles and keeps max zoom chunk JSON rendering", async ({ page }) => {
+  const chunkRequests: string[] = [];
+  const imageTileRequests: string[] = [];
+  await mockBasicMap(page, {
+    chunkRoute: async (route) => {
+      chunkRequests.push(route.request().url());
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          chunks: [
+            {
+              world: "Bedrock level",
+              dimension: "Overworld",
+              chunkX: 0,
+              chunkZ: 0,
+              palette: ["minecraft:grass_block"],
+              blocks: Array.from({ length: 256 }, () => 0),
+              heights: Array.from({ length: 256 }, () => 64),
+              updatedAt: 1,
+            },
+          ],
+          missing: [],
+        }),
+      });
+    },
+  });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    imageTileRequests.push(route.request().url());
+    await route.fulfill({ contentType: "image/png", body: GRASS_TILE_PNG });
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => chunkRequests.length).toBeGreaterThan(0);
+  await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
+  const maxZoomChunkRequests = chunkRequests.length;
+
+  await page.getByRole("button", { name: "Zoom out" }).click();
+  await expect.poll(() => imageTileRequests.some((url) => url.includes("/api/map-tiles/Bedrock_level/Overworld/z3/"))).toBe(true);
+  await page.waitForTimeout(250);
+  expect(chunkRequests.length).toBe(maxZoomChunkRequests);
+  await expect.poll(() => pageHasGrassImageTile(page)).toBe(true);
+
+  await page.getByRole("button", { name: "Zoom in" }).click();
   await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
 });
 
@@ -1033,8 +1096,9 @@ test("renders stateful partial blocks without dark base holes", async ({ page })
   await expect.poll(() => firstChunkTileHasNoDarkHoles(page)).toBe(true);
 });
 
-test("requests live player chunks before a world import exists", async ({ page }) => {
+test("does not request chunk data before a world import exists when only live players are known", async ({ page }) => {
   let chunkRequests = 0;
+  let imageTileRequests = 0;
 
   await page.route("**/api/live", async (route) => route.abort());
   await page.route("**/api/lands?**", async (route) => {
@@ -1096,6 +1160,10 @@ test("requests live player chunks before a world import exists", async ({ page }
     chunkRequests += 1;
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
   });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    imageTileRequests += 1;
+    await route.fulfill({ status: 404, body: "tile not found" });
+  });
   await page.route("**/api/textures/manifest", async (route) => {
     await route.fulfill({ status: 404, body: "texture manifest not found" });
   });
@@ -1103,7 +1171,9 @@ test("requests live player chunks before a world import exists", async ({ page }
   await page.goto("/");
   await expect(page.getByText("Wing")).toBeVisible();
   await expect(page.getByTestId("map-empty-state")).toHaveCount(0);
-  await expect.poll(() => chunkRequests).toBeGreaterThan(0);
+  await page.waitForTimeout(1000);
+  expect(chunkRequests).toBe(0);
+  expect(imageTileRequests).toBeGreaterThan(0);
 });
 
 test("does not reset user zoom on live player refresh", async ({ page }) => {
@@ -1484,6 +1554,26 @@ async function pageHasGrassPixels(page: Page) {
   });
 }
 
+async function pageHasGrassImageTile(page: Page) {
+  return page.evaluate(() =>
+    [...document.querySelectorAll<HTMLImageElement>("img.chunk-image-tile")].some((image) => {
+      const style = window.getComputedStyle(image);
+      const rect = image.getBoundingClientRect();
+      return (
+        image.complete &&
+        image.naturalWidth > 0 &&
+        style.visibility !== "hidden" &&
+        style.display !== "none" &&
+        Number(style.opacity) > 0 &&
+        rect.right > 0 &&
+        rect.bottom > 0 &&
+        rect.left < window.innerWidth &&
+        rect.top < window.innerHeight
+      );
+    }),
+  );
+}
+
 async function mockBasicMap(
   page: Page,
   options: {
@@ -1585,10 +1675,6 @@ async function hudMapCoverage(page: Page) {
 
 async function mapPaneTransform(page: Page) {
   return page.evaluate(() => window.getComputedStyle(document.querySelector(".leaflet-map-pane") as Element).transform);
-}
-
-function rangeChunkCount(query: { minChunkX: number; maxChunkX: number; minChunkZ: number; maxChunkZ: number }) {
-  return (query.maxChunkX - query.minChunkX + 1) * (query.maxChunkZ - query.minChunkZ + 1);
 }
 
 async function pageHasVisibleGrassTile(page: Page) {

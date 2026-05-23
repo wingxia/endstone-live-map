@@ -193,6 +193,15 @@ textarea {
   image-rendering: pixelated;
 }
 
+.chunk-image-tile {
+  display: block;
+  background: #17202a;
+}
+
+.chunk-image-tile-missing {
+  opacity: 0;
+}
+
 .side-panel {
   display: flex;
   flex-direction: column;

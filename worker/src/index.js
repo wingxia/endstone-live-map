@@ -1,4 +1,5 @@
 import { createConnection } from "mysql2/promise";
+import { PNG } from "pngjs";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -12,11 +13,21 @@ const MAX_CHUNKS_PER_REQUEST = 256;
 const MAX_CHUNKS_PER_BATCH = 384;
 const REGION_SIZE_CHUNKS = 16;
 const BATCH_WRITE_CONCURRENCY = 32;
+const MAP_TILE_PREFIX = "map-tiles/v1/";
+const MAP_TILE_SIZE = 256;
+const MAP_TILE_MIN_ZOOM = 0;
+const MAP_TILE_MAX_ZOOM = 3;
+const MAP_TILE_BASE_ZOOM = 4;
+const MAP_TILE_WRITE_CONCURRENCY = 8;
+const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
+const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
+const MIN_COLUMN_HEIGHT = -64;
+const SEA_LEVEL = 63;
 const WORLD_META_SAMPLE_LIMIT = 128;
 const CLEANUP_CONFIRMATION = "delete-map-data-v1";
 const CLEANUP_DEFAULT_LIMIT = 200;
 const CLEANUP_MAX_LIMIT = 500;
-const CLEANUP_PREFIXES = new Set(["chunks/v1/", "chunk-regions/v1/", "meta/v1/", "lands/v1/", "Bedrock_level/", "world/"]);
+const CLEANUP_PREFIXES = new Set(["chunks/v1/", "chunk-regions/v1/", MAP_TILE_PREFIX, "meta/v1/", "lands/v1/", "Bedrock_level/", "world/"]);
 const TEXTURE_MANIFEST_KEY = "textures/v1/manifest.json";
 const TEXTURE_ATLAS_KEY = "textures/v1/atlas.png";
 const TEXTURE_REPORT_KEY = "textures/v1/report.json";
@@ -162,6 +173,18 @@ export default {
         return handleMapDataCleanup(request, env);
       }
 
+      if (url.pathname === "/api/plugin/map-tiles/backfill") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleMapTileBackfill(request, env);
+      }
+
+      if (url.pathname.startsWith("/api/map-tiles/")) {
+        return handleMapTileGet(url, env);
+      }
+
       if (url.pathname === "/api/chunks") {
         return handleChunksGet(url, env);
       }
@@ -272,9 +295,11 @@ async function handleChunkUpload(request, env) {
   if (emptySnapshots.length > 0) {
     return json({ ok: true, skippedEmpty: 1, rejected: emptySnapshots, updates: 0 });
   }
-  const result = await putChunkSnapshot(bucket, snapshot, { env, broadcast: true, diffForViewers: true });
+  const result = await putChunkSnapshot(bucket, snapshot, { env, broadcast: false, diffForViewers: true });
+  const tiles = await rebuildMapTilesForChunks(bucket, [snapshot]);
+  await broadcastChunkSnapshot(env, snapshot, result.blockUpdates);
   await updateWorldMetaForChunks(bucket, [snapshot]);
-  return json({ ok: true, key: result.key, updates: result.updates });
+  return json({ ok: true, key: result.key, updates: result.updates, tiles });
 }
 
 async function handleChunkBatchUpload(request, env) {
@@ -300,6 +325,7 @@ async function handleChunkBatchUpload(request, env) {
 
   if (storage === "region" && !broadcast) {
     const results = await putChunkRegionSnapshots(bucket, writableSnapshots);
+    const tiles = await rebuildMapTilesForChunks(bucket, writableSnapshots);
     await updateWorldMetaForChunks(bucket, writableSnapshots);
     return json({
       ok: true,
@@ -308,10 +334,15 @@ async function handleChunkBatchUpload(request, env) {
       skippedEmpty: emptySnapshots.length,
       regions: results.length,
       keys: results.map((result) => result.key),
+      tiles,
     });
   }
 
-  const results = await mapWithConcurrency(writableSnapshots, BATCH_WRITE_CONCURRENCY, (snapshot) => putChunkSnapshot(bucket, snapshot, { env, broadcast, diffForViewers: broadcast }));
+  const results = await mapWithConcurrency(writableSnapshots, BATCH_WRITE_CONCURRENCY, (snapshot) => putChunkSnapshot(bucket, snapshot, { env, broadcast: false, diffForViewers: broadcast }));
+  const tiles = await rebuildMapTilesForChunks(bucket, writableSnapshots);
+  if (broadcast) {
+    await mapWithConcurrency(results, MAP_TILE_WRITE_CONCURRENCY, (result, index) => broadcastChunkSnapshot(env, writableSnapshots[index], result.blockUpdates));
+  }
   await updateWorldMetaForChunks(bucket, writableSnapshots);
 
   return json({
@@ -322,6 +353,7 @@ async function handleChunkBatchUpload(request, env) {
     rejected: emptySnapshots,
     keys: results.map((result) => result.key),
     updates: results.reduce((sum, result) => sum + result.updates, 0),
+    tiles,
   });
 }
 
@@ -345,6 +377,8 @@ async function handleBlockUpdatesUpload(request, env) {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
     customMetadata: { world: chunk.world, dimension: chunk.dimension },
   });
+  const tiles = applied.length > 0 ? await rebuildMapTilesForChunks(bucket, [chunk]) : [];
+  const tileVersion = payload.updatedAt;
 
   if (applied.length > 0) {
     await broadcastLive(
@@ -357,11 +391,12 @@ async function handleBlockUpdatesUpload(request, env) {
         chunkZ: chunk.chunkZ,
         updates: applied,
         updatedAt: chunk.updatedAt,
+        tileVersion,
       }),
     );
   }
 
-  return json({ ok: true, missingBase: false, key, updates: applied.length });
+  return json({ ok: true, missingBase: false, key, updates: applied.length, tiles });
 }
 
 async function putChunkSnapshot(bucket, snapshot, options) {
@@ -380,35 +415,42 @@ async function putChunkSnapshot(bucket, snapshot, options) {
   });
 
   if (options.broadcast) {
+    await broadcastChunkSnapshot(options.env, snapshot, updates);
+  }
+
+  return { key, updates: updates.length, blockUpdates: updates };
+}
+
+async function broadcastChunkSnapshot(env, snapshot, updates = []) {
+  const tileVersion = snapshot.updatedAt;
+  await broadcastLive(
+    env,
+    JSON.stringify({
+      type: "chunk_ready",
+      world: snapshot.world,
+      dimension: snapshot.dimension,
+      chunkX: snapshot.chunkX,
+      chunkZ: snapshot.chunkZ,
+      updatedAt: snapshot.updatedAt,
+      tileVersion,
+    }),
+  );
+
+  if (updates.length > 0) {
     await broadcastLive(
-      options.env,
+      env,
       JSON.stringify({
-        type: "chunk_ready",
+        type: "block_updates",
         world: snapshot.world,
         dimension: snapshot.dimension,
         chunkX: snapshot.chunkX,
         chunkZ: snapshot.chunkZ,
+        updates,
         updatedAt: snapshot.updatedAt,
+        tileVersion,
       }),
     );
-
-    if (updates.length > 0) {
-      await broadcastLive(
-        options.env,
-        JSON.stringify({
-          type: "block_updates",
-          world: snapshot.world,
-          dimension: snapshot.dimension,
-          chunkX: snapshot.chunkX,
-          chunkZ: snapshot.chunkZ,
-          updates,
-          updatedAt: snapshot.updatedAt,
-        }),
-      );
-    }
   }
-
-  return { key, updates: updates.length };
 }
 
 function rejectedEmptyChunkSnapshots(snapshots) {
@@ -500,6 +542,58 @@ async function handleChunksGet(url, env) {
   chunks.sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
   missing.sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
   return json({ chunks, missing }, 200, { "Cache-Control": "public, max-age=15" });
+}
+
+async function handleMapTileGet(url, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  const tile = parseMapTilePath(url.pathname);
+  if (!tile) {
+    return json({ error: "invalid_map_tile_path" }, 404);
+  }
+  const object = await bucket.get(mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ));
+  if (!object) {
+    return new Response(null, { status: 404, headers: CORS_HEADERS });
+  }
+  const headers = new Headers(CORS_HEADERS);
+  object.writeHttpMetadata?.(headers);
+  headers.set("Content-Type", headers.get("Content-Type") || "image/png");
+  headers.set("Cache-Control", "public, max-age=31536000, immutable");
+  return new Response(object.body, { headers });
+}
+
+async function handleMapTileBackfill(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
+  const payload = normalizeMapTileBackfillPayload(await request.json());
+  const tiles = mapTilesForChunkRange(payload);
+  const start = payload.cursor ? Math.max(0, Math.min(tiles.length, Number(payload.cursor) || 0)) : 0;
+  const selected = tiles.slice(start, start + payload.limit);
+  const nextCursor = start + selected.length < tiles.length ? String(start + selected.length) : null;
+  const tileRefs = selected.map((tile) => ({
+    zoom: tile.zoom,
+    tileX: tile.tileX,
+    tileZ: tile.tileZ,
+    key: mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ),
+  }));
+
+  const results = payload.dryRun ? [] : await rebuildMapTiles(bucket, selected);
+
+  return json({
+    ok: true,
+    dryRun: payload.dryRun,
+    force: payload.force,
+    total: tiles.length,
+    matched: selected.length,
+    written: payload.dryRun ? 0 : results.filter((tile) => !tile.deleted).length,
+    cursor: nextCursor,
+    tiles: payload.dryRun ? tileRefs : results,
+  });
 }
 
 async function handleTextureManifestGet(env) {
@@ -1042,6 +1136,17 @@ function normalizeOptionalWorldMeta(value) {
   }
 }
 
+function normalizeOptionalChunkSnapshot(value) {
+  if (!value) {
+    return null;
+  }
+  try {
+    return normalizeChunkSnapshot(value);
+  } catch {
+    return null;
+  }
+}
+
 function normalizeSampleChunks(chunks) {
   if (!Array.isArray(chunks)) {
     return [];
@@ -1103,6 +1208,34 @@ export function normalizeCleanupPayload(payload) {
     cursor: typeof payload.cursor === "string" && payload.cursor.length > 0 ? payload.cursor : "",
     dryRun: payload.dryRun !== false,
     confirm: String(payload.confirm || ""),
+  };
+}
+
+export function normalizeMapTileBackfillPayload(payload) {
+  const minChunkX = numberOrThrow(payload.minChunkX, "minChunkX");
+  const maxChunkX = numberOrThrow(payload.maxChunkX, "maxChunkX");
+  const minChunkZ = numberOrThrow(payload.minChunkZ, "minChunkZ");
+  const maxChunkZ = numberOrThrow(payload.maxChunkZ, "maxChunkZ");
+  if (maxChunkX < minChunkX || maxChunkZ < minChunkZ) {
+    throw new Error("invalid chunk range");
+  }
+  const zooms =
+    payload.zoom === undefined || payload.zoom === null
+      ? range(MAP_TILE_MIN_ZOOM, MAP_TILE_MAX_ZOOM)
+      : [normalizeMapTileZoom(payload.zoom)];
+  const limit = Math.min(MAP_TILE_BACKFILL_MAX_LIMIT, Math.max(1, numberOrThrow(payload.limit ?? MAP_TILE_BACKFILL_DEFAULT_LIMIT, "limit")));
+  return {
+    world: cleanSegment(payload.world || "world"),
+    dimension: cleanSegment(payload.dimension || "Overworld"),
+    zooms,
+    minChunkX,
+    maxChunkX,
+    minChunkZ,
+    maxChunkZ,
+    limit,
+    cursor: typeof payload.cursor === "string" && payload.cursor.length > 0 ? payload.cursor : "",
+    dryRun: payload.dryRun !== false,
+    force: payload.force === true,
   };
 }
 
@@ -1186,6 +1319,10 @@ export function landKey(world, dimension) {
   return `${LAND_PREFIX}${cleanSegment(world)}/${cleanSegment(dimension)}.json`;
 }
 
+export function mapTileKey(world, dimension, zoom, tileX, tileZ) {
+  return `${MAP_TILE_PREFIX}${cleanSegment(world)}/${cleanSegment(dimension)}/z${normalizeMapTileZoom(zoom)}/${numberOrThrow(tileX, "tileX")}/${numberOrThrow(tileZ, "tileZ")}.png`;
+}
+
 function chunkPrefix(world, dimension, chunkX) {
   return `chunks/v1/${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(chunkX, "chunkX")}/`;
 }
@@ -1246,13 +1383,250 @@ async function readChunkRegions(bucket, query, chunksByCoord) {
     keys.map(async (key) => {
       const region = await readR2Json(await bucket.get(key));
       for (const chunk of Array.isArray(region?.chunks) ? region.chunks : []) {
-        if (chunk.chunkX < query.minChunkX || chunk.chunkX > query.maxChunkX || chunk.chunkZ < query.minChunkZ || chunk.chunkZ > query.maxChunkZ) {
+        const normalized = normalizeOptionalChunkSnapshot(chunk);
+        if (!normalized || normalized.chunkX < query.minChunkX || normalized.chunkX > query.maxChunkX || normalized.chunkZ < query.minChunkZ || normalized.chunkZ > query.maxChunkZ) {
           continue;
         }
+        chunksByCoord.set(coordKey(normalized.chunkX, normalized.chunkZ), normalized);
+      }
+    }),
+  );
+}
+
+async function readChunksForRange(bucket, query) {
+  const chunksByCoord = new Map();
+  await readChunkRegions(bucket, query, chunksByCoord);
+
+  const objectLists = await Promise.all(
+    range(query.minChunkX, query.maxChunkX).map((chunkX) => listR2Objects(bucket, chunkPrefix(query.world, query.dimension, chunkX))),
+  );
+  const readKeys = [];
+  for (const objects of objectLists) {
+    for (const object of objects) {
+      const parsed = parseChunkKey(object.key);
+      if (!parsed || parsed.chunkX < query.minChunkX || parsed.chunkX > query.maxChunkX || parsed.chunkZ < query.minChunkZ || parsed.chunkZ > query.maxChunkZ) {
+        continue;
+      }
+      readKeys.push(object.key);
+    }
+  }
+
+  await Promise.all(
+    readKeys.map(async (key) => {
+      const chunk = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(key)));
+      if (chunk) {
         chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
       }
     }),
   );
+  return chunksByCoord;
+}
+
+async function rebuildMapTilesForChunks(bucket, chunks) {
+  const tiles = [];
+  const seen = new Set();
+  for (const chunk of chunks) {
+    for (const tile of mapTilesForChunk(chunk.world, chunk.dimension, chunk.chunkX, chunk.chunkZ)) {
+      const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      tiles.push(tile);
+    }
+  }
+  if (tiles.length < 1) {
+    return [];
+  }
+  return rebuildMapTiles(bucket, tiles);
+}
+
+async function rebuildMapTiles(bucket, tiles) {
+  return mapWithConcurrency(tiles, MAP_TILE_WRITE_CONCURRENCY, (tile) => rebuildMapTile(bucket, tile));
+}
+
+async function rebuildMapTile(bucket, tile) {
+  const range = chunkRangeForMapTile(tile);
+  const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range });
+  const { png, hasPixels, tileVersion } = renderMapTilePng(tile, chunksByCoord);
+  const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
+  const existingVersion = await mapTileObjectVersion(bucket, key);
+  if (existingVersion > tileVersion) {
+    return { ...tile, key, skipped: true, deleted: false, chunks: chunksByCoord.size };
+  }
+  if (!hasPixels) {
+    await bucket.delete(key);
+    return { ...tile, key, deleted: true, chunks: chunksByCoord.size };
+  }
+  const buffer = PNG.sync.write(png, { colorType: 6, inputColorType: 6 });
+  await bucket.put(key, buffer, {
+    httpMetadata: { contentType: "image/png" },
+    customMetadata: { world: tile.world, dimension: tile.dimension, zoom: String(tile.zoom), tileVersion: String(tileVersion) },
+  });
+  return { ...tile, key, deleted: false, chunks: chunksByCoord.size };
+}
+
+function renderMapTilePng(tile, chunksByCoord) {
+  const png = new PNG({ width: MAP_TILE_SIZE, height: MAP_TILE_SIZE, colorType: 6 });
+  png.data.fill(0);
+
+  const tileRange = chunkRangeForMapTile(tile);
+  const blockScale = 2 ** tile.zoom;
+  let hasPixels = false;
+  let tileVersion = 0;
+  for (const chunk of chunksByCoord.values()) {
+    tileVersion = Math.max(tileVersion, chunk.updatedAt || 0);
+    for (let localZ = 0; localZ < 16; localZ += 1) {
+      for (let localX = 0; localX < 16; localX += 1) {
+        const worldX = chunk.chunkX * 16 + localX;
+        const worldZ = chunk.chunkZ * 16 + localZ;
+        if (worldX < tileRange.minBlockX || worldX > tileRange.maxBlockX || worldZ < tileRange.minBlockZ || worldZ > tileRange.maxBlockZ) {
+          continue;
+        }
+        const index = localZ * 16 + localX;
+        const height = chunk.heights[index] ?? MIN_COLUMN_HEIGHT;
+        const blockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
+        const overlayHeight = chunk.overlayHeights[index] ?? MIN_COLUMN_HEIGHT;
+        const overlayBlockId = overlayHeight > MIN_COLUMN_HEIGHT ? chunk.palette[chunk.overlayBlocks[index]] || "minecraft:air" : "minecraft:air";
+        if (isAirBlock(blockId) && height <= MIN_COLUMN_HEIGHT && (isAirBlock(overlayBlockId) || overlayHeight <= MIN_COLUMN_HEIGHT)) {
+          continue;
+        }
+        const color = mapTileColumnColor(blockId, overlayBlockId, height, worldX, worldZ, chunksByCoord);
+        const pixelX = (worldX - tileRange.minBlockX) * blockScale;
+        const pixelY = (worldZ - tileRange.minBlockZ) * blockScale;
+        fillPngRect(png, pixelX, pixelY, blockScale, blockScale, color);
+        hasPixels = true;
+      }
+    }
+  }
+  return { png, hasPixels, tileVersion };
+}
+
+async function mapTileObjectVersion(bucket, key) {
+  const existing = await bucket.get(key);
+  const version = Number(existing?.customMetadata?.tileVersion || 0);
+  return Number.isFinite(version) ? version : 0;
+}
+
+function mapTileColumnColor(blockId, overlayBlockId, height, worldX, worldZ, chunksByCoord) {
+  let color = hexToRgba(fallbackTextureColor(blockId));
+  if (!isAirBlock(overlayBlockId)) {
+    color = mixColors(color, hexToRgba(fallbackTextureColor(overlayBlockId)), 0.28);
+  }
+  color = applyHeightShade(color, height);
+
+  const north = getMapColumnHeight(chunksByCoord, worldX, worldZ - 1, height);
+  const west = getMapColumnHeight(chunksByCoord, worldX - 1, worldZ, height);
+  const northwest = getMapColumnHeight(chunksByCoord, worldX - 1, worldZ - 1, height);
+  const east = getMapColumnHeight(chunksByCoord, worldX + 1, worldZ, height);
+  const south = getMapColumnHeight(chunksByCoord, worldX, worldZ + 1, height);
+  const shadeDrop = Math.max(0, height - north, height - west, height - northwest);
+  const lightLift = Math.max(0, height - east, height - south);
+  const ambientFactor = clamp(1 - Math.min(0.2, shadeDrop * 0.018) + Math.min(0.08, lightLift * 0.01), 0.68, 1.18);
+  return adjustBrightness(color, ambientFactor);
+}
+
+function applyHeightShade(color, height) {
+  if (height < SEA_LEVEL) {
+    const depth = clamp((SEA_LEVEL - height) / 48, 0, 1);
+    return mixColors(adjustBrightness(color, 0.78 - depth * 0.22), [36, 92, 148, 255], 0.18 + depth * 0.24);
+  }
+  if (height <= 100) {
+    return adjustBrightness(color, 0.93 + ((height - SEA_LEVEL) / 37) * 0.05);
+  }
+  if (height <= 150) {
+    return adjustBrightness(color, 1.02 + ((height - 100) / 50) * 0.08);
+  }
+  return adjustBrightness(color, 1.12 + Math.min(0.14, (height - 150) / 600));
+}
+
+function getMapColumnHeight(chunksByCoord, worldX, worldZ, fallbackHeight) {
+  const chunkX = floorDiv(worldX, 16);
+  const chunkZ = floorDiv(worldZ, 16);
+  const chunk = chunksByCoord.get(coordKey(chunkX, chunkZ));
+  if (!chunk) {
+    return fallbackHeight;
+  }
+  const localX = mod(worldX, 16);
+  const localZ = mod(worldZ, 16);
+  return chunk.heights[localZ * 16 + localX] ?? fallbackHeight;
+}
+
+function fillPngRect(png, x, y, width, height, color) {
+  const startX = Math.max(0, Math.floor(x));
+  const startY = Math.max(0, Math.floor(y));
+  const endX = Math.min(MAP_TILE_SIZE, Math.ceil(x + width));
+  const endY = Math.min(MAP_TILE_SIZE, Math.ceil(y + height));
+  for (let pixelY = startY; pixelY < endY; pixelY += 1) {
+    for (let pixelX = startX; pixelX < endX; pixelX += 1) {
+      const offset = (pixelY * MAP_TILE_SIZE + pixelX) * 4;
+      png.data[offset] = color[0];
+      png.data[offset + 1] = color[1];
+      png.data[offset + 2] = color[2];
+      png.data[offset + 3] = color[3];
+    }
+  }
+}
+
+export function mapTilesForChunk(world, dimension, chunkX, chunkZ) {
+  return range(MAP_TILE_MIN_ZOOM, MAP_TILE_MAX_ZOOM).map((zoom) => {
+    const chunksPerTile = chunksPerMapTile(zoom);
+    return {
+      world: cleanSegment(world),
+      dimension: cleanSegment(dimension),
+      zoom,
+      tileX: floorDiv(numberOrThrow(chunkX, "chunkX"), chunksPerTile),
+      tileZ: floorDiv(numberOrThrow(chunkZ, "chunkZ"), chunksPerTile),
+    };
+  });
+}
+
+function mapTilesForChunkRange(payload) {
+  const tiles = [];
+  for (const zoom of payload.zooms) {
+    const chunksPerTile = chunksPerMapTile(zoom);
+    const minTileX = floorDiv(payload.minChunkX, chunksPerTile);
+    const maxTileX = floorDiv(payload.maxChunkX, chunksPerTile);
+    const minTileZ = floorDiv(payload.minChunkZ, chunksPerTile);
+    const maxTileZ = floorDiv(payload.maxChunkZ, chunksPerTile);
+    for (const tileZ of range(minTileZ, maxTileZ)) {
+      for (const tileX of range(minTileX, maxTileX)) {
+        tiles.push({ world: payload.world, dimension: payload.dimension, zoom, tileX, tileZ });
+      }
+    }
+  }
+  return tiles.sort((a, b) => a.zoom - b.zoom || a.tileZ - b.tileZ || a.tileX - b.tileX);
+}
+
+export function chunkRangeForMapTile(tile) {
+  const zoom = normalizeMapTileZoom(tile.zoom);
+  const chunksPerTile = chunksPerMapTile(zoom);
+  const minChunkX = numberOrThrow(tile.tileX, "tileX") * chunksPerTile;
+  const minChunkZ = numberOrThrow(tile.tileZ, "tileZ") * chunksPerTile;
+  const maxChunkX = minChunkX + chunksPerTile - 1;
+  const maxChunkZ = minChunkZ + chunksPerTile - 1;
+  return {
+    minChunkX,
+    maxChunkX,
+    minChunkZ,
+    maxChunkZ,
+    minBlockX: minChunkX * 16,
+    maxBlockX: maxChunkX * 16 + 15,
+    minBlockZ: minChunkZ * 16,
+    maxBlockZ: maxChunkZ * 16 + 15,
+  };
+}
+
+function chunksPerMapTile(zoom) {
+  return 2 ** (MAP_TILE_BASE_ZOOM - normalizeMapTileZoom(zoom));
+}
+
+function normalizeMapTileZoom(zoom) {
+  const value = numberOrThrow(zoom, "zoom");
+  if (value < MAP_TILE_MIN_ZOOM || value > MAP_TILE_MAX_ZOOM) {
+    throw new Error(`zoom must be ${MAP_TILE_MIN_ZOOM}-${MAP_TILE_MAX_ZOOM}`);
+  }
+  return value;
 }
 
 async function listR2Objects(bucket, prefix) {
@@ -1283,6 +1657,20 @@ function parseChunkKey(key) {
   };
 }
 
+function parseMapTilePath(pathname) {
+  const match = /^\/api\/map-tiles\/([^/]+)\/([^/]+)\/z([0-3])\/(-?\d+)\/(-?\d+)\.png$/.exec(pathname);
+  if (!match) {
+    return null;
+  }
+  return {
+    world: cleanSegment(decodeURIComponent(match[1])),
+    dimension: cleanSegment(decodeURIComponent(match[2])),
+    zoom: normalizeMapTileZoom(match[3]),
+    tileX: numberOrThrow(match[4], "tileX"),
+    tileZ: numberOrThrow(match[5], "tileZ"),
+  };
+}
+
 function range(min, max) {
   return Array.from({ length: max - min + 1 }, (_, index) => min + index);
 }
@@ -1293,6 +1681,10 @@ function coordKey(chunkX, chunkZ) {
 
 function floorDiv(value, divisor) {
   return Math.floor(value / divisor);
+}
+
+function mod(value, divisor) {
+  return ((value % divisor) + divisor) % divisor;
 }
 
 function applyBlockUpdatesToChunk(chunk, updates) {
@@ -1584,4 +1976,90 @@ function decodeBase64(value) {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+function fallbackTextureColor(blockId) {
+  const id = String(blockId || "minecraft:air").toLowerCase();
+  if (id.includes("water") || id.includes("bubble_column")) {
+    return "#2563b8";
+  }
+  if (id.includes("cherry_leaves")) {
+    return "#f2a5c9";
+  }
+  if (id.includes("azalea_leaves")) {
+    return "#5f9f4a";
+  }
+  if (id.includes("grass_block")) {
+    return "#5f9f3f";
+  }
+  if (id.includes("short_grass") || id.includes("tall_grass") || id.includes("fern") || id.includes("vine")) {
+    return "#4f8f35";
+  }
+  if (id.includes("flower") || id.includes("poppy") || id.includes("dandelion") || id.includes("tulip") || id.includes("orchid") || id.includes("allium")) {
+    return "#d9d16b";
+  }
+  if (id.includes("leaves")) {
+    return "#3f7f38";
+  }
+  if (id.includes("glass") || id.includes("pane") || id.includes("ice")) {
+    return "#9fc7d1";
+  }
+  if (id.includes("fence") || id.includes("trapdoor") || id.includes("door") || id.includes("rail") || id.includes("bars") || id.includes("chain")) {
+    return "#8b8174";
+  }
+  if (id.includes("sand")) {
+    return "#d7c47a";
+  }
+  if (id.includes("grass") || id.includes("leaves") || id.includes("moss")) {
+    return "#4f8f3a";
+  }
+  if (id.includes("dirt") || id.includes("mud")) {
+    return "#7a5236";
+  }
+  if (id.includes("log") || id.includes("wood") || id.includes("planks")) {
+    return "#8a6138";
+  }
+  if (id.includes("snow")) {
+    return "#dce9ec";
+  }
+  if (id.includes("lava")) {
+    return "#e46b2a";
+  }
+  if (id.includes("air")) {
+    return "#111820";
+  }
+  return "#737f86";
+}
+
+function hexToRgba(hex) {
+  const value = String(hex || "#000000").replace("#", "");
+  const normalized = value.length === 3 ? value.split("").map((char) => `${char}${char}`).join("") : value.padEnd(6, "0").slice(0, 6);
+  return [
+    Number.parseInt(normalized.slice(0, 2), 16),
+    Number.parseInt(normalized.slice(2, 4), 16),
+    Number.parseInt(normalized.slice(4, 6), 16),
+    255,
+  ];
+}
+
+function mixColors(left, right, amount) {
+  const weight = clamp(amount, 0, 1);
+  return [
+    clampByte(left[0] * (1 - weight) + right[0] * weight),
+    clampByte(left[1] * (1 - weight) + right[1] * weight),
+    clampByte(left[2] * (1 - weight) + right[2] * weight),
+    clampByte(left[3] * (1 - weight) + right[3] * weight),
+  ];
+}
+
+function adjustBrightness(color, factor) {
+  return [clampByte(color[0] * factor), clampByte(color[1] * factor), clampByte(color[2] * factor), color[3]];
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function clampByte(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
 }
