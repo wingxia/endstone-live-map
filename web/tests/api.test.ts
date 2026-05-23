@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { chunkUrl, landsUrl, mapImageTileUrl, segmentKey, textureAtlasUrl, type BlockUpdate, type ChunkSnapshot, type WorldMeta } from "../src/api";
 import { blockColumnIndex, blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "../src/ui/coords";
-import { chunkFetchRanges, chunkRangeForTile, fallbackTextureColor, isImageTileZoom, lowZoomTileCoverage, usesMapTint, usesTransparentTextureUnderlay } from "../src/ui/chunkLayer";
+import { chunkFetchRanges, chunkRangeForTile, fallbackTextureColor, isImageTileZoom, lowZoomTileCoverage, tileIntersectsChunkBounds, usesMapTint, usesTransparentTextureUnderlay } from "../src/ui/chunkLayer";
 import { isMapDecorationBlock, isPlantBlock } from "../src/ui/mapBlocks";
 
 describe("api helpers", () => {
@@ -182,6 +182,24 @@ describe("api helpers", () => {
     expect(isImageTileZoom(0)).toBe(true);
     expect(isImageTileZoom(3)).toBe(true);
     expect(isImageTileZoom(4)).toBe(false);
+    expect(
+      tileIntersectsChunkBounds(
+        { x: -1, y: 0, z: 0 },
+        { minChunkX: -8, maxChunkX: 8, minChunkZ: -8, maxChunkZ: 8 },
+      ),
+    ).toBe(true);
+    expect(
+      tileIntersectsChunkBounds(
+        { x: -3, y: -4, z: 0 },
+        { minChunkX: -37, maxChunkX: 0, minChunkZ: -51, maxChunkZ: 0 },
+      ),
+    ).toBe(true);
+    expect(
+      tileIntersectsChunkBounds(
+        { x: 4, y: 4, z: 0 },
+        { minChunkX: -37, maxChunkX: 0, minChunkZ: -51, maxChunkZ: 0 },
+      ),
+    ).toBe(false);
   });
 
   it("coalesces low-zoom chunk fetches without exceeding the worker limit", () => {

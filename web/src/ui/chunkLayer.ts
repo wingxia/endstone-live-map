@@ -203,6 +203,9 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
 
     createTile(coords: Coords, done: DoneCallback): HTMLElement {
       if (isImageTileZoom(coords.z)) {
+        if (!tileIntersectsChunkBounds(coords, this.knownBounds)) {
+          return this.createBlankImageTile(done);
+        }
         return this.createImageTile(coords, done);
       }
       const canvas = document.createElement("canvas");
@@ -231,6 +234,15 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
         done(undefined, image);
       };
       return image;
+    }
+
+    private createBlankImageTile(done: DoneCallback): HTMLElement {
+      const tile = document.createElement("div");
+      tile.className = "chunk-tile chunk-image-tile chunk-image-tile-missing";
+      tile.style.width = `${TILE_SIZE}px`;
+      tile.style.height = `${TILE_SIZE}px`;
+      window.setTimeout(() => done(undefined, tile), 0);
+      return tile;
     }
 
     private async drawTile(
@@ -526,6 +538,14 @@ export function lowZoomTileCoverage(coords: Pick<Coords, "x" | "y" | "z">): Chun
     minChunkZ: range.minChunkZ,
     maxChunkZ: range.maxChunkZ,
   };
+}
+
+export function tileIntersectsChunkBounds(coords: Pick<Coords, "x" | "y" | "z">, bounds: ChunkLayerBounds | null) {
+  if (!bounds) {
+    return true;
+  }
+  const range = lowZoomTileCoverage(coords);
+  return !(range.maxChunkX < bounds.minChunkX || range.minChunkX > bounds.maxChunkX || range.maxChunkZ < bounds.minChunkZ || range.minChunkZ > bounds.maxChunkZ);
 }
 
 function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: TileChunkRange, atlas: AtlasResource, chunksByCoord: Map<string, ChunkSnapshot>) {
