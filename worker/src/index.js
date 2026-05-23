@@ -15,6 +15,10 @@ const REGION_SIZE_CHUNKS = 16;
 const BATCH_WRITE_CONCURRENCY = 32;
 const MAP_TILE_PREFIX = "map-tiles/v1/";
 const MAP_TILE_SIZE = 256;
+const EMPTY_PNG = Uint8Array.from([
+  137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10,
+  73, 68, 65, 84, 120, 1, 99, 0, 1, 0, 0, 5, 0, 1, 54, 208, 136, 221, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+]);
 const MAP_TILE_MIN_ZOOM = 0;
 const MAP_TILE_MAX_ZOOM = 3;
 const MAP_TILE_BASE_ZOOM = 4;
@@ -529,13 +533,23 @@ async function handleMapTileGet(url, env) {
   }
   const object = await bucket.get(mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ));
   if (!object) {
-    return new Response(null, { status: 404, headers: CORS_HEADERS });
+    return pngResponse(EMPTY_PNG, { "Cache-Control": "public, max-age=60" });
   }
   const headers = new Headers(CORS_HEADERS);
   object.writeHttpMetadata?.(headers);
   headers.set("Content-Type", headers.get("Content-Type") || "image/png");
   headers.set("Cache-Control", "public, max-age=31536000, immutable");
   return new Response(object.body, { headers });
+}
+
+function pngResponse(body, extraHeaders = {}) {
+  return new Response(body, {
+    headers: {
+      ...CORS_HEADERS,
+      "Content-Type": "image/png",
+      ...extraHeaders,
+    },
+  });
 }
 
 async function handleMapTileBackfill(request, env) {

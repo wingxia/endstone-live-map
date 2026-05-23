@@ -794,6 +794,19 @@ describe("worker routes", () => {
     expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(true);
   });
 
+  it("serves transparent PNGs for missing low zoom image tiles", async () => {
+    const env = createEnv();
+    const response = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
+    const png = readPng(await response.arrayBuffer());
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("image/png");
+    expect(response.headers.get("Cache-Control")).toContain("max-age=60");
+    expect(png.width).toBe(1);
+    expect(png.height).toBe(1);
+    expect(pngPixel(png, 0, 0)[3]).toBe(0);
+  });
+
   it("uses force backfill to rewrite newer low zoom image tiles", async () => {
     const env = createEnv();
     const key = "map-tiles/v1/world/Overworld/z3/0/0.png";
