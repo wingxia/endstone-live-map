@@ -21,6 +21,7 @@ const MAP_TILE_BASE_ZOOM = 4;
 const MAP_TILE_WRITE_CONCURRENCY = 8;
 const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
 const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
+const CHUNK_DIRECT_READ_LIMIT = REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS;
 const MIN_COLUMN_HEIGHT = -64;
 const SEA_LEVEL = 63;
 const WORLD_META_SAMPLE_LIMIT = 128;
@@ -498,34 +499,7 @@ async function handleChunksGet(url, env) {
 
   const chunks = [];
   const missing = [];
-  const chunksByCoord = new Map();
-  const readKeys = [];
-
-  await readChunkRegions(bucket, query, chunksByCoord);
-
-  const objectLists = await Promise.all(
-    range(query.minChunkX, query.maxChunkX).map((chunkX) => listR2Objects(bucket, chunkPrefix(query.world, query.dimension, chunkX))),
-  );
-
-  for (const objects of objectLists) {
-    for (const object of objects) {
-      const parsed = parseChunkKey(object.key);
-      if (!parsed || parsed.chunkX < query.minChunkX || parsed.chunkX > query.maxChunkX || parsed.chunkZ < query.minChunkZ || parsed.chunkZ > query.maxChunkZ) {
-        continue;
-      }
-      readKeys.push(object.key);
-    }
-  }
-
-  await Promise.all(
-    readKeys.map(async (key) => {
-      const object = await bucket.get(key);
-      if (object) {
-        const chunk = await readR2Json(object);
-        chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
-      }
-    }),
-  );
+  const chunksByCoord = await readChunksForRange(bucket, query);
 
   for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
     for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
@@ -1397,29 +1371,40 @@ async function readChunksForRange(bucket, query) {
   const chunksByCoord = new Map();
   await readChunkRegions(bucket, query, chunksByCoord);
 
+  const missingKeys = [];
+  for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
+    for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
+      if (!chunksByCoord.has(coordKey(chunkX, chunkZ))) {
+        missingKeys.push(chunkKey(query.world, query.dimension, chunkX, chunkZ));
+      }
+    }
+  }
+
+  const readKeys = missingKeys.length <= CHUNK_DIRECT_READ_LIMIT ? missingKeys : await listChunkKeysForRange(bucket, query);
+  await mapWithConcurrency(readKeys, BATCH_WRITE_CONCURRENCY, async (key) => {
+    const chunk = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(key)));
+    if (chunk) {
+      chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
+    }
+  });
+  return chunksByCoord;
+}
+
+async function listChunkKeysForRange(bucket, query) {
   const objectLists = await Promise.all(
     range(query.minChunkX, query.maxChunkX).map((chunkX) => listR2Objects(bucket, chunkPrefix(query.world, query.dimension, chunkX))),
   );
-  const readKeys = [];
+  const keys = [];
   for (const objects of objectLists) {
     for (const object of objects) {
       const parsed = parseChunkKey(object.key);
       if (!parsed || parsed.chunkX < query.minChunkX || parsed.chunkX > query.maxChunkX || parsed.chunkZ < query.minChunkZ || parsed.chunkZ > query.maxChunkZ) {
         continue;
       }
-      readKeys.push(object.key);
+      keys.push(object.key);
     }
   }
-
-  await Promise.all(
-    readKeys.map(async (key) => {
-      const chunk = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(key)));
-      if (chunk) {
-        chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
-      }
-    }),
-  );
-  return chunksByCoord;
+  return keys;
 }
 
 async function rebuildMapTilesForChunks(bucket, chunks) {
@@ -1450,9 +1435,11 @@ async function rebuildMapTile(bucket, tile, options = {}) {
   const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range });
   const { png, hasPixels, tileVersion } = renderMapTilePng(tile, chunksByCoord);
   const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
-  const existingVersion = await mapTileObjectVersion(bucket, key);
-  if (!options.force && existingVersion > tileVersion) {
-    return { ...tile, key, skipped: true, deleted: false, chunks: chunksByCoord.size };
+  if (!options.force) {
+    const existingVersion = await mapTileObjectVersion(bucket, key);
+    if (existingVersion > tileVersion) {
+      return { ...tile, key, skipped: true, deleted: false, chunks: chunksByCoord.size };
+    }
   }
   if (!hasPixels) {
     await bucket.delete(key);

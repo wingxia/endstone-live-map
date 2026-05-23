@@ -54,6 +54,8 @@ class MockR2Object {
 class MockR2Bucket {
   constructor() {
     this.objects = new Map();
+    this.getCalls = [];
+    this.listCalls = [];
   }
 
   async put(key, body, options = {}) {
@@ -65,11 +67,13 @@ class MockR2Bucket {
   }
 
   async get(key) {
+    this.getCalls.push(key);
     return this.objects.get(key) || null;
   }
 
   async list(options = {}) {
     const prefix = options.prefix || "";
+    this.listCalls.push(prefix);
     return {
       objects: [...this.objects.keys()].filter((key) => key.startsWith(prefix)).map((key) => ({ key })),
       truncated: false,
@@ -466,6 +470,9 @@ describe("worker routes", () => {
     const body = await chunks.json();
     expect(body.chunks).toHaveLength(2);
     expect(body.missing).toHaveLength(254);
+    expect(env.MAP_DATA.listCalls.filter((prefix) => prefix.startsWith("chunks/v1/world/Overworld/"))).toHaveLength(0);
+    expect(env.MAP_DATA.getCalls).toContain("chunks/v1/world/Overworld/0/0.json");
+    expect(env.MAP_DATA.getCalls).toContain("chunks/v1/world/Overworld/1/0.json");
   });
 
   it("broadcasts block updates when viewers are connected", async () => {
@@ -800,6 +807,32 @@ describe("worker routes", () => {
     expect(forcedBody.tiles[0]).not.toHaveProperty("skipped");
     expect(PNG.sync.read(Buffer.from(await env.MAP_DATA.objects.get(key).arrayBuffer())).width).toBe(256);
     expect(env.MAP_DATA.objects.get(key).customMetadata.tileVersion).toBe("10");
+  });
+
+  it("does not read existing image tiles during force backfill", async () => {
+    const env = createEnv();
+    const key = "map-tiles/v1/world/Overworld/z3/0/0.png";
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ updatedAt: 10 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put(key, new Uint8Array([1, 2, 3]), {
+      httpMetadata: { contentType: "image/png" },
+      customMetadata: { tileVersion: "99" },
+    });
+    env.MAP_DATA.getCalls = [];
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true }),
+      }),
+      env,
+      {},
+    );
+
+    expect(await response.json()).toMatchObject({ ok: true, force: true, written: 1 });
+    expect(env.MAP_DATA.getCalls).not.toContain(key);
   });
 
   it("deletes empty low zoom image tiles during rebuild", async () => {
