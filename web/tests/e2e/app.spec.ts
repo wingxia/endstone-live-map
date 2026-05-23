@@ -1398,6 +1398,7 @@ test("renders land claims, point claims, and teleport markers", async ({ page })
 
 test("centers the map on clicked players and public land teleports", async ({ page }) => {
   const chunkQueries: Array<{ minChunkX: number; maxChunkX: number; minChunkZ: number; maxChunkZ: number }> = [];
+  const imageTileRequests: string[] = [];
 
   await page.addInitScript(() => {
     class MockWebSocket extends EventTarget {
@@ -1487,6 +1488,10 @@ test("centers the map on clicked players and public land teleports", async ({ pa
     });
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
   });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    imageTileRequests.push(route.request().url());
+    await route.fulfill({ status: 404, body: "tile not found" });
+  });
   await page.route("**/api/textures/manifest", async (route) => {
     await route.fulfill({ status: 404, body: "texture manifest not found" });
   });
@@ -1529,10 +1534,10 @@ test("centers the map on clicked players and public land teleports", async ({ pa
   await expect(page.getByText("主城区")).toBeVisible();
 
   await page.getByRole("button", { name: /Wing/ }).click();
-  await expect.poll(() => chunkQueries.some((query) => queryIncludesChunk(query, 32, -16))).toBe(true);
+  await expect.poll(() => chunkQueries.some((query) => queryIncludesChunk(query, 32, -16)) || mapTileRequestsIncludeChunk(imageTileRequests, 32, -16)).toBe(true);
 
   await page.getByRole("button", { name: /主城区/ }).click();
-  await expect.poll(() => chunkQueries.some((query) => queryIncludesChunk(query, -22, -30))).toBe(true);
+  await expect.poll(() => chunkQueries.some((query) => queryIncludesChunk(query, -22, -30)) || mapTileRequestsIncludeChunk(imageTileRequests, -22, -30)).toBe(true);
 });
 
 async function pageHasGrassPixels(page: Page) {
@@ -1717,6 +1722,20 @@ function queryIncludesChunk(
   chunkZ: number,
 ) {
   return query.minChunkX <= chunkX && query.maxChunkX >= chunkX && query.minChunkZ <= chunkZ && query.maxChunkZ >= chunkZ;
+}
+
+function mapTileRequestsIncludeChunk(urls: string[], chunkX: number, chunkZ: number) {
+  return urls.some((value) => {
+    const match = /\/api\/map-tiles\/[^/]+\/[^/]+\/z([0-3])\/(-?\d+)\/(-?\d+)\.png/.exec(value);
+    if (!match) {
+      return false;
+    }
+    const zoom = Number(match[1]);
+    const tileX = Number(match[2]);
+    const tileZ = Number(match[3]);
+    const chunksPerTile = 2 ** (4 - zoom);
+    return chunkX >= tileX * chunksPerTile && chunkX <= tileX * chunksPerTile + chunksPerTile - 1 && chunkZ >= tileZ * chunksPerTile && chunkZ <= tileZ * chunksPerTile + chunksPerTile - 1;
+  });
 }
 
 async function firstChunkTileHasNoDarkHoles(page: Page) {
