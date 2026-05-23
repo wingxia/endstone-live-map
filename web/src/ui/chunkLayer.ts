@@ -23,6 +23,8 @@ const MAX_ZOOM = 4;
 const IMAGE_TILE_MAX_ZOOM = 3;
 const TILE_KEEP_BUFFER = 2;
 const MAX_CHUNKS_PER_FETCH = 256;
+const SEA_LEVEL = 63;
+const MIN_COLUMN_HEIGHT = -64;
 
 export const INITIAL_MAP_ZOOM = 4;
 
@@ -526,7 +528,7 @@ export function lowZoomTileCoverage(coords: Pick<Coords, "x" | "y" | "z">): Chun
   };
 }
 
-function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: TileChunkRange, atlas: AtlasResource) {
+function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: TileChunkRange, atlas: AtlasResource, chunksByCoord: Map<string, ChunkSnapshot>) {
   for (let localZ = 0; localZ < BLOCKS_PER_CHUNK; localZ += 1) {
     for (let localX = 0; localX < BLOCKS_PER_CHUNK; localX += 1) {
       const worldX = chunk.chunkX * BLOCKS_PER_CHUNK + localX;
@@ -544,14 +546,16 @@ function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: T
       if (overlayBlockId && overlayBlockId !== "minecraft:air") {
         drawBlock(ctx, atlas, overlayBlockId, overlayStateAt(chunk, index), x, y, range.scale, "overlay");
       }
+      applyColumnShade(ctx, chunk.heights[index] ?? MIN_COLUMN_HEIGHT, worldX, worldZ, chunksByCoord, x, y, range.scale);
     }
   }
 }
 
 function drawTileChunks(ctx: CanvasRenderingContext2D, chunks: ChunkSnapshot[], range: TileChunkRange, atlas: AtlasResource) {
   drawEmptyTile(ctx.canvas, "#17202a");
+  const chunksByCoord = new Map(chunks.map((chunk) => [coordKey(chunk.chunkX, chunk.chunkZ), chunk]));
   for (const chunk of chunks) {
-    drawChunk(ctx, chunk, range, atlas);
+    drawChunk(ctx, chunk, range, atlas, chunksByCoord);
   }
   drawGrid(ctx, range);
 }
@@ -567,6 +571,62 @@ function chunksFromCache(cache: Map<string, ChunkSnapshot>, world: string, dimen
     }
   }
   return chunks;
+}
+
+function coordKey(chunkX: number, chunkZ: number) {
+  return `${chunkX},${chunkZ}`;
+}
+
+function applyColumnShade(ctx: CanvasRenderingContext2D, height: number, worldX: number, worldZ: number, chunksByCoord: Map<string, ChunkSnapshot>, x: number, y: number, size: number) {
+  let darkAlpha = 0;
+  let lightAlpha = 0;
+  let blueAlpha = 0;
+  if (height < SEA_LEVEL) {
+    const depth = clamp((SEA_LEVEL - height) / 48, 0, 1);
+    darkAlpha += 0.08 + depth * 0.16;
+    blueAlpha += 0.06 + depth * 0.12;
+  } else if (height <= 100) {
+    darkAlpha += 0.035 - clamp((height - SEA_LEVEL) / 37, 0, 1) * 0.02;
+  } else if (height <= 150) {
+    lightAlpha += 0.025 + ((height - 100) / 50) * 0.035;
+  } else {
+    lightAlpha += 0.07 + Math.min(0.04, (height - 150) / 600);
+  }
+
+  const north = getColumnHeight(chunksByCoord, worldX, worldZ - 1, height);
+  const west = getColumnHeight(chunksByCoord, worldX - 1, worldZ, height);
+  const northwest = getColumnHeight(chunksByCoord, worldX - 1, worldZ - 1, height);
+  const east = getColumnHeight(chunksByCoord, worldX + 1, worldZ, height);
+  const south = getColumnHeight(chunksByCoord, worldX, worldZ + 1, height);
+  const shadeDrop = Math.max(0, height - north, height - west, height - northwest);
+  const lightLift = Math.max(0, height - east, height - south);
+  darkAlpha += Math.min(0.16, shadeDrop * 0.014);
+  lightAlpha += Math.min(0.055, lightLift * 0.008);
+
+  if (darkAlpha > 0) {
+    ctx.fillStyle = `rgba(0, 0, 0, ${clamp(darkAlpha, 0, 0.24)})`;
+    ctx.fillRect(x, y, size, size);
+  }
+  if (blueAlpha > 0) {
+    ctx.fillStyle = `rgba(36, 92, 148, ${clamp(blueAlpha, 0, 0.18)})`;
+    ctx.fillRect(x, y, size, size);
+  }
+  if (lightAlpha > 0) {
+    ctx.fillStyle = `rgba(255, 255, 255, ${clamp(lightAlpha, 0, 0.11)})`;
+    ctx.fillRect(x, y, size, size);
+  }
+}
+
+function getColumnHeight(chunksByCoord: Map<string, ChunkSnapshot>, worldX: number, worldZ: number, fallbackHeight: number) {
+  const chunkX = floorDiv(worldX, BLOCKS_PER_CHUNK);
+  const chunkZ = floorDiv(worldZ, BLOCKS_PER_CHUNK);
+  const chunk = chunksByCoord.get(coordKey(chunkX, chunkZ));
+  if (!chunk) {
+    return fallbackHeight;
+  }
+  const localX = mod(worldX, BLOCKS_PER_CHUNK);
+  const localZ = mod(worldZ, BLOCKS_PER_CHUNK);
+  return chunk.heights[blockColumnIndex(localX, localZ)] ?? fallbackHeight;
 }
 
 export function chunkFetchRanges(chunks: Array<{ chunkX: number; chunkZ: number }>): ChunkFetchRange[] {
@@ -1085,6 +1145,14 @@ function sameWorldDimension(leftWorld: string, leftDimension: string, rightWorld
 
 function floorDiv(value: number, divisor: number) {
   return Math.floor(value / divisor);
+}
+
+function mod(value: number, divisor: number) {
+  return ((value % divisor) + divisor) % divisor;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function normalizeZero(value: number) {

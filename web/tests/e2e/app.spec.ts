@@ -763,6 +763,53 @@ test("renders fallback map colors before the texture atlas finishes loading", as
   await expect.poll(() => pageHasGrassPixels(page), { timeout: 2_000 }).toBe(true);
 });
 
+test("adds height shading to max zoom canvas rendering", async ({ page }) => {
+  const shadedChunk = {
+    world: "Bedrock level",
+    dimension: "Overworld",
+    chunkX: 0,
+    chunkZ: 0,
+    palette: ["minecraft:grass_block"],
+    blocks: Array.from({ length: 256 }, () => 0),
+    heights: Array.from({ length: 256 }, (_, index) => {
+      const z = Math.floor(index / 16);
+      if (z < 4) return 48;
+      if (z > 11) return 155;
+      return 64;
+    }),
+    updatedAt: 1,
+  };
+
+  await mockBasicMap(page, {
+    chunk: shadedChunk,
+    world: {
+      version: 1,
+      world: "Bedrock level",
+      dimension: "Overworld",
+      status: "complete",
+      chunkCount: 1,
+      importedAt: 1,
+      updatedAt: 1,
+      bounds: {
+        minChunkX: 0,
+        maxChunkX: 0,
+        minChunkZ: 0,
+        maxChunkZ: 0,
+        minBlockX: 0,
+        maxBlockX: 15,
+        minBlockZ: 0,
+        maxBlockZ: 15,
+      },
+      sampleChunks: [{ chunkX: 0, chunkZ: 0 }],
+      topBlocks: { "minecraft:grass_block": 256 },
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => pageHasHeightShading(page)).toBe(true);
+});
+
 test("renders plant and cutout overlays without dark tile holes", async ({ page }) => {
   const targetChunk = {
     world: "Bedrock level",
@@ -1542,7 +1589,9 @@ test("centers the map on clicked players and public land teleports", async ({ pa
 
 async function pageHasGrassPixels(page: Page) {
   return page.evaluate(() => {
-    const grass = [95, 159, 63];
+    const grass: [number, number, number] = [95, 159, 63];
+    const closeColor = (r: number, g: number, b: number, target: [number, number, number], tolerance: number) =>
+      Math.abs(r - target[0]) <= tolerance && Math.abs(g - target[1]) <= tolerance && Math.abs(b - target[2]) <= tolerance;
     return [...document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")].some((canvas) => {
       const ctx = canvas.getContext("2d");
       if (!ctx) {
@@ -1550,7 +1599,7 @@ async function pageHasGrassPixels(page: Page) {
       }
       const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
       for (let index = 0; index < data.length; index += 4) {
-        if (data[index] === grass[0] && data[index + 1] === grass[1] && data[index + 2] === grass[2] && data[index + 3] === 255) {
+        if (data[index + 3] === 255 && closeColor(data[index], data[index + 1], data[index + 2], grass, 48)) {
           return true;
         }
       }
@@ -1577,6 +1626,33 @@ async function pageHasGrassImageTile(page: Page) {
       );
     }),
   );
+}
+
+async function pageHasHeightShading(page: Page) {
+  return page.evaluate(() => {
+    const brightness = (index: number, data: Uint8ClampedArray) => data[index] + data[index + 1] + data[index + 2];
+    for (const canvas of document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")) {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        continue;
+      }
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let minBrightness = Infinity;
+      let maxBrightness = -Infinity;
+      for (let index = 0; index < data.length; index += 4) {
+        if (data[index + 3] !== 255 || data[index + 1] < data[index] || data[index + 1] < data[index + 2]) {
+          continue;
+        }
+        const value = brightness(index, data);
+        minBrightness = Math.min(minBrightness, value);
+        maxBrightness = Math.max(maxBrightness, value);
+      }
+      if (maxBrightness - minBrightness > 35) {
+        return true;
+      }
+    }
+    return false;
+  });
 }
 
 async function mockBasicMap(
@@ -1684,7 +1760,9 @@ async function mapPaneTransform(page: Page) {
 
 async function pageHasVisibleGrassTile(page: Page) {
   return page.evaluate(() => {
-    const grass = [95, 159, 63];
+    const grass: [number, number, number] = [95, 159, 63];
+    const closeColor = (r: number, g: number, b: number, target: [number, number, number], tolerance: number) =>
+      Math.abs(r - target[0]) <= tolerance && Math.abs(g - target[1]) <= tolerance && Math.abs(b - target[2]) <= tolerance;
     return [...document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")].some((canvas) => {
       const style = window.getComputedStyle(canvas);
       if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0) {
@@ -1700,7 +1778,7 @@ async function pageHasVisibleGrassTile(page: Page) {
       }
       const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
       for (let index = 0; index < data.length; index += 4) {
-        if (data[index] === grass[0] && data[index + 1] === grass[1] && data[index + 2] === grass[2] && data[index + 3] === 255) {
+        if (data[index + 3] === 255 && closeColor(data[index], data[index + 1], data[index + 2], grass, 48)) {
           return true;
         }
       }
@@ -1741,7 +1819,9 @@ function mapTileRequestsIncludeChunk(urls: string[], chunkX: number, chunkZ: num
 async function firstChunkTileHasNoDarkHoles(page: Page) {
   return page.evaluate(() => {
     const dark = [23, 32, 42];
-    const grass = [95, 159, 63];
+    const grass: [number, number, number] = [95, 159, 63];
+    const closeColor = (r: number, g: number, b: number, target: [number, number, number], tolerance: number) =>
+      Math.abs(r - target[0]) <= tolerance && Math.abs(g - target[1]) <= tolerance && Math.abs(b - target[2]) <= tolerance;
     for (const canvas of document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")) {
       const ctx = canvas.getContext("2d");
       if (!ctx) {
@@ -1760,7 +1840,7 @@ async function firstChunkTileHasNoDarkHoles(page: Page) {
             if (data[index] === dark[0] && data[index + 1] === dark[1] && data[index + 2] === dark[2]) {
               darkPixels += 1;
             }
-            if (data[index] === grass[0] && data[index + 1] === grass[1] && data[index + 2] === grass[2]) {
+            if (closeColor(data[index], data[index + 1], data[index + 2], grass, 48)) {
               grassPixels += 1;
             }
           }
@@ -1777,8 +1857,10 @@ async function firstChunkTileHasNoDarkHoles(page: Page) {
 async function leafBlockHasSolidFallbackUnderlay(page: Page) {
   return page.evaluate(() => {
     const dark = [23, 32, 42];
-    const atlas = [31, 91, 45];
-    const fallback = [63, 127, 56];
+    const atlas: [number, number, number] = [31, 91, 45];
+    const fallback: [number, number, number] = [63, 127, 56];
+    const closeColor = (r: number, g: number, b: number, target: [number, number, number], tolerance: number) =>
+      Math.abs(r - target[0]) <= tolerance && Math.abs(g - target[1]) <= tolerance && Math.abs(b - target[2]) <= tolerance;
     for (const canvas of document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")) {
       const ctx = canvas.getContext("2d");
       if (!ctx) {
@@ -1798,10 +1880,10 @@ async function leafBlockHasSolidFallbackUnderlay(page: Page) {
             if (data[index] === dark[0] && data[index + 1] === dark[1] && data[index + 2] === dark[2]) {
               darkOrTransparentPixels += 1;
             }
-            if (data[index] === atlas[0] && data[index + 1] === atlas[1] && data[index + 2] === atlas[2]) {
+            if (closeColor(data[index], data[index + 1], data[index + 2], atlas, 48)) {
               atlasPixels += 1;
             }
-            if (data[index] === fallback[0] && data[index + 1] === fallback[1] && data[index + 2] === fallback[2]) {
+            if (closeColor(data[index], data[index + 1], data[index + 2], fallback, 48)) {
               fallbackPixels += 1;
             }
           }
@@ -1817,6 +1899,8 @@ async function leafBlockHasSolidFallbackUnderlay(page: Page) {
 
 async function firstChunkTileHasColor(page: Page, color: [number, number, number]) {
   return page.evaluate(([r, g, b]) => {
+    const closeColor = (red: number, green: number, blue: number, target: [number, number, number], tolerance: number) =>
+      Math.abs(red - target[0]) <= tolerance && Math.abs(green - target[1]) <= tolerance && Math.abs(blue - target[2]) <= tolerance;
     for (const canvas of document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")) {
       const ctx = canvas.getContext("2d");
       if (!ctx) {
@@ -1824,7 +1908,7 @@ async function firstChunkTileHasColor(page: Page, color: [number, number, number
       }
       const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
       for (let index = 0; index < data.length; index += 4) {
-        if (data[index] === r && data[index + 1] === g && data[index + 2] === b && data[index + 3] === 255) {
+        if (data[index + 3] === 255 && closeColor(data[index], data[index + 1], data[index + 2], [r, g, b], 48)) {
           return true;
         }
       }
