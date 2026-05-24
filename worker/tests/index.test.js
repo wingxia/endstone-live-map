@@ -562,12 +562,15 @@ describe("worker routes", () => {
     expect(pixel[1]).toBeGreaterThan(pixel[2]);
   });
 
-  it("serves sparse chunk ranges without reading every missing chunk", async () => {
+  it("reads region chunks first for full map-tile-sized ranges", async () => {
     const env = createEnv();
     await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk()), {
       httpMetadata: { contentType: "application/json" },
     });
     await env.MAP_DATA.put("chunks/v1/world/Overworld/1/0.json", JSON.stringify(createChunk({ chunkX: 1 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put("chunk-regions/v1/world/Overworld/0/0.json", JSON.stringify({ version: 1, world: "world", dimension: "Overworld", chunks: [createChunk({ chunkX: 2 })] }), {
       httpMetadata: { contentType: "application/json" },
     });
 
@@ -577,9 +580,10 @@ describe("worker routes", () => {
       {},
     );
     const body = await chunks.json();
-    expect(body.chunks).toHaveLength(2);
-    expect(body.missing).toHaveLength(254);
+    expect(body.chunks).toHaveLength(3);
+    expect(body.missing).toHaveLength(253);
     expect(env.MAP_DATA.listCalls.filter((prefix) => prefix.startsWith("chunks/v1/world/Overworld/"))).toHaveLength(0);
+    expect(env.MAP_DATA.getCalls[0]).toBe("chunk-regions/v1/world/Overworld/0/0.json");
     expect(env.MAP_DATA.getCalls).toContain("chunks/v1/world/Overworld/0/0.json");
     expect(env.MAP_DATA.getCalls).toContain("chunks/v1/world/Overworld/1/0.json");
   });

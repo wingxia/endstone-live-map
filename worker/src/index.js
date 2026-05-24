@@ -1398,7 +1398,7 @@ async function readChunksForRange(bucket, query, options = {}) {
   const chunksByCoord = new Map();
   const chunkCount = chunkCountForRange(query);
 
-  if (chunkCount > CHUNK_DIRECT_READ_LIMIT) {
+  if (chunkCount >= CHUNK_DIRECT_READ_LIMIT) {
     await readChunkRegions(bucket, query, chunksByCoord);
   }
 
@@ -1419,7 +1419,7 @@ async function readChunksForRange(bucket, query, options = {}) {
     }
   });
 
-  if (chunkCount <= CHUNK_DIRECT_READ_LIMIT) {
+  if (chunkCount < CHUNK_DIRECT_READ_LIMIT) {
     await readChunkRegions(bucket, query, chunksByCoord);
   }
 
