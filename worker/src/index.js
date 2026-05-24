@@ -31,6 +31,7 @@ const MAP_TILE_BACKFILL_READ_CONCURRENCY = 4;
 const MAP_TILE_BACKFILL_WRITE_LIMIT = 1;
 const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
 const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
+const EMPTY_CHUNK_PRUNE_WRITE_LIMIT = 8;
 const CHUNK_DIRECT_READ_LIMIT = REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS;
 const MIN_COLUMN_HEIGHT = -64;
 const SEA_LEVEL = 63;
@@ -1292,7 +1293,7 @@ export function normalizeEmptyChunkPrunePayload(payload) {
     maxChunkX,
     minChunkZ,
     maxChunkZ,
-    limit: Math.min(500, Math.max(1, numberOrThrow(payload.limit ?? 100, "limit"))),
+    limit: Math.min(EMPTY_CHUNK_PRUNE_WRITE_LIMIT, Math.max(1, numberOrThrow(payload.limit ?? EMPTY_CHUNK_PRUNE_WRITE_LIMIT, "limit"))),
     dryRun: payload.dryRun !== false,
   };
 }

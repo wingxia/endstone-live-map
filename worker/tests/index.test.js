@@ -333,7 +333,7 @@ describe("worker helpers", () => {
       world: "Bedrock_level",
       minChunkX: -45,
       maxChunkX: -40,
-      limit: 500,
+      limit: 8,
       dryRun: false,
     });
     expect(() => normalizeEmptyChunkPrunePayload({ minChunkX: 1, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0 })).toThrow(/invalid chunk range/);
