@@ -10,6 +10,7 @@ import worker, {
   mapTilesForChunk,
   normalizeBlockUpdateBatch,
   normalizeCleanupPayload,
+  normalizeEmptyChunkPrunePayload,
   normalizeChunkBatchPayload,
   normalizeChunkSnapshot,
   fallbackTextureColor,
@@ -327,6 +328,17 @@ describe("worker helpers", () => {
     expect(() => normalizeCleanupPayload({ prefix: "textures/v1/" })).toThrow(/cleanup prefix/);
   });
 
+  it("normalizes empty chunk prune payloads", () => {
+    expect(normalizeEmptyChunkPrunePayload({ world: "Bedrock level", minChunkX: -45, maxChunkX: -40, minChunkZ: -43, maxChunkZ: -40, limit: 999, dryRun: false })).toMatchObject({
+      world: "Bedrock_level",
+      minChunkX: -45,
+      maxChunkX: -40,
+      limit: 500,
+      dryRun: false,
+    });
+    expect(() => normalizeEmptyChunkPrunePayload({ minChunkX: 1, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0 })).toThrow(/invalid chunk range/);
+  });
+
   it("validates marker payloads", () => {
     expect(normalizeMarkerPayload({ title: "Home", x: 1, z: 2 })).toMatchObject({
       title: "Home",
@@ -531,6 +543,52 @@ describe("worker routes", () => {
     );
     expect(upload.status).toBe(200);
     expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(false);
+  });
+
+  it("prunes historical all-air chunks from direct and region storage", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createEmptyChunk({ chunkX: 0, chunkZ: 0 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put(
+      "chunk-regions/v1/world/Overworld/0/0.json",
+      JSON.stringify({
+        version: 1,
+        world: "world",
+        dimension: "Overworld",
+        regionSize: 16,
+        regionX: 0,
+        regionZ: 0,
+        chunks: [createEmptyChunk({ chunkX: 0, chunkZ: 0 }), createChunk({ chunkX: 1, chunkZ: 0 })],
+      }),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+    await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 1, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true }),
+      }),
+      env,
+      {},
+    );
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/prune-empty", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", minChunkX: 0, maxChunkX: 1, minChunkZ: 0, maxChunkZ: 0, dryRun: false }),
+      }),
+      env,
+      {},
+    );
+
+    expect(await response.json()).toMatchObject({ ok: true, dryRun: false, matched: 1, deleted: 1, tiles: 4 });
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(false);
+    const region = await env.MAP_DATA.objects.get("chunk-regions/v1/world/Overworld/0/0.json").json();
+    expect(region.chunks).toHaveLength(1);
+    expect(region.chunks[0].chunkX).toBe(1);
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(true);
   });
 
   it("colors overlay-only low zoom columns from the overlay block", async () => {

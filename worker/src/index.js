@@ -152,6 +152,14 @@ export default {
         return handleBlockUpdatesUpload(request, env);
       }
 
+      if (url.pathname === "/api/plugin/chunks/prune-empty") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleEmptyChunkPrune(request, env);
+      }
+
       if (url.pathname === "/api/plugin/world-meta") {
         const auth = requirePluginAuth(request, env);
         if (auth) {
@@ -901,6 +909,35 @@ async function handleMapDataCleanup(request, env) {
   });
 }
 
+async function handleEmptyChunkPrune(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  const payload = normalizeEmptyChunkPrunePayload(await request.json());
+  const chunks = await findEmptyChunksForRange(bucket, payload);
+  const selected = chunks.slice(0, payload.limit);
+  const tiles = uniqueMapTilesForChunks(selected);
+  if (!payload.dryRun) {
+    await deleteEmptyChunkObjects(bucket, selected);
+    await pruneEmptyChunksFromRegions(bucket, selected);
+    await rebuildMapTiles(bucket, tiles, {
+      force: true,
+      concurrency: MAP_TILE_BACKFILL_WRITE_CONCURRENCY,
+      readConcurrency: MAP_TILE_BACKFILL_READ_CONCURRENCY,
+    });
+  }
+  return json({
+    ok: true,
+    dryRun: payload.dryRun,
+    matched: selected.length,
+    remaining: Math.max(0, chunks.length - selected.length),
+    deleted: payload.dryRun ? 0 : selected.length,
+    tiles: tiles.length,
+    chunks: selected.map(({ world, dimension, chunkX, chunkZ }) => ({ world, dimension, chunkX, chunkZ })),
+  });
+}
+
 async function handleMarkers(request, env, url) {
   const id = url.pathname.startsWith("/api/markers/") ? decodeURIComponent(url.pathname.slice("/api/markers/".length)) : "";
 
@@ -1240,6 +1277,26 @@ export function normalizeMapTileBackfillPayload(payload) {
   };
 }
 
+export function normalizeEmptyChunkPrunePayload(payload) {
+  const minChunkX = numberOrThrow(payload.minChunkX, "minChunkX");
+  const maxChunkX = numberOrThrow(payload.maxChunkX, "maxChunkX");
+  const minChunkZ = numberOrThrow(payload.minChunkZ, "minChunkZ");
+  const maxChunkZ = numberOrThrow(payload.maxChunkZ, "maxChunkZ");
+  if (maxChunkX < minChunkX || maxChunkZ < minChunkZ) {
+    throw new Error("invalid chunk range");
+  }
+  return {
+    world: cleanSegment(payload.world || "world"),
+    dimension: cleanSegment(payload.dimension || "Overworld"),
+    minChunkX,
+    maxChunkX,
+    minChunkZ,
+    maxChunkZ,
+    limit: Math.min(500, Math.max(1, numberOrThrow(payload.limit ?? 100, "limit"))),
+    dryRun: payload.dryRun !== false,
+  };
+}
+
 export function normalizeMarkerPayload(payload) {
   const title = String(payload.title || "").trim();
   if (title.length < 1 || title.length > 80) {
@@ -1424,6 +1481,74 @@ async function readChunksForRange(bucket, query, options = {}) {
   }
 
   return chunksByCoord;
+}
+
+async function findEmptyChunksForRange(bucket, query) {
+  const chunksByCoord = await readChunksForRange(bucket, query, { readConcurrency: MAP_TILE_BACKFILL_READ_CONCURRENCY });
+  return [...chunksByCoord.values()]
+    .filter((chunk) => isEmptyChunkSnapshot(chunk))
+    .sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
+}
+
+async function deleteEmptyChunkObjects(bucket, chunks) {
+  await mapWithConcurrency(chunks, MAP_TILE_BACKFILL_READ_CONCURRENCY, (chunk) => bucket.delete(chunkKey(chunk.world, chunk.dimension, chunk.chunkX, chunk.chunkZ)));
+}
+
+async function pruneEmptyChunksFromRegions(bucket, chunks) {
+  const groups = new Map();
+  for (const chunk of chunks) {
+    const regionX = floorDiv(chunk.chunkX, REGION_SIZE_CHUNKS);
+    const regionZ = floorDiv(chunk.chunkZ, REGION_SIZE_CHUNKS);
+    const key = chunkRegionKey(chunk.world, chunk.dimension, regionX, regionZ);
+    if (!groups.has(key)) {
+      groups.set(key, { key, remove: new Set() });
+    }
+    groups.get(key).remove.add(coordKey(chunk.chunkX, chunk.chunkZ));
+  }
+
+  await mapWithConcurrency([...groups.values()], MAP_TILE_BACKFILL_READ_CONCURRENCY, async (group) => {
+    const region = await readR2Json(await bucket.get(group.key));
+    if (!region || !Array.isArray(region.chunks)) {
+      return;
+    }
+    const kept = [];
+    for (const chunk of region.chunks) {
+      const normalized = normalizeOptionalChunkSnapshot(chunk);
+      if (!normalized || group.remove.has(coordKey(normalized.chunkX, normalized.chunkZ))) {
+        continue;
+      }
+      kept.push(normalized);
+    }
+    if (kept.length === 0) {
+      await bucket.delete(group.key);
+      return;
+    }
+    const nextRegion = {
+      ...region,
+      updatedAt: Math.max(...kept.map((chunk) => chunk.updatedAt || 0)),
+      chunks: kept.sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX),
+    };
+    await bucket.put(group.key, JSON.stringify(nextRegion), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: { world: nextRegion.world, dimension: nextRegion.dimension },
+    });
+  });
+}
+
+function uniqueMapTilesForChunks(chunks) {
+  const seen = new Set();
+  const tiles = [];
+  for (const chunk of chunks) {
+    for (const tile of mapTilesForChunk(chunk.world, chunk.dimension, chunk.chunkX, chunk.chunkZ)) {
+      const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      tiles.push(tile);
+    }
+  }
+  return tiles;
 }
 
 function chunkCountForRange(query) {
