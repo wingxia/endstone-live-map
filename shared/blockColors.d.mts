@@ -1,1 +1,1 @@
-export function fallbackTextureColor(blockId: string): string;
+export function fallbackTextureColor(blockId: string, blockState?: Record<string, unknown>): string;

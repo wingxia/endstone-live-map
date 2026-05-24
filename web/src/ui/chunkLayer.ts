@@ -751,20 +751,20 @@ function drawBlock(
     return;
   }
   if (usesMapTint(blockId)) {
-    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillStyle = fallbackTextureColor(blockId, state);
     ctx.fillRect(x, y, size, size);
     return;
   }
   const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
   if (atlas.image && entry) {
     if (usesTransparentTextureUnderlay(blockId)) {
-      ctx.fillStyle = fallbackTextureColor(blockId);
+      ctx.fillStyle = fallbackTextureColor(blockId, state);
       ctx.fillRect(x, y, size, size);
     }
     drawAtlasEntry(ctx, atlas.image, entry, x, y, size);
     return;
   }
-  ctx.fillStyle = fallbackTextureColor(blockId);
+  ctx.fillStyle = fallbackTextureColor(blockId, state);
   ctx.fillRect(x, y, size, size);
 }
 
@@ -800,7 +800,7 @@ function drawStatefulPartialBlock(
 
 function drawCakeBlock(ctx: CanvasRenderingContext2D, blockId: string, state: BlockStateMap, x: number, y: number, size: number, layer: "base" | "overlay") {
   if (layer === "base") {
-    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillStyle = fallbackTextureColor(blockId, state);
     ctx.fillRect(x, y, size, size);
   }
   const inset = Math.max(1, Math.floor(size * 0.12));
@@ -821,7 +821,7 @@ function drawCakeBlock(ctx: CanvasRenderingContext2D, blockId: string, state: Bl
 
 function drawEndRodBlock(ctx: CanvasRenderingContext2D, blockId: string, state: BlockStateMap, x: number, y: number, size: number, layer: "base" | "overlay") {
   if (layer === "base") {
-    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillStyle = fallbackTextureColor(blockId, state);
     ctx.fillRect(x, y, size, size);
   }
   const vertical = isVerticalFacing(stateValue(state, "facing_direction", stateValue(state, "facing", "up")));
@@ -855,7 +855,7 @@ function drawTrapdoorBlock(
   layer: "base" | "overlay",
 ) {
   if (layer === "base") {
-    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillStyle = fallbackTextureColor(blockId, state);
     ctx.fillRect(x, y, size, size);
   }
   const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
@@ -868,7 +868,7 @@ function drawTrapdoorBlock(
     if (entry && atlas.image) {
       drawAtlasEntry(ctx, atlas.image, entry, x + inset, y + inset, Math.max(1, size - inset * 2));
     } else {
-      ctx.fillStyle = fallbackTextureColor(blockId);
+      ctx.fillStyle = fallbackTextureColor(blockId, state);
       ctx.fillRect(x + inset, y + inset, Math.max(1, size - inset * 2), thickness);
     }
     return;
@@ -876,7 +876,7 @@ function drawTrapdoorBlock(
 
   const edge = facingEdge(facing);
   const thickness = Math.max(1, Math.floor(size * 0.2));
-  ctx.fillStyle = fallbackTextureColor(blockId);
+  ctx.fillStyle = fallbackTextureColor(blockId, state);
   if (edge === "north") {
     ctx.fillRect(x, y, size, thickness);
   } else if (edge === "south") {

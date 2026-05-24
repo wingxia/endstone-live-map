@@ -1503,12 +1503,14 @@ function renderMapTilePng(tile, chunksByCoord) {
         const index = localZ * 16 + localX;
         const height = chunk.heights[index] ?? MIN_COLUMN_HEIGHT;
         const blockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
+        const blockState = chunk.blockStates[index] || {};
         const overlayHeight = chunk.overlayHeights[index] ?? MIN_COLUMN_HEIGHT;
         const overlayBlockId = overlayHeight > MIN_COLUMN_HEIGHT ? chunk.palette[chunk.overlayBlocks[index]] || "minecraft:air" : "minecraft:air";
-        if (isAirBlock(blockId) && height <= MIN_COLUMN_HEIGHT && (isAirBlock(overlayBlockId) || overlayHeight <= MIN_COLUMN_HEIGHT)) {
+        const overlayState = chunk.overlayStates[index] || {};
+        if (isAirBlock(blockId) && (isAirBlock(overlayBlockId) || overlayHeight <= MIN_COLUMN_HEIGHT)) {
           continue;
         }
-        const color = mapTileColumnColor(blockId, overlayBlockId, height, worldX, worldZ, chunksByCoord);
+        const color = mapTileColumnColor(blockId, blockState, overlayBlockId, overlayState, Math.max(height, overlayHeight), worldX, worldZ, chunksByCoord);
         const pixelX = (worldX - tileRange.minBlockX) * blockScale;
         const pixelY = (worldZ - tileRange.minBlockZ) * blockScale;
         fillPngRect(png, pixelX, pixelY, blockScale, blockScale, color);
@@ -1525,10 +1527,11 @@ async function mapTileObjectVersion(bucket, key) {
   return Number.isFinite(version) ? version : 0;
 }
 
-function mapTileColumnColor(blockId, overlayBlockId, height, worldX, worldZ, chunksByCoord) {
-  let color = hexToRgba(fallbackTextureColor(blockId));
+function mapTileColumnColor(blockId, blockState, overlayBlockId, overlayState, height, worldX, worldZ, chunksByCoord) {
+  const hasBase = !isAirBlock(blockId);
+  let color = hexToRgba(hasBase ? fallbackTextureColor(blockId, blockState) : fallbackTextureColor(overlayBlockId, overlayState));
   if (!isAirBlock(overlayBlockId)) {
-    color = mixColors(color, hexToRgba(fallbackTextureColor(overlayBlockId)), 0.28);
+    color = hasBase ? mixColors(color, hexToRgba(fallbackTextureColor(overlayBlockId, overlayState)), 0.28) : color;
   }
   color = applyHeightShade(color, height);
 

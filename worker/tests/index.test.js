@@ -360,6 +360,24 @@ describe("worker helpers", () => {
     expect(fallbackTextureColor("minecraft:stone_brick_stairs")).toBe("#7d8587");
     expect(fallbackTextureColor("minecraft:smooth_quartz_slab")).toBe("#d8d1bf");
     expect(fallbackTextureColor("minecraft:end_bricks")).toBe("#d7cf92");
+    expect(fallbackTextureColor("minecraft:end_stone")).toBe("#d8cf8a");
+    expect(fallbackTextureColor("minecraft:podzol")).toBe("#6f4a2e");
+    expect(fallbackTextureColor("minecraft:farmland")).toBe("#6f4b31");
+    expect(fallbackTextureColor("minecraft:melon_block")).toBe("#8fbf3d");
+    expect(fallbackTextureColor("minecraft:waxed_cut_copper_slab")).toBe("#b86f45");
+    expect(fallbackTextureColor("minecraft:waxed_oxidized_cut_copper_slab")).toBe("#5b9a8f");
+    expect(fallbackTextureColor("minecraft:wooden_slab", { "minecraft:wood_type": "spruce" })).toBe("#6f4c2d");
+    expect(fallbackTextureColor("minecraft:stone_slab", { "minecraft:stone_slab_type": "quartz" })).toBe("#d8d1bf");
+    expect(fallbackTextureColor("minecraft:torch")).toBe("#d49a42");
+    expect(fallbackTextureColor("minecraft:bamboo")).toBe("#7fa847");
+    expect(fallbackTextureColor("minecraft:wheat")).toBe("#c8aa42");
+    expect(fallbackTextureColor("minecraft:white_carpet")).toBe("#d8d8d0");
+    expect(fallbackTextureColor("minecraft:lantern")).toBe("#d8b35a");
+    expect(fallbackTextureColor("minecraft:obsidian")).toBe("#46375f");
+    expect(fallbackTextureColor("minecraft:scaffolding")).toBe("#8a6138");
+    expect(fallbackTextureColor("minecraft:wall_sign")).toBe("#8a6138");
+    expect(fallbackTextureColor("minecraft:glow_lichen")).toBe("#78a88a");
+    expect(fallbackTextureColor("minecraft:oxidized_lightning_rod")).toBe("#5b9a8f");
   });
 
   it("normalizes land payloads and keys", () => {
@@ -490,6 +508,58 @@ describe("worker routes", () => {
     expect(pixel[3]).toBe(255);
     expect(pixel[0] + pixel[1] + pixel[2]).toBeGreaterThan(120);
     expect(pixel[0]).toBeGreaterThan(pixel[2]);
+  });
+
+  it("keeps air-only columns transparent in low zoom image tiles", async () => {
+    const env = createEnv();
+    const upload = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(
+          createChunk({
+            palette: ["minecraft:air"],
+            blocks: Array.from({ length: 256 }, () => 0),
+            heights: Array.from({ length: 256 }, () => 128),
+            overlayBlocks: Array.from({ length: 256 }, () => 0),
+            overlayHeights: Array.from({ length: 256 }, () => -64),
+          }),
+        ),
+      }),
+      env,
+      {},
+    );
+    expect(upload.status).toBe(200);
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(false);
+  });
+
+  it("colors overlay-only low zoom columns from the overlay block", async () => {
+    const env = createEnv();
+    const upload = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(
+          createChunk({
+            palette: ["minecraft:air", "minecraft:oak_leaves"],
+            blocks: Array.from({ length: 256 }, () => 0),
+            heights: Array.from({ length: 256 }, () => 128),
+            overlayBlocks: Array.from({ length: 256 }, (_, index) => (index === 0 ? 1 : 0)),
+            overlayHeights: Array.from({ length: 256 }, (_, index) => (index === 0 ? 129 : -64)),
+          }),
+        ),
+      }),
+      env,
+      {},
+    );
+    expect(upload.status).toBe(200);
+
+    const tile = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
+    const png = readPng(await tile.arrayBuffer());
+    const pixel = pngPixel(png, 4, 4);
+    expect(pixel[3]).toBe(255);
+    expect(pixel[1]).toBeGreaterThan(pixel[0]);
+    expect(pixel[1]).toBeGreaterThan(pixel[2]);
   });
 
   it("serves sparse chunk ranges without reading every missing chunk", async () => {
