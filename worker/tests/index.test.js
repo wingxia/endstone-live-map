@@ -932,7 +932,7 @@ describe("worker routes", () => {
       {},
     );
 
-    expect(await response.json()).toMatchObject({ ok: true, matched: 2, written: 2 });
+    expect(await response.json()).toMatchObject({ ok: true, total: 2, matched: 1, written: 1, cursor: "1" });
     expect(maxActiveReads).toBeLessThanOrEqual(4);
   });
 

@@ -28,6 +28,7 @@ const MAP_TILE_BASE_ZOOM = 4;
 const MAP_TILE_WRITE_CONCURRENCY = 8;
 const MAP_TILE_BACKFILL_WRITE_CONCURRENCY = 1;
 const MAP_TILE_BACKFILL_READ_CONCURRENCY = 4;
+const MAP_TILE_BACKFILL_WRITE_LIMIT = 1;
 const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
 const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
 const CHUNK_DIRECT_READ_LIMIT = REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS;
@@ -566,7 +567,8 @@ async function handleMapTileBackfill(request, env) {
   const payload = normalizeMapTileBackfillPayload(await request.json());
   const tiles = mapTilesForChunkRange(payload);
   const start = payload.cursor ? Math.max(0, Math.min(tiles.length, Number(payload.cursor) || 0)) : 0;
-  const selected = tiles.slice(start, start + payload.limit);
+  const effectiveLimit = payload.dryRun ? payload.limit : Math.min(payload.limit, MAP_TILE_BACKFILL_WRITE_LIMIT);
+  const selected = tiles.slice(start, start + effectiveLimit);
   const nextCursor = start + selected.length < tiles.length ? String(start + selected.length) : null;
   const tileRefs = selected.map((tile) => ({
     zoom: tile.zoom,
