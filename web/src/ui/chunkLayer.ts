@@ -1,5 +1,6 @@
 import type { Coords, DoneCallback, GridLayer } from "leaflet";
 
+import { fallbackTextureColor } from "../../../shared/blockColors.mjs";
 import {
   fetchChunks,
   fetchTextureManifest,
@@ -15,6 +16,8 @@ import {
 } from "../api";
 import { blockColumnIndex, blockToChunk } from "./coords";
 import { isLikelyTransparentTextureBlock, isMapDecorationBlock, isPlantBlock } from "./mapBlocks";
+
+export { fallbackTextureColor };
 
 const BLOCKS_PER_CHUNK = 16;
 const TILE_SIZE = 256;
@@ -1207,57 +1210,4 @@ export function usesTransparentTextureUnderlay(blockId: string) {
     id.includes("slime") ||
     id.includes("honey_block")
   );
-}
-
-export function fallbackTextureColor(blockId: string) {
-  const id = blockId.toLowerCase();
-  if (id.includes("water") || id.includes("bubble_column")) {
-    return "#2563b8";
-  }
-  if (id.includes("cherry_leaves")) {
-    return "#f2a5c9";
-  }
-  if (id.includes("azalea_leaves")) {
-    return "#5f9f4a";
-  }
-  if (id.includes("grass_block")) {
-    return "#5f9f3f";
-  }
-  if (id.includes("short_grass") || id.includes("tall_grass") || id.includes("fern") || id.includes("vine")) {
-    return "#4f8f35";
-  }
-  if (id.includes("flower") || id.includes("poppy") || id.includes("dandelion") || id.includes("tulip") || id.includes("orchid") || id.includes("allium")) {
-    return "#d9d16b";
-  }
-  if (id.includes("leaves")) {
-    return "#3f7f38";
-  }
-  if (id.includes("glass") || id.includes("pane") || id.includes("ice")) {
-    return "#9fc7d1";
-  }
-  if (id.includes("fence") || id.includes("trapdoor") || id.includes("door") || id.includes("rail") || id.includes("bars") || id.includes("chain")) {
-    return "#8b8174";
-  }
-  if (id.includes("sand")) {
-    return "#d7c47a";
-  }
-  if (id.includes("grass") || id.includes("leaves") || id.includes("moss")) {
-    return "#4f8f3a";
-  }
-  if (id.includes("dirt") || id.includes("mud")) {
-    return "#7a5236";
-  }
-  if (id.includes("log") || id.includes("wood") || id.includes("planks")) {
-    return "#8a6138";
-  }
-  if (id.includes("snow")) {
-    return "#dce9ec";
-  }
-  if (id.includes("lava")) {
-    return "#e46b2a";
-  }
-  if (id.includes("air")) {
-    return "#111820";
-  }
-  return "#737f86";
 }

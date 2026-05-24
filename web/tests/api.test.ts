@@ -34,6 +34,12 @@ describe("api helpers", () => {
     expect(usesMapTint("minecraft:water")).toBe(true);
     expect(fallbackTextureColor("minecraft:grass_block")).toBe("#5f9f3f");
     expect(usesMapTint("minecraft:grass_block")).toBe(true);
+    expect(fallbackTextureColor("minecraft:spruce_stairs")).toBe("#6f4c2d");
+    expect(fallbackTextureColor("minecraft:spruce_stairs")).not.toBe(fallbackTextureColor("minecraft:air"));
+    expect(fallbackTextureColor("minecraft:oak_slab")).toBe("#9f7442");
+    expect(fallbackTextureColor("minecraft:stone_brick_stairs")).toBe("#7d8587");
+    expect(fallbackTextureColor("minecraft:smooth_quartz_slab")).toBe("#d8d1bf");
+    expect(fallbackTextureColor("minecraft:end_bricks")).toBe("#d7cf92");
     expect(usesMapTint("minecraft:oak_leaves")).toBe(false);
     expect(usesMapTint("minecraft:cherry_leaves")).toBe(false);
     expect(usesMapTint("minecraft:acacia_leaves")).toBe(false);

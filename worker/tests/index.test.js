@@ -12,6 +12,7 @@ import worker, {
   normalizeCleanupPayload,
   normalizeChunkBatchPayload,
   normalizeChunkSnapshot,
+  fallbackTextureColor,
   normalizeLandPayload,
   normalizeMapTileBackfillPayload,
   normalizeMarkerPayload,
@@ -351,6 +352,16 @@ describe("worker helpers", () => {
     expect(worldMetaKey("Bedrock level", "Overworld")).toBe("meta/v1/Bedrock_level/Overworld.json");
   });
 
+  it("colors stair and slab block ids by material instead of matching air inside stairs", () => {
+    expect(fallbackTextureColor("minecraft:air")).toBe("#111820");
+    expect(fallbackTextureColor("minecraft:spruce_stairs")).toBe("#6f4c2d");
+    expect(fallbackTextureColor("minecraft:spruce_stairs")).not.toBe(fallbackTextureColor("minecraft:air"));
+    expect(fallbackTextureColor("minecraft:oak_slab")).toBe("#9f7442");
+    expect(fallbackTextureColor("minecraft:stone_brick_stairs")).toBe("#7d8587");
+    expect(fallbackTextureColor("minecraft:smooth_quartz_slab")).toBe("#d8d1bf");
+    expect(fallbackTextureColor("minecraft:end_bricks")).toBe("#d7cf92");
+  });
+
   it("normalizes land payloads and keys", () => {
     const payload = normalizeLandPayload({
       claims: [
@@ -451,6 +462,34 @@ describe("worker routes", () => {
     const body = await chunks.json();
     expect(body.chunks).toHaveLength(1);
     expect(body.missing).toHaveLength(0);
+  });
+
+  it("renders stair map tiles with material colors instead of dark air fallback", async () => {
+    const env = createEnv();
+    const stairIndex = 1;
+    const upload = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(
+          createChunk({
+            palette: ["minecraft:grass_block", "minecraft:spruce_stairs", "minecraft:air"],
+            blocks: Array.from({ length: 256 }, (_, index) => (index === stairIndex ? 1 : 0)),
+            heights: Array.from({ length: 256 }, () => 128),
+          }),
+        ),
+      }),
+      env,
+      {},
+    );
+    expect(upload.status).toBe(200);
+
+    const tile = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
+    const png = readPng(await tile.arrayBuffer());
+    const pixel = pngPixel(png, 12, 4);
+    expect(pixel[3]).toBe(255);
+    expect(pixel[0] + pixel[1] + pixel[2]).toBeGreaterThan(120);
+    expect(pixel[0]).toBeGreaterThan(pixel[2]);
   });
 
   it("serves sparse chunk ranges without reading every missing chunk", async () => {
