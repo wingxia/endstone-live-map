@@ -903,6 +903,39 @@ describe("worker routes", () => {
     expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(true);
   });
 
+  it("serializes forced backfill writes to keep large tile rebuilds under Worker limits", async () => {
+    const env = createEnv();
+    for (const chunkX of [0, 16]) {
+      await env.MAP_DATA.put(`chunk-regions/v1/world/Overworld/${chunkX / 16}/0.json`, JSON.stringify({ version: 1, world: "world", dimension: "Overworld", chunks: [createChunk({ chunkX })] }), {
+        httpMetadata: { contentType: "application/json" },
+      });
+    }
+    const originalGet = env.MAP_DATA.get.bind(env.MAP_DATA);
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    env.MAP_DATA.get = async (key) => {
+      activeReads += 1;
+      maxActiveReads = Math.max(maxActiveReads, activeReads);
+      await Promise.resolve();
+      const result = await originalGet(key);
+      activeReads -= 1;
+      return result;
+    };
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 0, minChunkX: 0, maxChunkX: 31, minChunkZ: 0, maxChunkZ: 0, limit: 2, dryRun: false, force: true }),
+      }),
+      env,
+      {},
+    );
+
+    expect(await response.json()).toMatchObject({ ok: true, matched: 2, written: 2 });
+    expect(maxActiveReads).toBeLessThanOrEqual(4);
+  });
+
   it("serves transparent PNGs for missing low zoom image tiles", async () => {
     const env = createEnv();
     const response = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});

@@ -26,6 +26,8 @@ const MAP_TILE_MIN_ZOOM = 0;
 const MAP_TILE_MAX_ZOOM = 3;
 const MAP_TILE_BASE_ZOOM = 4;
 const MAP_TILE_WRITE_CONCURRENCY = 8;
+const MAP_TILE_BACKFILL_WRITE_CONCURRENCY = 1;
+const MAP_TILE_BACKFILL_READ_CONCURRENCY = 4;
 const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
 const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
 const CHUNK_DIRECT_READ_LIMIT = REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS;
@@ -573,7 +575,13 @@ async function handleMapTileBackfill(request, env) {
     key: mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ),
   }));
 
-  const results = payload.dryRun ? [] : await rebuildMapTiles(bucket, selected, { force: payload.force });
+  const results = payload.dryRun
+    ? []
+    : await rebuildMapTiles(bucket, selected, {
+        force: payload.force,
+        concurrency: MAP_TILE_BACKFILL_WRITE_CONCURRENCY,
+        readConcurrency: MAP_TILE_BACKFILL_READ_CONCURRENCY,
+      });
 
   return json({
     ok: true,
@@ -1384,7 +1392,7 @@ async function readChunkRegions(bucket, query, chunksByCoord) {
   );
 }
 
-async function readChunksForRange(bucket, query) {
+async function readChunksForRange(bucket, query, options = {}) {
   const chunksByCoord = new Map();
   const chunkCount = chunkCountForRange(query);
 
@@ -1402,7 +1410,7 @@ async function readChunksForRange(bucket, query) {
   }
 
   const readKeys = missingKeys.length <= CHUNK_DIRECT_READ_LIMIT ? missingKeys : await listChunkKeysForRange(bucket, query);
-  await mapWithConcurrency(readKeys, BATCH_WRITE_CONCURRENCY, async (key) => {
+  await mapWithConcurrency(readKeys, options.readConcurrency || BATCH_WRITE_CONCURRENCY, async (key) => {
     const chunk = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(key)));
     if (chunk) {
       chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
@@ -1457,12 +1465,12 @@ async function rebuildMapTilesForChunks(bucket, chunks) {
 }
 
 async function rebuildMapTiles(bucket, tiles, options = {}) {
-  return mapWithConcurrency(tiles, MAP_TILE_WRITE_CONCURRENCY, (tile) => rebuildMapTile(bucket, tile, options));
+  return mapWithConcurrency(tiles, options.concurrency || MAP_TILE_WRITE_CONCURRENCY, (tile) => rebuildMapTile(bucket, tile, options));
 }
 
 async function rebuildMapTile(bucket, tile, options = {}) {
   const range = chunkRangeForMapTile(tile);
-  const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range });
+  const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range }, { readConcurrency: options.readConcurrency });
   const { png, hasPixels, tileVersion } = renderMapTilePng(tile, chunksByCoord);
   const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
   if (!options.force) {
