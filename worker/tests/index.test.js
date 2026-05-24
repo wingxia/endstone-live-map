@@ -554,6 +554,34 @@ describe("worker routes", () => {
     expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(false);
   });
 
+  it("fills enclosed transparent holes in low zoom image tiles from neighboring colors", async () => {
+    const env = createEnv();
+    const chunks = [];
+    for (let chunkZ = 0; chunkZ < 2; chunkZ += 1) {
+      for (let chunkX = 0; chunkX < 2; chunkX += 1) {
+        if (chunkX === 1 && chunkZ === 1) {
+          continue;
+        }
+        chunks.push(createChunk({ chunkX, chunkZ, updatedAt: 20 + chunkX + chunkZ }));
+      }
+    }
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/batch", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ chunks }),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    const tile = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
+    const png = readPng(await tile.arrayBuffer());
+    expect(pngPixel(png, 192, 192)[3]).toBe(255);
+  });
+
   it("prunes historical all-air chunks from direct and region storage", async () => {
     const env = createEnv();
     await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createEmptyChunk({ chunkX: 0, chunkZ: 0 })), {

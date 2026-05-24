@@ -1654,6 +1654,9 @@ function renderMapTilePng(tile, chunksByCoord) {
       }
     }
   }
+  if (hasPixels) {
+    fillTransparentMapTileHoles(png);
+  }
   return { png, hasPixels, tileVersion };
 }
 
@@ -1722,6 +1725,68 @@ function fillPngRect(png, x, y, width, height, color) {
       png.data[offset + 3] = color[3];
     }
   }
+}
+
+function fillTransparentMapTileHoles(png) {
+  const pixelCount = MAP_TILE_SIZE * MAP_TILE_SIZE;
+  const queue = [];
+  const owner = new Int32Array(pixelCount);
+  owner.fill(-1);
+
+  for (let index = 0; index < pixelCount; index += 1) {
+    if (png.data[index * 4 + 3] === 0) {
+      continue;
+    }
+    owner[index] = index;
+    queue.push(index);
+  }
+
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const index = queue[cursor];
+    const x = index % MAP_TILE_SIZE;
+    const y = Math.floor(index / MAP_TILE_SIZE);
+    const source = owner[index];
+    for (const neighbor of transparentFillNeighbors(index, x, y)) {
+      if (owner[neighbor] !== -1) {
+        continue;
+      }
+      owner[neighbor] = source;
+      queue.push(neighbor);
+    }
+  }
+
+  for (let index = 0; index < pixelCount; index += 1) {
+    const offset = index * 4;
+    if (png.data[offset + 3] !== 0) {
+      continue;
+    }
+    const source = owner[index];
+    if (source === -1) {
+      continue;
+    }
+    const sourceOffset = source * 4;
+    png.data[offset] = png.data[sourceOffset];
+    png.data[offset + 1] = png.data[sourceOffset + 1];
+    png.data[offset + 2] = png.data[sourceOffset + 2];
+    png.data[offset + 3] = png.data[sourceOffset + 3];
+  }
+}
+
+function transparentFillNeighbors(index, x, y) {
+  const neighbors = [];
+  if (x > 0) {
+    neighbors.push(index - 1);
+  }
+  if (x < MAP_TILE_SIZE - 1) {
+    neighbors.push(index + 1);
+  }
+  if (y > 0) {
+    neighbors.push(index - MAP_TILE_SIZE);
+  }
+  if (y < MAP_TILE_SIZE - 1) {
+    neighbors.push(index + MAP_TILE_SIZE);
+  }
+  return neighbors;
 }
 
 export function mapTilesForChunk(world, dimension, chunkX, chunkZ) {
