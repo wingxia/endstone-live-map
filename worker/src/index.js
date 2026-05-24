@@ -1655,7 +1655,7 @@ function renderMapTilePng(tile, chunksByCoord) {
     }
   }
   if (hasPixels) {
-    fillTransparentMapTileHoles(png);
+    fillTransparentMapTileHoles(png, transparentFillPixelLimit(blockScale));
   }
   return { png, hasPixels, tileVersion };
 }
@@ -1727,48 +1727,76 @@ function fillPngRect(png, x, y, width, height, color) {
   }
 }
 
-function fillTransparentMapTileHoles(png) {
+function transparentFillPixelLimit(blockScale) {
+  const chunkPixelWidth = 16 * blockScale;
+  return Math.min(8192, Math.max(4096, chunkPixelWidth * chunkPixelWidth * 4));
+}
+
+function fillTransparentMapTileHoles(png, pixelLimit) {
   const pixelCount = MAP_TILE_SIZE * MAP_TILE_SIZE;
+  const visited = new Uint8Array(pixelCount);
   const queue = [];
-  const owner = new Int32Array(pixelCount);
-  owner.fill(-1);
+  const component = [];
 
-  for (let index = 0; index < pixelCount; index += 1) {
-    if (png.data[index * 4 + 3] === 0) {
+  for (let start = 0; start < pixelCount; start += 1) {
+    if (visited[start] || png.data[start * 4 + 3] !== 0) {
       continue;
     }
-    owner[index] = index;
-    queue.push(index);
-  }
 
-  for (let cursor = 0; cursor < queue.length; cursor += 1) {
-    const index = queue[cursor];
-    const x = index % MAP_TILE_SIZE;
-    const y = Math.floor(index / MAP_TILE_SIZE);
-    const source = owner[index];
-    for (const neighbor of transparentFillNeighbors(index, x, y)) {
-      if (owner[neighbor] !== -1) {
-        continue;
+    queue.length = 0;
+    component.length = 0;
+    queue.push(start);
+    visited[start] = 1;
+    let red = 0;
+    let green = 0;
+    let blue = 0;
+    let alpha = 0;
+    let boundary = 0;
+    let touchesEdge = false;
+
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const index = queue[cursor];
+      component.push(index);
+      const x = index % MAP_TILE_SIZE;
+      const y = Math.floor(index / MAP_TILE_SIZE);
+      if (x === 0 || y === 0 || x === MAP_TILE_SIZE - 1 || y === MAP_TILE_SIZE - 1) {
+        touchesEdge = true;
       }
-      owner[neighbor] = source;
-      queue.push(neighbor);
-    }
-  }
 
-  for (let index = 0; index < pixelCount; index += 1) {
-    const offset = index * 4;
-    if (png.data[offset + 3] !== 0) {
+      for (const neighbor of transparentFillNeighbors(index, x, y)) {
+        const offset = neighbor * 4;
+        if (png.data[offset + 3] === 0) {
+          if (!visited[neighbor]) {
+            visited[neighbor] = 1;
+            queue.push(neighbor);
+          }
+          continue;
+        }
+        red += png.data[offset];
+        green += png.data[offset + 1];
+        blue += png.data[offset + 2];
+        alpha += png.data[offset + 3];
+        boundary += 1;
+      }
+    }
+
+    if (touchesEdge || component.length > pixelLimit || boundary < 1) {
       continue;
     }
-    const source = owner[index];
-    if (source === -1) {
-      continue;
+
+    const color = [
+      Math.round(red / boundary),
+      Math.round(green / boundary),
+      Math.round(blue / boundary),
+      Math.round(alpha / boundary),
+    ];
+    for (const index of component) {
+      const offset = index * 4;
+      png.data[offset] = color[0];
+      png.data[offset + 1] = color[1];
+      png.data[offset + 2] = color[2];
+      png.data[offset + 3] = color[3];
     }
-    const sourceOffset = source * 4;
-    png.data[offset] = png.data[sourceOffset];
-    png.data[offset + 1] = png.data[sourceOffset + 1];
-    png.data[offset + 2] = png.data[sourceOffset + 2];
-    png.data[offset + 3] = png.data[sourceOffset + 3];
   }
 }
 

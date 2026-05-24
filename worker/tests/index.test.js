@@ -557,8 +557,8 @@ describe("worker routes", () => {
   it("fills enclosed transparent holes in low zoom image tiles from neighboring colors", async () => {
     const env = createEnv();
     const chunks = [];
-    for (let chunkZ = 0; chunkZ < 2; chunkZ += 1) {
-      for (let chunkX = 0; chunkX < 2; chunkX += 1) {
+    for (let chunkZ = 0; chunkZ < 4; chunkZ += 1) {
+      for (let chunkX = 0; chunkX < 4; chunkX += 1) {
         if (chunkX === 1 && chunkZ === 1) {
           continue;
         }
@@ -577,9 +577,13 @@ describe("worker routes", () => {
     );
 
     expect(response.status).toBe(200);
-    const tile = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
-    const png = readPng(await tile.arrayBuffer());
-    expect(pngPixel(png, 192, 192)[3]).toBe(255);
+    const z2Tile = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z2/0/0.png"), env, {});
+    const z2Png = readPng(await z2Tile.arrayBuffer());
+    expect(pngPixel(z2Png, 96, 96)[3]).toBe(255);
+
+    const z3Tile = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
+    const z3Png = readPng(await z3Tile.arrayBuffer());
+    expect(pngPixel(z3Png, 192, 192)[3]).toBe(0);
   });
 
   it("prunes historical all-air chunks from direct and region storage", async () => {
