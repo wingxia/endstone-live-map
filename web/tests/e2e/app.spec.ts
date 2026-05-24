@@ -34,7 +34,11 @@ type TestWorld = {
 };
 
 const GRASS_TILE_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4AWN47yr2HwAGYAKXL4eRBgAAAABJRU5ErkJggg==",
+  "iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAYAAABccqhmAAACvElEQVR4Ae3BAQGAMAACME4xozyaUTUI2859ny/ApAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZjXArAaY1QCzGmBWA8xqgFkNMKsBZv35IwQ8yVSV2gAAAABJRU5ErkJggg==",
+  "base64",
+);
+const EMPTY_TILE_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4AWMAAQAABQABNtCI3QAAAABJRU5ErkJggg==",
   "base64",
 );
 
@@ -612,6 +616,39 @@ test("uses low zoom image tiles and keeps max zoom chunk JSON rendering", async 
 
   await page.getByRole("button", { name: "Zoom in" }).click();
   await expect.poll(() => pageHasGrassPixels(page)).toBe(true);
+});
+
+test("treats one pixel placeholder low zoom tiles as missing", async ({ page }) => {
+  await mockBasicMap(page, {
+    world: {
+      version: 1,
+      world: "Bedrock level",
+      dimension: "Overworld",
+      status: "complete",
+      chunkCount: 256,
+      importedAt: 1,
+      updatedAt: 1,
+      bounds: {
+        minChunkX: -8,
+        maxChunkX: 8,
+        minChunkZ: -8,
+        maxChunkZ: 8,
+        minBlockX: -128,
+        maxBlockX: 143,
+        minBlockZ: -128,
+        maxBlockZ: 143,
+      },
+      topBlocks: { "minecraft:grass_block": 256 },
+    },
+  });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    await route.fulfill({ contentType: "image/png", body: EMPTY_TILE_PNG });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Zoom out" }).click();
+  await expect.poll(() => page.locator("img.chunk-image-tile-missing").count()).toBeGreaterThan(0);
+  await expect.poll(() => pageHasVisiblePlaceholderImageTile(page)).toBe(false);
 });
 
 test("keeps first load scoped to the initial viewport instead of fitting every imported chunk", async ({ page }) => {
@@ -1616,6 +1653,27 @@ async function pageHasGrassImageTile(page: Page) {
       return (
         image.complete &&
         image.naturalWidth > 0 &&
+        style.visibility !== "hidden" &&
+        style.display !== "none" &&
+        Number(style.opacity) > 0 &&
+        rect.right > 0 &&
+        rect.bottom > 0 &&
+        rect.left < window.innerWidth &&
+        rect.top < window.innerHeight
+      );
+    }),
+  );
+}
+
+async function pageHasVisiblePlaceholderImageTile(page: Page) {
+  return page.evaluate(() =>
+    [...document.querySelectorAll<HTMLImageElement>("img.chunk-image-tile")].some((image) => {
+      const style = window.getComputedStyle(image);
+      const rect = image.getBoundingClientRect();
+      return (
+        image.complete &&
+        image.naturalWidth < 256 &&
+        image.naturalHeight < 256 &&
         style.visibility !== "hidden" &&
         style.display !== "none" &&
         Number(style.opacity) > 0 &&

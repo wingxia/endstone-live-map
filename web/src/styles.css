@@ -195,11 +195,12 @@ textarea {
 
 .chunk-image-tile {
   display: block;
-  background: #17202a;
+  background: #4f7f38;
 }
 
 .chunk-image-tile-missing {
-  opacity: 0;
+  opacity: 0 !important;
+  visibility: hidden;
 }
 
 .side-panel {

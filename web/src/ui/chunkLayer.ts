@@ -235,7 +235,12 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       image.draggable = false;
       image.className = "chunk-tile chunk-image-tile";
       image.src = this.imageTileSrc(coords);
-      image.onload = () => done(undefined, image);
+      image.onload = () => {
+        if (image.naturalWidth < TILE_SIZE || image.naturalHeight < TILE_SIZE) {
+          image.classList.add("chunk-image-tile-missing");
+        }
+        done(undefined, image);
+      };
       image.onerror = () => {
         image.classList.add("chunk-image-tile-missing");
         done(undefined, image);

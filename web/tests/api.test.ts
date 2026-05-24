@@ -58,6 +58,15 @@ describe("api helpers", () => {
     expect(fallbackTextureColor("minecraft:wall_sign")).toBe("#8a6138");
     expect(fallbackTextureColor("minecraft:glow_lichen")).toBe("#78a88a");
     expect(fallbackTextureColor("minecraft:oxidized_lightning_rod")).toBe("#5b9a8f");
+    expect(fallbackTextureColor("minecraft:light_gray_concrete")).toBe("#a7abae");
+    expect(fallbackTextureColor("minecraft:light_gray_terracotta")).toBe("#876f66");
+    expect(fallbackTextureColor("minecraft:light_blue_concrete")).toBe("#4f9bc7");
+    expect(fallbackTextureColor("minecraft:prismarine_slab")).toBe("#5f9f96");
+    expect(fallbackTextureColor("minecraft:bamboo_mosaic")).toBe("#c8aa55");
+    expect(fallbackTextureColor("minecraft:gold_block")).toBe("#d9b64a");
+    expect(fallbackTextureColor("minecraft:iron_block")).toBe("#c6c4b8");
+    expect(fallbackTextureColor("minecraft:amethyst_block")).toBe("#9b78c8");
+    expect(fallbackTextureColor("minecraft:glowstone")).toBe("#d8a84a");
     expect(usesMapTint("minecraft:oak_leaves")).toBe(false);
     expect(usesMapTint("minecraft:cherry_leaves")).toBe(false);
     expect(usesMapTint("minecraft:acacia_leaves")).toBe(false);

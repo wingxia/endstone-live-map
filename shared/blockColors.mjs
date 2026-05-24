@@ -118,10 +118,81 @@ export function fallbackTextureColor(blockId, blockState = {}) {
   if (name.includes("bed") || name.includes("banner")) {
     return woolColor(name.replace("bed", "wool").replace("banner", "wool"));
   }
-  if (name.includes("chest") || name.includes("barrel") || name.includes("crafting_table") || name.includes("bookshelf") || name.includes("lectern")) {
+  if (name.includes("gold_block")) {
+    return "#d9b64a";
+  }
+  if (name.includes("iron_block")) {
+    return "#c6c4b8";
+  }
+  if (name.includes("diamond_block")) {
+    return "#6fc8c6";
+  }
+  if (name.includes("lapis_block")) {
+    return "#315caa";
+  }
+  if (name.includes("amethyst")) {
+    return "#9b78c8";
+  }
+  if (name.includes("prismarine")) {
+    return "#5f9f96";
+  }
+  if (name.includes("glowstone") || name.includes("shroomlight")) {
+    return "#d8a84a";
+  }
+  if (name.includes("sea_lantern")) {
+    return "#b8d9cf";
+  }
+  if (name.includes("calcite")) {
+    return "#d8d2c2";
+  }
+  if (name.includes("clay")) {
+    return "#9aa0a8";
+  }
+  if (name.includes("beacon")) {
+    return "#82c7d2";
+  }
+  if (name.includes("slime")) {
+    return "#78b85b";
+  }
+  if (name.includes("honey")) {
+    return "#d18f2f";
+  }
+  if (name.includes("cocoa")) {
+    return "#7b4a2e";
+  }
+  if (name.includes("dried_ghast")) {
+    return "#d6c7b3";
+  }
+  if (name.includes("mangrove_roots")) {
+    return "#5f3a2f";
+  }
+  if (
+    name.includes("chest") ||
+    name.includes("barrel") ||
+    name.includes("crafting_table") ||
+    name.includes("bookshelf") ||
+    name.includes("lectern") ||
+    name === "frame" ||
+    name.includes("item_frame")
+  ) {
     return "#8a6138";
   }
-  if (name.includes("furnace") || name.includes("piston") || name.includes("dispenser") || name.includes("dropper") || name.includes("observer") || name.includes("anvil") || name.includes("hopper") || name.includes("cauldron")) {
+  if (name.includes("smithing_table") || name.includes("loom") || name.includes("noteblock") || name.includes("note_block")) {
+    return "#7b4f30";
+  }
+  if (
+    name.includes("furnace") ||
+    name.includes("piston") ||
+    name.includes("dispenser") ||
+    name.includes("dropper") ||
+    name.includes("observer") ||
+    name.includes("anvil") ||
+    name.includes("hopper") ||
+    name.includes("cauldron") ||
+    name.includes("stonecutter") ||
+    name.includes("lodestone") ||
+    name.includes("piston_arm")
+  ) {
     return "#777a78";
   }
   if (name.includes("comparator") || name.includes("repeater") || name.includes("redstone") || name.includes("trip_wire") || name.includes("tripwire")) {
@@ -363,6 +434,7 @@ function isWoodMaterialName(name) {
     name.includes("wood") ||
     name.includes("stem") ||
     name.includes("hyphae") ||
+    name.includes("mosaic") ||
     name.includes("shelf") ||
     name.includes("scaffolding") ||
     name.includes("ladder") ||
@@ -386,6 +458,7 @@ function isGenericWoodMaterialName(name) {
     name.includes("wood") ||
     name.includes("stem") ||
     name.includes("hyphae") ||
+    name.includes("mosaic") ||
     name.includes("shelf") ||
     name.includes("scaffolding") ||
     name.includes("ladder") ||
@@ -451,11 +524,11 @@ function woolColor(name) {
   if (name.includes("black_wool")) {
     return "#25282a";
   }
-  if (name.includes("gray_wool")) {
-    return "#5a5f62";
-  }
   if (name.includes("light_gray_wool")) {
     return "#b0b4b4";
+  }
+  if (name.includes("gray_wool")) {
+    return "#5a5f62";
   }
   if (name.includes("brown_wool")) {
     return "#70482d";
@@ -475,11 +548,11 @@ function woolColor(name) {
   if (name.includes("lime_wool")) {
     return "#78aa3f";
   }
-  if (name.includes("blue_wool")) {
-    return "#3f5797";
-  }
   if (name.includes("light_blue_wool")) {
     return "#63a6c8";
+  }
+  if (name.includes("blue_wool")) {
+    return "#3f5797";
   }
   if (name.includes("cyan_wool")) {
     return "#338a91";
@@ -525,9 +598,6 @@ function oreColor(name) {
 }
 
 function terracottaColor(name) {
-  if (name.includes("blue_terracotta")) {
-    return "#4d5f86";
-  }
   if (name.includes("red_terracotta")) {
     return "#8f3f31";
   }
@@ -543,11 +613,17 @@ function terracottaColor(name) {
   if (name.includes("white_terracotta")) {
     return "#d1b1a1";
   }
+  if (name.includes("light_gray_terracotta")) {
+    return "#876f66";
+  }
   if (name.includes("gray_terracotta")) {
     return "#514a45";
   }
-  if (name.includes("light_gray_terracotta")) {
-    return "#876f66";
+  if (name.includes("light_blue_terracotta")) {
+    return "#6d7f9d";
+  }
+  if (name.includes("blue_terracotta")) {
+    return "#4d5f86";
   }
   if (name.includes("brown_terracotta")) {
     return "#6b422b";
@@ -580,11 +656,11 @@ function concreteColor(name) {
   if (name.includes("white_concrete")) {
     return "#d7dad8";
   }
-  if (name.includes("gray_concrete")) {
-    return "#565b5f";
-  }
   if (name.includes("light_gray_concrete")) {
     return "#a7abae";
+  }
+  if (name.includes("gray_concrete")) {
+    return "#565b5f";
   }
   if (name.includes("red_concrete")) {
     return "#8f2f2d";
@@ -601,11 +677,11 @@ function concreteColor(name) {
   if (name.includes("lime_concrete")) {
     return "#78a83f";
   }
-  if (name.includes("blue_concrete")) {
-    return "#364f8f";
-  }
   if (name.includes("light_blue_concrete")) {
     return "#4f9bc7";
+  }
+  if (name.includes("blue_concrete")) {
+    return "#364f8f";
   }
   if (name.includes("cyan_concrete")) {
     return "#267f89";
