@@ -72,7 +72,7 @@ interface GridLayerInternals {
 
 export interface ChunkLayerHandle extends GridLayer {
   setActive: (active: boolean) => void;
-  setKnownBounds: (bounds: ChunkLayerBounds | null) => void;
+  setKnownBounds: (bounds: ChunkLayerBounds | null, tileVersion?: string | number) => void;
   setWorldDimension: (world: string, dimension: string) => void;
   refreshChunk: (message: ChunkReadyMessage) => void;
   applyBlockUpdates: (message: BlockUpdatesMessage) => void;
@@ -112,8 +112,12 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       this.redraw();
     }
 
-    setKnownBounds(bounds: ChunkLayerBounds | null) {
+    setKnownBounds(bounds: ChunkLayerBounds | null, tileVersion?: string | number) {
       this.knownBounds = bounds;
+      if (tileVersion !== undefined && this.imageTileVersion !== tileVersion) {
+        this.imageTileVersion = tileVersion;
+        this.redrawVisibleImageTiles();
+      }
     }
 
     setWorldDimension(nextWorld: string, nextDimension: string) {
@@ -435,6 +439,16 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     private refreshImageTile(image: HTMLImageElement, coords: Coords) {
       image.classList.remove("chunk-image-tile-missing");
       image.src = this.imageTileSrc(coords);
+    }
+
+    private redrawVisibleImageTiles() {
+      const internals = this as unknown as GridLayerInternals;
+      for (const record of Object.values(internals._tiles || {})) {
+        if (!record.current || !isImageTileZoom(record.coords.z) || !(record.el instanceof HTMLImageElement)) {
+          continue;
+        }
+        this.refreshImageTile(record.el, record.coords);
+      }
     }
 
     private imageTileSrc(coords: Coords) {
