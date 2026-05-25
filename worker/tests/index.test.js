@@ -428,6 +428,7 @@ describe("worker helpers", () => {
     expect(fallbackTextureColor("minecraft:torch")).toBe("#d49a42");
     expect(fallbackTextureColor("minecraft:bamboo")).toBe("#7fa847");
     expect(fallbackTextureColor("minecraft:wheat")).toBe("#c8aa42");
+    expect(fallbackTextureColor("minecraft:kelp")).toBe("#4f8f35");
     expect(fallbackTextureColor("minecraft:white_carpet")).toBe("#d8d8d0");
     expect(fallbackTextureColor("minecraft:lantern")).toBe("#d8b35a");
     expect(fallbackTextureColor("minecraft:obsidian")).toBe("#46375f");

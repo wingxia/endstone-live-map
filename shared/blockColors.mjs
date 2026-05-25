@@ -41,7 +41,7 @@ export function fallbackTextureColor(blockId, blockState = {}) {
   if (name.includes("farmland")) {
     return "#6f4b31";
   }
-  if (name.includes("short_grass") || name.includes("tall_grass") || name.includes("fern") || name.includes("vine")) {
+  if (name.includes("short_grass") || name.includes("tall_grass") || name.includes("fern") || name.includes("vine") || name.includes("kelp") || name.includes("seagrass")) {
     return "#4f8f35";
   }
   if (name === "bamboo" || name.includes("bamboo_block")) {
