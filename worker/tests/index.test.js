@@ -138,15 +138,60 @@ class MockLiveRoomBinding {
   }
 }
 
-function createEnv() {
+const DEFAULT_TEXTURE_COLORS = {
+  "minecraft:grass_block": [95, 159, 63],
+  "minecraft:water": [37, 99, 184],
+  "minecraft:stone": [133, 139, 140],
+  "minecraft:spruce_stairs": [111, 76, 45],
+  "minecraft:oak_leaves": [63, 127, 56],
+  "minecraft:oak_trapdoor": [159, 116, 66],
+  "minecraft:poppy": [184, 58, 48],
+  "minecraft:obsidian": [18, 15, 31],
+  "minecraft:oak_planks": [159, 116, 66],
+  "minecraft:diamond_block": [111, 200, 198],
+};
+
+function createEnv(options = {}) {
   const live = new MockLiveRoomBinding();
-  return {
+  const env = {
     PLUGIN_TOKEN: "secret",
     MAP_DATA: new MockR2Bucket(),
     MARKER_DB: new MockMarkerDb(),
     LIVE_ROOM: live,
     live,
   };
+  if (options.textures !== false) {
+    seedTextureAtlas(env, options.textureColors || DEFAULT_TEXTURE_COLORS);
+  }
+  return env;
+}
+
+function seedTextureAtlas(env, colorsByBlock) {
+  const entries = Object.entries(colorsByBlock);
+  const tileSize = 4;
+  const columns = Math.max(1, Math.ceil(Math.sqrt(entries.length)));
+  const rows = Math.max(1, Math.ceil(entries.length / columns));
+  const atlas = new PNG({ width: columns * tileSize, height: rows * tileSize, colorType: 6 });
+  atlas.data.fill(0);
+  const manifest = { version: 1, tileSize, atlas: "/textures/atlas.png", blocks: {} };
+
+  entries.forEach(([blockId, color], index) => {
+    const x = (index % columns) * tileSize;
+    const y = Math.floor(index / columns) * tileSize;
+    manifest.blocks[blockId] = { x, y, w: tileSize, h: tileSize };
+    for (let pixelY = y; pixelY < y + tileSize; pixelY += 1) {
+      for (let pixelX = x; pixelX < x + tileSize; pixelX += 1) {
+        const offset = (pixelY * atlas.width + pixelX) * 4;
+        atlas.data[offset] = color[0];
+        atlas.data[offset + 1] = color[1];
+        atlas.data[offset + 2] = color[2];
+        atlas.data[offset + 3] = color[3] ?? 255;
+      }
+    }
+  });
+
+  env.MAP_DATA.objects.set("textures/v1/manifest.json", new MockR2Object(JSON.stringify(manifest), "application/json; charset=utf-8"));
+  env.MAP_DATA.objects.set("textures/v1/atlas.png", new MockR2Object(PNG.sync.write(atlas, { colorType: 6, inputColorType: 6 }), "image/png"));
 }
 
 function createChunk(overrides = {}) {
@@ -529,6 +574,141 @@ describe("worker routes", () => {
     expect(pixel[3]).toBe(255);
     expect(pixel[0] + pixel[1] + pixel[2]).toBeGreaterThan(120);
     expect(pixel[0]).toBeGreaterThan(pixel[2]);
+  });
+
+  it("renders low zoom map tiles from atlas average colors, including obsidian", async () => {
+    const env = createEnv({
+      textureColors: {
+        "minecraft:grass_block": [95, 159, 63],
+        "minecraft:obsidian": [18, 15, 31],
+      },
+    });
+    const blocks = Array.from({ length: 256 }, () => 0);
+    blocks[0] = 1;
+    const upload = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(
+          createChunk({
+            palette: ["minecraft:grass_block", "minecraft:obsidian", "minecraft:air"],
+            blocks,
+            heights: Array.from({ length: 256 }, () => 100),
+          }),
+        ),
+      }),
+      env,
+      {},
+    );
+    expect(upload.status).toBe(200);
+
+    const tile = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
+    const png = readPng(await tile.arrayBuffer());
+    const pixel = pngPixel(png, 4, 4);
+    expect(pixel[3]).toBe(255);
+    expect(pixel[0]).toBeLessThan(30);
+    expect(pixel[1]).toBeLessThan(30);
+    expect(pixel[2]).toBeLessThan(45);
+  });
+
+  it("uses atlas colors for common block families instead of fallback colors", async () => {
+    const env = createEnv({
+      textureColors: {
+        "minecraft:stone": [11, 22, 33],
+        "minecraft:oak_planks": [120, 70, 30],
+        "minecraft:obsidian": [18, 15, 31],
+        "minecraft:diamond_block": [20, 180, 190],
+        "minecraft:oak_leaves": [30, 120, 40],
+      },
+    });
+    const palette = ["minecraft:stone", "minecraft:oak_planks", "minecraft:obsidian", "minecraft:diamond_block", "minecraft:oak_leaves", "minecraft:air"];
+    const blocks = Array.from({ length: 256 }, () => 0);
+    for (let index = 0; index < palette.length - 1; index += 1) {
+      blocks[index] = index;
+    }
+
+    const upload = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(
+          createChunk({
+            palette,
+            blocks,
+            heights: Array.from({ length: 256 }, () => 100),
+          }),
+        ),
+      }),
+      env,
+      {},
+    );
+    expect(upload.status).toBe(200);
+
+    const tile = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
+    const png = readPng(await tile.arrayBuffer());
+    expect(pngPixel(png, 4, 4)[2]).toBeGreaterThan(pngPixel(png, 4, 4)[0]);
+    expect(pngPixel(png, 12, 4)[0]).toBeGreaterThan(pngPixel(png, 12, 4)[2]);
+    expect(pngPixel(png, 20, 4)[0]).toBeLessThan(30);
+    expect(pngPixel(png, 28, 4)[1]).toBeGreaterThan(150);
+    expect(pngPixel(png, 36, 4)[1]).toBeGreaterThan(pngPixel(png, 36, 4)[0]);
+  });
+
+  it("deletes low zoom image tiles when texture colors are unavailable", async () => {
+    const env = createEnv({ textures: false });
+    const key = "map-tiles/v1/world/Overworld/z3/0/0.png";
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk()), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put(key, new Uint8Array([1, 2, 3]), {
+      httpMetadata: { contentType: "image/png" },
+    });
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true }),
+      }),
+      env,
+      {},
+    );
+
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      tiles: [expect.objectContaining({ deleted: true, missingColorReason: "texture_manifest_missing", missingColors: ["minecraft:grass_block"] })],
+    });
+    expect(env.MAP_DATA.objects.has(key)).toBe(false);
+  });
+
+  it("deletes low zoom image tiles when a non-air block is missing from the atlas", async () => {
+    const env = createEnv({ textureColors: { "minecraft:grass_block": [95, 159, 63] } });
+    const key = "map-tiles/v1/world/Overworld/z3/0/0.png";
+    const blocks = Array.from({ length: 256 }, () => 0);
+    blocks[0] = 1;
+    await env.MAP_DATA.put(
+      "chunks/v1/world/Overworld/0/0.json",
+      JSON.stringify(createChunk({ palette: ["minecraft:grass_block", "minecraft:obsidian", "minecraft:air"], blocks })),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+    await env.MAP_DATA.put(key, new Uint8Array([1, 2, 3]), {
+      httpMetadata: { contentType: "image/png" },
+    });
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true }),
+      }),
+      env,
+      {},
+    );
+
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      tiles: [expect.objectContaining({ deleted: true, missingColorReason: "texture_color_missing", missingColors: ["minecraft:obsidian"] })],
+    });
+    expect(env.MAP_DATA.objects.has(key)).toBe(false);
   });
 
   it("keeps air-only columns transparent in low zoom image tiles", async () => {

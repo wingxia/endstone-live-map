@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createConnection } from "mysql2/promise";
 import { PNG } from "pngjs";
 import { fallbackTextureColor } from "../../shared/blockColors.mjs";
@@ -1593,23 +1594,29 @@ async function rebuildMapTilesForChunks(bucket, chunks) {
 }
 
 async function rebuildMapTiles(bucket, tiles, options = {}) {
-  return mapWithConcurrency(tiles, options.concurrency || MAP_TILE_WRITE_CONCURRENCY, (tile) => rebuildMapTile(bucket, tile, options));
+  const textureColors = options.textureColors || (await loadTextureColorIndex(bucket));
+  return mapWithConcurrency(tiles, options.concurrency || MAP_TILE_WRITE_CONCURRENCY, (tile) => rebuildMapTile(bucket, tile, { ...options, textureColors }));
 }
 
 async function rebuildMapTile(bucket, tile, options = {}) {
   const range = chunkRangeForMapTile(tile);
   const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range }, { readConcurrency: options.readConcurrency });
-  const { png, hasPixels, tileVersion } = renderMapTilePng(tile, chunksByCoord);
+  const textureColors = options.textureColors || (await loadTextureColorIndex(bucket));
+  const { png, hasPixels, tileVersion, missingColors, missingColorReason } = renderMapTilePng(tile, chunksByCoord, textureColors);
   const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
+  if (missingColors.length > 0) {
+    await bucket.delete(key);
+    return { ...tile, key, deleted: true, missingColors, missingColorReason, chunks: chunksByCoord.size };
+  }
+  if (!hasPixels) {
+    await bucket.delete(key);
+    return { ...tile, key, deleted: true, chunks: chunksByCoord.size };
+  }
   if (!options.force) {
     const existingVersion = await mapTileObjectVersion(bucket, key);
     if (existingVersion > tileVersion) {
       return { ...tile, key, skipped: true, deleted: false, chunks: chunksByCoord.size };
     }
-  }
-  if (!hasPixels) {
-    await bucket.delete(key);
-    return { ...tile, key, deleted: true, chunks: chunksByCoord.size };
   }
   const buffer = PNG.sync.write(png, { colorType: 6, inputColorType: 6 });
   await bucket.put(key, buffer, {
@@ -1619,7 +1626,7 @@ async function rebuildMapTile(bucket, tile, options = {}) {
   return { ...tile, key, deleted: false, chunks: chunksByCoord.size };
 }
 
-function renderMapTilePng(tile, chunksByCoord) {
+function renderMapTilePng(tile, chunksByCoord, textureColors) {
   const png = new PNG({ width: MAP_TILE_SIZE, height: MAP_TILE_SIZE, colorType: 6 });
   png.data.fill(0);
 
@@ -1627,6 +1634,7 @@ function renderMapTilePng(tile, chunksByCoord) {
   const blockScale = 2 ** tile.zoom;
   let hasPixels = false;
   let tileVersion = 0;
+  const missingColors = new Set();
   for (const chunk of chunksByCoord.values()) {
     tileVersion = Math.max(tileVersion, chunk.updatedAt || 0);
     for (let localZ = 0; localZ < 16; localZ += 1) {
@@ -1646,7 +1654,10 @@ function renderMapTilePng(tile, chunksByCoord) {
         if (isAirBlock(blockId) && (isAirBlock(overlayBlockId) || overlayHeight <= MIN_COLUMN_HEIGHT)) {
           continue;
         }
-        const color = mapTileColumnColor(blockId, blockState, overlayBlockId, overlayState, Math.max(height, overlayHeight), worldX, worldZ, chunksByCoord);
+        const color = mapTileColumnColor(blockId, blockState, overlayBlockId, overlayState, Math.max(height, overlayHeight), worldX, worldZ, chunksByCoord, textureColors, missingColors);
+        if (!color) {
+          continue;
+        }
         const pixelX = (worldX - tileRange.minBlockX) * blockScale;
         const pixelY = (worldZ - tileRange.minBlockZ) * blockScale;
         fillPngRect(png, pixelX, pixelY, blockScale, blockScale, color);
@@ -1657,7 +1668,13 @@ function renderMapTilePng(tile, chunksByCoord) {
   if (hasPixels) {
     fillTransparentMapTileHoles(png, transparentFillPixelLimit(blockScale));
   }
-  return { png, hasPixels, tileVersion };
+  return {
+    png,
+    hasPixels,
+    tileVersion,
+    missingColors: [...missingColors].sort(),
+    missingColorReason: missingColors.size > 0 ? textureColors.reason || "texture_color_missing" : "",
+  };
 }
 
 async function mapTileObjectVersion(bucket, key) {
@@ -1666,11 +1683,193 @@ async function mapTileObjectVersion(bucket, key) {
   return Number.isFinite(version) ? version : 0;
 }
 
-function mapTileColumnColor(blockId, blockState, overlayBlockId, overlayState, height, worldX, worldZ, chunksByCoord) {
+async function loadTextureColorIndex(bucket) {
+  const manifestObject = await bucket.get(TEXTURE_MANIFEST_KEY);
+  if (!manifestObject) {
+    return { ok: false, reason: "texture_manifest_missing", colors: new Map() };
+  }
+  const atlasObject = await bucket.get(TEXTURE_ATLAS_KEY);
+  if (!atlasObject) {
+    return { ok: false, reason: "texture_atlas_missing", colors: new Map() };
+  }
+
+  try {
+    const manifest = await readR2Json(manifestObject);
+    const entries = manifest?.blocks;
+    if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
+      return { ok: false, reason: "texture_manifest_invalid", colors: new Map() };
+    }
+
+    const atlasBytes = Buffer.from(await atlasObject.arrayBuffer());
+    const atlas = PNG.sync.read(atlasBytes);
+    const colors = new Map();
+    for (const [blockId, entry] of Object.entries(entries)) {
+      const color = averageAtlasEntryColor(atlas, entry);
+      if (color) {
+        setTextureColor(colors, blockId, color);
+      }
+    }
+
+    if (colors.size < 1) {
+      return { ok: false, reason: "texture_colors_empty", colors };
+    }
+    return { ok: true, reason: "", colors };
+  } catch (error) {
+    return { ok: false, reason: "texture_atlas_invalid", colors: new Map(), message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function averageAtlasEntryColor(atlas, entry) {
+  const x = Number(entry?.x);
+  const y = Number(entry?.y);
+  const width = Number(entry?.w);
+  const height = Number(entry?.h);
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+    return null;
+  }
+
+  const startX = Math.max(0, Math.floor(x));
+  const startY = Math.max(0, Math.floor(y));
+  const endX = Math.min(atlas.width, Math.ceil(x + width));
+  const endY = Math.min(atlas.height, Math.ceil(y + height));
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  let alpha = 0;
+  for (let pixelY = startY; pixelY < endY; pixelY += 1) {
+    for (let pixelX = startX; pixelX < endX; pixelX += 1) {
+      const offset = (pixelY * atlas.width + pixelX) * 4;
+      const pixelAlpha = atlas.data[offset + 3];
+      if (pixelAlpha < 8) {
+        continue;
+      }
+      red += atlas.data[offset] * pixelAlpha;
+      green += atlas.data[offset + 1] * pixelAlpha;
+      blue += atlas.data[offset + 2] * pixelAlpha;
+      alpha += pixelAlpha;
+    }
+  }
+  if (alpha < 1) {
+    return null;
+  }
+  return [clampByte(red / alpha), clampByte(green / alpha), clampByte(blue / alpha), 255];
+}
+
+function setTextureColor(colors, blockId, color) {
+  for (const key of blockColorKeys(blockId)) {
+    colors.set(key, color);
+  }
+}
+
+function blockColorKeys(blockId) {
+  const id = normalizeTextureBlockId(blockId);
+  const name = stripBlockNamespace(id);
+  return [...new Set([id, name])];
+}
+
+function textureColorForBlock(textureColors, blockId, blockState) {
+  if (!textureColors.ok) {
+    return null;
+  }
+  for (const candidate of textureColorCandidates(blockId, blockState)) {
+    const color = textureColors.colors.get(candidate);
+    if (color) {
+      return color;
+    }
+  }
+  return null;
+}
+
+function textureColorCandidates(blockId, blockState) {
+  const id = normalizeTextureBlockId(blockId);
+  const name = stripBlockNamespace(id);
+  const candidates = [id, name];
+  if (name === "flowing_water") {
+    candidates.push("minecraft:water", "water");
+  }
+  if (name === "flowing_lava") {
+    candidates.push("minecraft:lava", "lava");
+  }
+
+  for (const material of stateTextureMaterials(name, blockState)) {
+    candidates.push(`minecraft:${material}`, material);
+  }
+
+  if (name.endsWith("_block")) {
+    candidates.push(`minecraft:${name.slice(0, -"_block".length)}`, name.slice(0, -"_block".length));
+  }
+  return [...new Set(candidates)];
+}
+
+function stateTextureMaterials(name, state) {
+  const materials = [];
+  const woodType = stateTokenValue(state, ["wood_type", "minecraft:wood_type"]);
+  if (woodType && (name.includes("wooden_slab") || name.includes("wooden_double_slab"))) {
+    materials.push(`${woodType}_slab`, `${woodType}_planks`);
+  }
+
+  const stoneType = stateTokenValue(state, [
+    "stone_slab_type",
+    "minecraft:stone_slab_type",
+    "stone_slab_type_2",
+    "minecraft:stone_slab_type_2",
+    "stone_slab_type_3",
+    "minecraft:stone_slab_type_3",
+    "stone_slab_type_4",
+    "minecraft:stone_slab_type_4",
+  ]);
+  if (stoneType && name.includes("slab")) {
+    materials.push(`${stoneType}_slab`, stoneType);
+    if (stoneType === "wood") {
+      materials.push("oak_slab", "oak_planks");
+    }
+    if (stoneType === "smooth_stone") {
+      materials.push("stone_slab", "smooth_stone");
+    }
+  }
+  return materials;
+}
+
+function stateTokenValue(state, keys) {
+  if (!state || typeof state !== "object") {
+    return "";
+  }
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(state, key)) {
+      return stripBlockNamespace(String(state[key]).toLowerCase());
+    }
+  }
+  return "";
+}
+
+function normalizeTextureBlockId(value) {
+  const id = String(value || "minecraft:air").toLowerCase();
+  return id.includes(":") ? id : `minecraft:${id}`;
+}
+
+function stripBlockNamespace(id) {
+  const parts = String(id || "").split(":");
+  return parts[parts.length - 1] || "air";
+}
+
+function mapTileColumnColor(blockId, blockState, overlayBlockId, overlayState, height, worldX, worldZ, chunksByCoord, textureColors, missingColors) {
   const hasBase = !isAirBlock(blockId);
-  let color = hexToRgba(hasBase ? fallbackTextureColor(blockId, blockState) : fallbackTextureColor(overlayBlockId, overlayState));
+  const baseColor = hasBase ? textureColorForBlock(textureColors, blockId, blockState) : null;
+  const hasOverlay = !isAirBlock(overlayBlockId);
+  const overlayColor = hasOverlay ? textureColorForBlock(textureColors, overlayBlockId, overlayState) : null;
+  if (hasBase && !baseColor) {
+    missingColors.add(blockId);
+  }
+  if (hasOverlay && !overlayColor) {
+    missingColors.add(overlayBlockId);
+  }
+  if ((hasBase && !baseColor) || (hasOverlay && !overlayColor)) {
+    return null;
+  }
+
+  let color = hasBase ? baseColor : overlayColor;
   if (!isAirBlock(overlayBlockId)) {
-    color = hasBase ? mixColors(color, hexToRgba(fallbackTextureColor(overlayBlockId, overlayState)), 0.28) : color;
+    color = hasBase ? mixColors(color, overlayColor, 0.28) : color;
   }
   color = applyHeightShade(color, height);
 
@@ -2225,17 +2424,6 @@ function decodeBase64(value) {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
-}
-
-function hexToRgba(hex) {
-  const value = String(hex || "#000000").replace("#", "");
-  const normalized = value.length === 3 ? value.split("").map((char) => `${char}${char}`).join("") : value.padEnd(6, "0").slice(0, 6);
-  return [
-    Number.parseInt(normalized.slice(0, 2), 16),
-    Number.parseInt(normalized.slice(2, 4), 16),
-    Number.parseInt(normalized.slice(4, 6), 16),
-    255,
-  ];
 }
 
 function mixColors(left, right, amount) {
