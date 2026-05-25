@@ -1,5 +1,6 @@
 import type { Coords, DoneCallback, GridLayer } from "leaflet";
 
+import { fallbackTextureColor } from "../../../shared/blockColors.mjs";
 import {
   fetchChunks,
   fetchTextureManifest,
@@ -15,6 +16,8 @@ import {
 } from "../api";
 import { blockColumnIndex, blockToChunk } from "./coords";
 import { isLikelyTransparentTextureBlock, isMapDecorationBlock, isPlantBlock } from "./mapBlocks";
+
+export { fallbackTextureColor };
 
 const BLOCKS_PER_CHUNK = 16;
 const TILE_SIZE = 256;
@@ -69,7 +72,7 @@ interface GridLayerInternals {
 
 export interface ChunkLayerHandle extends GridLayer {
   setActive: (active: boolean) => void;
-  setKnownBounds: (bounds: ChunkLayerBounds | null) => void;
+  setKnownBounds: (bounds: ChunkLayerBounds | null, tileVersion?: string | number) => void;
   setWorldDimension: (world: string, dimension: string) => void;
   refreshChunk: (message: ChunkReadyMessage) => void;
   applyBlockUpdates: (message: BlockUpdatesMessage) => void;
@@ -109,8 +112,12 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       this.redraw();
     }
 
-    setKnownBounds(bounds: ChunkLayerBounds | null) {
+    setKnownBounds(bounds: ChunkLayerBounds | null, tileVersion?: string | number) {
       this.knownBounds = bounds;
+      if (tileVersion !== undefined && this.imageTileVersion !== tileVersion) {
+        this.imageTileVersion = tileVersion;
+        this.redrawVisibleImageTiles();
+      }
     }
 
     setWorldDimension(nextWorld: string, nextDimension: string) {
@@ -203,6 +210,9 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
 
     createTile(coords: Coords, done: DoneCallback): HTMLElement {
       if (isImageTileZoom(coords.z)) {
+        if (!tileIntersectsChunkBounds(coords, this.knownBounds)) {
+          return this.createBlankImageTile(done);
+        }
         return this.createImageTile(coords, done);
       }
       const canvas = document.createElement("canvas");
@@ -225,12 +235,26 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       image.draggable = false;
       image.className = "chunk-tile chunk-image-tile";
       image.src = this.imageTileSrc(coords);
-      image.onload = () => done(undefined, image);
+      image.onload = () => {
+        if (image.naturalWidth < TILE_SIZE || image.naturalHeight < TILE_SIZE) {
+          image.classList.add("chunk-image-tile-missing");
+        }
+        done(undefined, image);
+      };
       image.onerror = () => {
         image.classList.add("chunk-image-tile-missing");
         done(undefined, image);
       };
       return image;
+    }
+
+    private createBlankImageTile(done: DoneCallback): HTMLElement {
+      const tile = document.createElement("div");
+      tile.className = "chunk-tile chunk-image-tile chunk-image-tile-missing";
+      tile.style.width = `${TILE_SIZE}px`;
+      tile.style.height = `${TILE_SIZE}px`;
+      window.setTimeout(() => done(undefined, tile), 0);
+      return tile;
     }
 
     private async drawTile(
@@ -422,6 +446,16 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       image.src = this.imageTileSrc(coords);
     }
 
+    private redrawVisibleImageTiles() {
+      const internals = this as unknown as GridLayerInternals;
+      for (const record of Object.values(internals._tiles || {})) {
+        if (!record.current || !isImageTileZoom(record.coords.z) || !(record.el instanceof HTMLImageElement)) {
+          continue;
+        }
+        this.refreshImageTile(record.el, record.coords);
+      }
+    }
+
     private imageTileSrc(coords: Coords) {
       return mapImageTileUrl(this.worldName, this.dimensionName, coords.z, coords.x, coords.y, this.imageTileVersion);
     }
@@ -526,6 +560,14 @@ export function lowZoomTileCoverage(coords: Pick<Coords, "x" | "y" | "z">): Chun
     minChunkZ: range.minChunkZ,
     maxChunkZ: range.maxChunkZ,
   };
+}
+
+export function tileIntersectsChunkBounds(coords: Pick<Coords, "x" | "y" | "z">, bounds: ChunkLayerBounds | null) {
+  if (!bounds) {
+    return true;
+  }
+  const range = lowZoomTileCoverage(coords);
+  return !(range.maxChunkX < bounds.minChunkX || range.minChunkX > bounds.maxChunkX || range.maxChunkZ < bounds.minChunkZ || range.minChunkZ > bounds.maxChunkZ);
 }
 
 function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: TileChunkRange, atlas: AtlasResource, chunksByCoord: Map<string, ChunkSnapshot>) {
@@ -728,20 +770,20 @@ function drawBlock(
     return;
   }
   if (usesMapTint(blockId)) {
-    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillStyle = fallbackTextureColor(blockId, state);
     ctx.fillRect(x, y, size, size);
     return;
   }
   const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
   if (atlas.image && entry) {
     if (usesTransparentTextureUnderlay(blockId)) {
-      ctx.fillStyle = fallbackTextureColor(blockId);
+      ctx.fillStyle = fallbackTextureColor(blockId, state);
       ctx.fillRect(x, y, size, size);
     }
     drawAtlasEntry(ctx, atlas.image, entry, x, y, size);
     return;
   }
-  ctx.fillStyle = fallbackTextureColor(blockId);
+  ctx.fillStyle = fallbackTextureColor(blockId, state);
   ctx.fillRect(x, y, size, size);
 }
 
@@ -777,7 +819,7 @@ function drawStatefulPartialBlock(
 
 function drawCakeBlock(ctx: CanvasRenderingContext2D, blockId: string, state: BlockStateMap, x: number, y: number, size: number, layer: "base" | "overlay") {
   if (layer === "base") {
-    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillStyle = fallbackTextureColor(blockId, state);
     ctx.fillRect(x, y, size, size);
   }
   const inset = Math.max(1, Math.floor(size * 0.12));
@@ -798,7 +840,7 @@ function drawCakeBlock(ctx: CanvasRenderingContext2D, blockId: string, state: Bl
 
 function drawEndRodBlock(ctx: CanvasRenderingContext2D, blockId: string, state: BlockStateMap, x: number, y: number, size: number, layer: "base" | "overlay") {
   if (layer === "base") {
-    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillStyle = fallbackTextureColor(blockId, state);
     ctx.fillRect(x, y, size, size);
   }
   const vertical = isVerticalFacing(stateValue(state, "facing_direction", stateValue(state, "facing", "up")));
@@ -832,7 +874,7 @@ function drawTrapdoorBlock(
   layer: "base" | "overlay",
 ) {
   if (layer === "base") {
-    ctx.fillStyle = fallbackTextureColor(blockId);
+    ctx.fillStyle = fallbackTextureColor(blockId, state);
     ctx.fillRect(x, y, size, size);
   }
   const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
@@ -845,7 +887,7 @@ function drawTrapdoorBlock(
     if (entry && atlas.image) {
       drawAtlasEntry(ctx, atlas.image, entry, x + inset, y + inset, Math.max(1, size - inset * 2));
     } else {
-      ctx.fillStyle = fallbackTextureColor(blockId);
+      ctx.fillStyle = fallbackTextureColor(blockId, state);
       ctx.fillRect(x + inset, y + inset, Math.max(1, size - inset * 2), thickness);
     }
     return;
@@ -853,7 +895,7 @@ function drawTrapdoorBlock(
 
   const edge = facingEdge(facing);
   const thickness = Math.max(1, Math.floor(size * 0.2));
-  ctx.fillStyle = fallbackTextureColor(blockId);
+  ctx.fillStyle = fallbackTextureColor(blockId, state);
   if (edge === "north") {
     ctx.fillRect(x, y, size, thickness);
   } else if (edge === "south") {
@@ -1187,57 +1229,4 @@ export function usesTransparentTextureUnderlay(blockId: string) {
     id.includes("slime") ||
     id.includes("honey_block")
   );
-}
-
-export function fallbackTextureColor(blockId: string) {
-  const id = blockId.toLowerCase();
-  if (id.includes("water") || id.includes("bubble_column")) {
-    return "#2563b8";
-  }
-  if (id.includes("cherry_leaves")) {
-    return "#f2a5c9";
-  }
-  if (id.includes("azalea_leaves")) {
-    return "#5f9f4a";
-  }
-  if (id.includes("grass_block")) {
-    return "#5f9f3f";
-  }
-  if (id.includes("short_grass") || id.includes("tall_grass") || id.includes("fern") || id.includes("vine")) {
-    return "#4f8f35";
-  }
-  if (id.includes("flower") || id.includes("poppy") || id.includes("dandelion") || id.includes("tulip") || id.includes("orchid") || id.includes("allium")) {
-    return "#d9d16b";
-  }
-  if (id.includes("leaves")) {
-    return "#3f7f38";
-  }
-  if (id.includes("glass") || id.includes("pane") || id.includes("ice")) {
-    return "#9fc7d1";
-  }
-  if (id.includes("fence") || id.includes("trapdoor") || id.includes("door") || id.includes("rail") || id.includes("bars") || id.includes("chain")) {
-    return "#8b8174";
-  }
-  if (id.includes("sand")) {
-    return "#d7c47a";
-  }
-  if (id.includes("grass") || id.includes("leaves") || id.includes("moss")) {
-    return "#4f8f3a";
-  }
-  if (id.includes("dirt") || id.includes("mud")) {
-    return "#7a5236";
-  }
-  if (id.includes("log") || id.includes("wood") || id.includes("planks")) {
-    return "#8a6138";
-  }
-  if (id.includes("snow")) {
-    return "#dce9ec";
-  }
-  if (id.includes("lava")) {
-    return "#e46b2a";
-  }
-  if (id.includes("air")) {
-    return "#111820";
-  }
-  return "#737f86";
 }

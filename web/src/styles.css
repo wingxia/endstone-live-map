@@ -199,7 +199,8 @@ textarea {
 }
 
 .chunk-image-tile-missing {
-  opacity: 0;
+  opacity: 0 !important;
+  visibility: hidden;
 }
 
 .side-panel {

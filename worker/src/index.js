@@ -1,5 +1,8 @@
 import { createConnection } from "mysql2/promise";
 import { PNG } from "pngjs";
+import { fallbackTextureColor } from "../../shared/blockColors.mjs";
+
+export { fallbackTextureColor };
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -15,12 +18,21 @@ const REGION_SIZE_CHUNKS = 16;
 const BATCH_WRITE_CONCURRENCY = 32;
 const MAP_TILE_PREFIX = "map-tiles/v1/";
 const MAP_TILE_SIZE = 256;
+const EMPTY_PNG = Uint8Array.from([
+  137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10,
+  73, 68, 65, 84, 120, 1, 99, 0, 1, 0, 0, 5, 0, 1, 54, 208, 136, 221, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+]);
 const MAP_TILE_MIN_ZOOM = 0;
 const MAP_TILE_MAX_ZOOM = 3;
 const MAP_TILE_BASE_ZOOM = 4;
 const MAP_TILE_WRITE_CONCURRENCY = 8;
+const MAP_TILE_BACKFILL_WRITE_CONCURRENCY = 1;
+const MAP_TILE_BACKFILL_READ_CONCURRENCY = 4;
+const MAP_TILE_BACKFILL_WRITE_LIMIT = 1;
 const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
 const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
+const EMPTY_CHUNK_PRUNE_WRITE_LIMIT = 8;
+const CHUNK_DIRECT_READ_LIMIT = REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS;
 const MIN_COLUMN_HEIGHT = -64;
 const SEA_LEVEL = 63;
 const WORLD_META_SAMPLE_LIMIT = 128;
@@ -139,6 +151,14 @@ export default {
           return auth;
         }
         return handleBlockUpdatesUpload(request, env);
+      }
+
+      if (url.pathname === "/api/plugin/chunks/prune-empty") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleEmptyChunkPrune(request, env);
       }
 
       if (url.pathname === "/api/plugin/world-meta") {
@@ -498,34 +518,7 @@ async function handleChunksGet(url, env) {
 
   const chunks = [];
   const missing = [];
-  const chunksByCoord = new Map();
-  const readKeys = [];
-
-  await readChunkRegions(bucket, query, chunksByCoord);
-
-  const objectLists = await Promise.all(
-    range(query.minChunkX, query.maxChunkX).map((chunkX) => listR2Objects(bucket, chunkPrefix(query.world, query.dimension, chunkX))),
-  );
-
-  for (const objects of objectLists) {
-    for (const object of objects) {
-      const parsed = parseChunkKey(object.key);
-      if (!parsed || parsed.chunkX < query.minChunkX || parsed.chunkX > query.maxChunkX || parsed.chunkZ < query.minChunkZ || parsed.chunkZ > query.maxChunkZ) {
-        continue;
-      }
-      readKeys.push(object.key);
-    }
-  }
-
-  await Promise.all(
-    readKeys.map(async (key) => {
-      const object = await bucket.get(key);
-      if (object) {
-        const chunk = await readR2Json(object);
-        chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
-      }
-    }),
-  );
+  const chunksByCoord = await readChunksForRange(bucket, query);
 
   for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
     for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
@@ -555,13 +548,23 @@ async function handleMapTileGet(url, env) {
   }
   const object = await bucket.get(mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ));
   if (!object) {
-    return new Response(null, { status: 404, headers: CORS_HEADERS });
+    return pngResponse(EMPTY_PNG, { "Cache-Control": "public, max-age=60" });
   }
   const headers = new Headers(CORS_HEADERS);
   object.writeHttpMetadata?.(headers);
   headers.set("Content-Type", headers.get("Content-Type") || "image/png");
   headers.set("Cache-Control", "public, max-age=31536000, immutable");
   return new Response(object.body, { headers });
+}
+
+function pngResponse(body, extraHeaders = {}) {
+  return new Response(body, {
+    headers: {
+      ...CORS_HEADERS,
+      "Content-Type": "image/png",
+      ...extraHeaders,
+    },
+  });
 }
 
 async function handleMapTileBackfill(request, env) {
@@ -573,7 +576,8 @@ async function handleMapTileBackfill(request, env) {
   const payload = normalizeMapTileBackfillPayload(await request.json());
   const tiles = mapTilesForChunkRange(payload);
   const start = payload.cursor ? Math.max(0, Math.min(tiles.length, Number(payload.cursor) || 0)) : 0;
-  const selected = tiles.slice(start, start + payload.limit);
+  const effectiveLimit = payload.dryRun ? payload.limit : Math.min(payload.limit, MAP_TILE_BACKFILL_WRITE_LIMIT);
+  const selected = tiles.slice(start, start + effectiveLimit);
   const nextCursor = start + selected.length < tiles.length ? String(start + selected.length) : null;
   const tileRefs = selected.map((tile) => ({
     zoom: tile.zoom,
@@ -582,7 +586,13 @@ async function handleMapTileBackfill(request, env) {
     key: mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ),
   }));
 
-  const results = payload.dryRun ? [] : await rebuildMapTiles(bucket, selected, { force: payload.force });
+  const results = payload.dryRun
+    ? []
+    : await rebuildMapTiles(bucket, selected, {
+        force: payload.force,
+        concurrency: MAP_TILE_BACKFILL_WRITE_CONCURRENCY,
+        readConcurrency: MAP_TILE_BACKFILL_READ_CONCURRENCY,
+      });
 
   return json({
     ok: true,
@@ -897,6 +907,35 @@ async function handleMapDataCleanup(request, env) {
     keys,
     truncated: page.truncated === true,
     cursor: page.truncated ? page.cursor : null,
+  });
+}
+
+async function handleEmptyChunkPrune(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  const payload = normalizeEmptyChunkPrunePayload(await request.json());
+  const chunks = await findEmptyChunksForRange(bucket, payload);
+  const selected = chunks.slice(0, payload.limit);
+  const tiles = uniqueMapTilesForChunks(selected);
+  if (!payload.dryRun) {
+    await deleteEmptyChunkObjects(bucket, selected);
+    await pruneEmptyChunksFromRegions(bucket, selected);
+    await rebuildMapTiles(bucket, tiles, {
+      force: true,
+      concurrency: MAP_TILE_BACKFILL_WRITE_CONCURRENCY,
+      readConcurrency: MAP_TILE_BACKFILL_READ_CONCURRENCY,
+    });
+  }
+  return json({
+    ok: true,
+    dryRun: payload.dryRun,
+    matched: selected.length,
+    remaining: Math.max(0, chunks.length - selected.length),
+    deleted: payload.dryRun ? 0 : selected.length,
+    tiles: tiles.length,
+    chunks: selected.map(({ world, dimension, chunkX, chunkZ }) => ({ world, dimension, chunkX, chunkZ })),
   });
 }
 
@@ -1239,6 +1278,26 @@ export function normalizeMapTileBackfillPayload(payload) {
   };
 }
 
+export function normalizeEmptyChunkPrunePayload(payload) {
+  const minChunkX = numberOrThrow(payload.minChunkX, "minChunkX");
+  const maxChunkX = numberOrThrow(payload.maxChunkX, "maxChunkX");
+  const minChunkZ = numberOrThrow(payload.minChunkZ, "minChunkZ");
+  const maxChunkZ = numberOrThrow(payload.maxChunkZ, "maxChunkZ");
+  if (maxChunkX < minChunkX || maxChunkZ < minChunkZ) {
+    throw new Error("invalid chunk range");
+  }
+  return {
+    world: cleanSegment(payload.world || "world"),
+    dimension: cleanSegment(payload.dimension || "Overworld"),
+    minChunkX,
+    maxChunkX,
+    minChunkZ,
+    maxChunkZ,
+    limit: Math.min(EMPTY_CHUNK_PRUNE_WRITE_LIMIT, Math.max(1, numberOrThrow(payload.limit ?? EMPTY_CHUNK_PRUNE_WRITE_LIMIT, "limit"))),
+    dryRun: payload.dryRun !== false,
+  };
+}
+
 export function normalizeMarkerPayload(payload) {
   const title = String(payload.title || "").trim();
   if (title.length < 1 || title.length > 80) {
@@ -1393,33 +1452,125 @@ async function readChunkRegions(bucket, query, chunksByCoord) {
   );
 }
 
-async function readChunksForRange(bucket, query) {
+async function readChunksForRange(bucket, query, options = {}) {
   const chunksByCoord = new Map();
-  await readChunkRegions(bucket, query, chunksByCoord);
+  const chunkCount = chunkCountForRange(query);
 
+  if (chunkCount >= CHUNK_DIRECT_READ_LIMIT) {
+    await readChunkRegions(bucket, query, chunksByCoord);
+  }
+
+  const missingKeys = [];
+  for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
+    for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
+      if (!chunksByCoord.has(coordKey(chunkX, chunkZ))) {
+        missingKeys.push(chunkKey(query.world, query.dimension, chunkX, chunkZ));
+      }
+    }
+  }
+
+  const readKeys = missingKeys.length <= CHUNK_DIRECT_READ_LIMIT ? missingKeys : await listChunkKeysForRange(bucket, query);
+  await mapWithConcurrency(readKeys, options.readConcurrency || BATCH_WRITE_CONCURRENCY, async (key) => {
+    const chunk = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(key)));
+    if (chunk) {
+      chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
+    }
+  });
+
+  if (chunkCount < CHUNK_DIRECT_READ_LIMIT) {
+    await readChunkRegions(bucket, query, chunksByCoord);
+  }
+
+  return chunksByCoord;
+}
+
+async function findEmptyChunksForRange(bucket, query) {
+  const chunksByCoord = await readChunksForRange(bucket, query, { readConcurrency: MAP_TILE_BACKFILL_READ_CONCURRENCY });
+  return [...chunksByCoord.values()]
+    .filter((chunk) => isEmptyChunkSnapshot(chunk))
+    .sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
+}
+
+async function deleteEmptyChunkObjects(bucket, chunks) {
+  await mapWithConcurrency(chunks, MAP_TILE_BACKFILL_READ_CONCURRENCY, (chunk) => bucket.delete(chunkKey(chunk.world, chunk.dimension, chunk.chunkX, chunk.chunkZ)));
+}
+
+async function pruneEmptyChunksFromRegions(bucket, chunks) {
+  const groups = new Map();
+  for (const chunk of chunks) {
+    const regionX = floorDiv(chunk.chunkX, REGION_SIZE_CHUNKS);
+    const regionZ = floorDiv(chunk.chunkZ, REGION_SIZE_CHUNKS);
+    const key = chunkRegionKey(chunk.world, chunk.dimension, regionX, regionZ);
+    if (!groups.has(key)) {
+      groups.set(key, { key, remove: new Set() });
+    }
+    groups.get(key).remove.add(coordKey(chunk.chunkX, chunk.chunkZ));
+  }
+
+  await mapWithConcurrency([...groups.values()], MAP_TILE_BACKFILL_READ_CONCURRENCY, async (group) => {
+    const region = await readR2Json(await bucket.get(group.key));
+    if (!region || !Array.isArray(region.chunks)) {
+      return;
+    }
+    const kept = [];
+    for (const chunk of region.chunks) {
+      const normalized = normalizeOptionalChunkSnapshot(chunk);
+      if (!normalized || group.remove.has(coordKey(normalized.chunkX, normalized.chunkZ))) {
+        continue;
+      }
+      kept.push(normalized);
+    }
+    if (kept.length === 0) {
+      await bucket.delete(group.key);
+      return;
+    }
+    const nextRegion = {
+      ...region,
+      updatedAt: Math.max(...kept.map((chunk) => chunk.updatedAt || 0)),
+      chunks: kept.sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX),
+    };
+    await bucket.put(group.key, JSON.stringify(nextRegion), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: { world: nextRegion.world, dimension: nextRegion.dimension },
+    });
+  });
+}
+
+function uniqueMapTilesForChunks(chunks) {
+  const seen = new Set();
+  const tiles = [];
+  for (const chunk of chunks) {
+    for (const tile of mapTilesForChunk(chunk.world, chunk.dimension, chunk.chunkX, chunk.chunkZ)) {
+      const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      tiles.push(tile);
+    }
+  }
+  return tiles;
+}
+
+function chunkCountForRange(query) {
+  return (query.maxChunkX - query.minChunkX + 1) * (query.maxChunkZ - query.minChunkZ + 1);
+}
+
+async function listChunkKeysForRange(bucket, query) {
   const objectLists = await Promise.all(
     range(query.minChunkX, query.maxChunkX).map((chunkX) => listR2Objects(bucket, chunkPrefix(query.world, query.dimension, chunkX))),
   );
-  const readKeys = [];
+  const keys = [];
   for (const objects of objectLists) {
     for (const object of objects) {
       const parsed = parseChunkKey(object.key);
       if (!parsed || parsed.chunkX < query.minChunkX || parsed.chunkX > query.maxChunkX || parsed.chunkZ < query.minChunkZ || parsed.chunkZ > query.maxChunkZ) {
         continue;
       }
-      readKeys.push(object.key);
+      keys.push(object.key);
     }
   }
-
-  await Promise.all(
-    readKeys.map(async (key) => {
-      const chunk = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(key)));
-      if (chunk) {
-        chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
-      }
-    }),
-  );
-  return chunksByCoord;
+  return keys;
 }
 
 async function rebuildMapTilesForChunks(bucket, chunks) {
@@ -1442,17 +1593,19 @@ async function rebuildMapTilesForChunks(bucket, chunks) {
 }
 
 async function rebuildMapTiles(bucket, tiles, options = {}) {
-  return mapWithConcurrency(tiles, MAP_TILE_WRITE_CONCURRENCY, (tile) => rebuildMapTile(bucket, tile, options));
+  return mapWithConcurrency(tiles, options.concurrency || MAP_TILE_WRITE_CONCURRENCY, (tile) => rebuildMapTile(bucket, tile, options));
 }
 
 async function rebuildMapTile(bucket, tile, options = {}) {
   const range = chunkRangeForMapTile(tile);
-  const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range });
+  const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range }, { readConcurrency: options.readConcurrency });
   const { png, hasPixels, tileVersion } = renderMapTilePng(tile, chunksByCoord);
   const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
-  const existingVersion = await mapTileObjectVersion(bucket, key);
-  if (!options.force && existingVersion > tileVersion) {
-    return { ...tile, key, skipped: true, deleted: false, chunks: chunksByCoord.size };
+  if (!options.force) {
+    const existingVersion = await mapTileObjectVersion(bucket, key);
+    if (existingVersion > tileVersion) {
+      return { ...tile, key, skipped: true, deleted: false, chunks: chunksByCoord.size };
+    }
   }
   if (!hasPixels) {
     await bucket.delete(key);
@@ -1486,18 +1639,23 @@ function renderMapTilePng(tile, chunksByCoord) {
         const index = localZ * 16 + localX;
         const height = chunk.heights[index] ?? MIN_COLUMN_HEIGHT;
         const blockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
+        const blockState = chunk.blockStates[index] || {};
         const overlayHeight = chunk.overlayHeights[index] ?? MIN_COLUMN_HEIGHT;
         const overlayBlockId = overlayHeight > MIN_COLUMN_HEIGHT ? chunk.palette[chunk.overlayBlocks[index]] || "minecraft:air" : "minecraft:air";
-        if (isAirBlock(blockId) && height <= MIN_COLUMN_HEIGHT && (isAirBlock(overlayBlockId) || overlayHeight <= MIN_COLUMN_HEIGHT)) {
+        const overlayState = chunk.overlayStates[index] || {};
+        if (isAirBlock(blockId) && (isAirBlock(overlayBlockId) || overlayHeight <= MIN_COLUMN_HEIGHT)) {
           continue;
         }
-        const color = mapTileColumnColor(blockId, overlayBlockId, height, worldX, worldZ, chunksByCoord);
+        const color = mapTileColumnColor(blockId, blockState, overlayBlockId, overlayState, Math.max(height, overlayHeight), worldX, worldZ, chunksByCoord);
         const pixelX = (worldX - tileRange.minBlockX) * blockScale;
         const pixelY = (worldZ - tileRange.minBlockZ) * blockScale;
         fillPngRect(png, pixelX, pixelY, blockScale, blockScale, color);
         hasPixels = true;
       }
     }
+  }
+  if (hasPixels) {
+    fillTransparentMapTileHoles(png, transparentFillPixelLimit(blockScale));
   }
   return { png, hasPixels, tileVersion };
 }
@@ -1508,10 +1666,11 @@ async function mapTileObjectVersion(bucket, key) {
   return Number.isFinite(version) ? version : 0;
 }
 
-function mapTileColumnColor(blockId, overlayBlockId, height, worldX, worldZ, chunksByCoord) {
-  let color = hexToRgba(fallbackTextureColor(blockId));
+function mapTileColumnColor(blockId, blockState, overlayBlockId, overlayState, height, worldX, worldZ, chunksByCoord) {
+  const hasBase = !isAirBlock(blockId);
+  let color = hexToRgba(hasBase ? fallbackTextureColor(blockId, blockState) : fallbackTextureColor(overlayBlockId, overlayState));
   if (!isAirBlock(overlayBlockId)) {
-    color = mixColors(color, hexToRgba(fallbackTextureColor(overlayBlockId)), 0.28);
+    color = hasBase ? mixColors(color, hexToRgba(fallbackTextureColor(overlayBlockId, overlayState)), 0.28) : color;
   }
   color = applyHeightShade(color, height);
 
@@ -1566,6 +1725,96 @@ function fillPngRect(png, x, y, width, height, color) {
       png.data[offset + 3] = color[3];
     }
   }
+}
+
+function transparentFillPixelLimit(blockScale) {
+  const chunkPixelWidth = 16 * blockScale;
+  return Math.min(8192, Math.max(4096, chunkPixelWidth * chunkPixelWidth * 4));
+}
+
+function fillTransparentMapTileHoles(png, pixelLimit) {
+  const pixelCount = MAP_TILE_SIZE * MAP_TILE_SIZE;
+  const visited = new Uint8Array(pixelCount);
+  const queue = [];
+  const component = [];
+
+  for (let start = 0; start < pixelCount; start += 1) {
+    if (visited[start] || png.data[start * 4 + 3] !== 0) {
+      continue;
+    }
+
+    queue.length = 0;
+    component.length = 0;
+    queue.push(start);
+    visited[start] = 1;
+    let red = 0;
+    let green = 0;
+    let blue = 0;
+    let alpha = 0;
+    let boundary = 0;
+    let touchesEdge = false;
+
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const index = queue[cursor];
+      component.push(index);
+      const x = index % MAP_TILE_SIZE;
+      const y = Math.floor(index / MAP_TILE_SIZE);
+      if (x === 0 || y === 0 || x === MAP_TILE_SIZE - 1 || y === MAP_TILE_SIZE - 1) {
+        touchesEdge = true;
+      }
+
+      for (const neighbor of transparentFillNeighbors(index, x, y)) {
+        const offset = neighbor * 4;
+        if (png.data[offset + 3] === 0) {
+          if (!visited[neighbor]) {
+            visited[neighbor] = 1;
+            queue.push(neighbor);
+          }
+          continue;
+        }
+        red += png.data[offset];
+        green += png.data[offset + 1];
+        blue += png.data[offset + 2];
+        alpha += png.data[offset + 3];
+        boundary += 1;
+      }
+    }
+
+    if (touchesEdge || component.length > pixelLimit || boundary < 1) {
+      continue;
+    }
+
+    const color = [
+      Math.round(red / boundary),
+      Math.round(green / boundary),
+      Math.round(blue / boundary),
+      Math.round(alpha / boundary),
+    ];
+    for (const index of component) {
+      const offset = index * 4;
+      png.data[offset] = color[0];
+      png.data[offset + 1] = color[1];
+      png.data[offset + 2] = color[2];
+      png.data[offset + 3] = color[3];
+    }
+  }
+}
+
+function transparentFillNeighbors(index, x, y) {
+  const neighbors = [];
+  if (x > 0) {
+    neighbors.push(index - 1);
+  }
+  if (x < MAP_TILE_SIZE - 1) {
+    neighbors.push(index + 1);
+  }
+  if (y > 0) {
+    neighbors.push(index - MAP_TILE_SIZE);
+  }
+  if (y < MAP_TILE_SIZE - 1) {
+    neighbors.push(index + MAP_TILE_SIZE);
+  }
+  return neighbors;
 }
 
 export function mapTilesForChunk(world, dimension, chunkX, chunkZ) {
@@ -1976,59 +2225,6 @@ function decodeBase64(value) {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
-}
-
-function fallbackTextureColor(blockId) {
-  const id = String(blockId || "minecraft:air").toLowerCase();
-  if (id.includes("water") || id.includes("bubble_column")) {
-    return "#2563b8";
-  }
-  if (id.includes("cherry_leaves")) {
-    return "#f2a5c9";
-  }
-  if (id.includes("azalea_leaves")) {
-    return "#5f9f4a";
-  }
-  if (id.includes("grass_block")) {
-    return "#5f9f3f";
-  }
-  if (id.includes("short_grass") || id.includes("tall_grass") || id.includes("fern") || id.includes("vine")) {
-    return "#4f8f35";
-  }
-  if (id.includes("flower") || id.includes("poppy") || id.includes("dandelion") || id.includes("tulip") || id.includes("orchid") || id.includes("allium")) {
-    return "#d9d16b";
-  }
-  if (id.includes("leaves")) {
-    return "#3f7f38";
-  }
-  if (id.includes("glass") || id.includes("pane") || id.includes("ice")) {
-    return "#9fc7d1";
-  }
-  if (id.includes("fence") || id.includes("trapdoor") || id.includes("door") || id.includes("rail") || id.includes("bars") || id.includes("chain")) {
-    return "#8b8174";
-  }
-  if (id.includes("sand")) {
-    return "#d7c47a";
-  }
-  if (id.includes("grass") || id.includes("leaves") || id.includes("moss")) {
-    return "#4f8f3a";
-  }
-  if (id.includes("dirt") || id.includes("mud")) {
-    return "#7a5236";
-  }
-  if (id.includes("log") || id.includes("wood") || id.includes("planks")) {
-    return "#8a6138";
-  }
-  if (id.includes("snow")) {
-    return "#dce9ec";
-  }
-  if (id.includes("lava")) {
-    return "#e46b2a";
-  }
-  if (id.includes("air")) {
-    return "#111820";
-  }
-  return "#737f86";
 }
 
 function hexToRgba(hex) {

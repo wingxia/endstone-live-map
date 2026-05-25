@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { chunkUrl, landsUrl, mapImageTileUrl, segmentKey, textureAtlasUrl, type BlockUpdate, type ChunkSnapshot, type WorldMeta } from "../src/api";
 import { blockColumnIndex, blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "../src/ui/coords";
-import { chunkFetchRanges, chunkRangeForTile, fallbackTextureColor, isImageTileZoom, lowZoomTileCoverage, usesMapTint, usesTransparentTextureUnderlay } from "../src/ui/chunkLayer";
+import { chunkFetchRanges, chunkRangeForTile, fallbackTextureColor, isImageTileZoom, lowZoomTileCoverage, tileIntersectsChunkBounds, usesMapTint, usesTransparentTextureUnderlay } from "../src/ui/chunkLayer";
 import { isMapDecorationBlock, isPlantBlock } from "../src/ui/mapBlocks";
 
 describe("api helpers", () => {
@@ -34,6 +34,39 @@ describe("api helpers", () => {
     expect(usesMapTint("minecraft:water")).toBe(true);
     expect(fallbackTextureColor("minecraft:grass_block")).toBe("#5f9f3f");
     expect(usesMapTint("minecraft:grass_block")).toBe(true);
+    expect(fallbackTextureColor("minecraft:spruce_stairs")).toBe("#6f4c2d");
+    expect(fallbackTextureColor("minecraft:spruce_stairs")).not.toBe(fallbackTextureColor("minecraft:air"));
+    expect(fallbackTextureColor("minecraft:oak_slab")).toBe("#9f7442");
+    expect(fallbackTextureColor("minecraft:stone_brick_stairs")).toBe("#7d8587");
+    expect(fallbackTextureColor("minecraft:smooth_quartz_slab")).toBe("#d8d1bf");
+    expect(fallbackTextureColor("minecraft:end_bricks")).toBe("#d7cf92");
+    expect(fallbackTextureColor("minecraft:end_stone")).toBe("#d8cf8a");
+    expect(fallbackTextureColor("minecraft:podzol")).toBe("#6f4a2e");
+    expect(fallbackTextureColor("minecraft:farmland")).toBe("#6f4b31");
+    expect(fallbackTextureColor("minecraft:melon_block")).toBe("#8fbf3d");
+    expect(fallbackTextureColor("minecraft:waxed_cut_copper_slab")).toBe("#b86f45");
+    expect(fallbackTextureColor("minecraft:waxed_oxidized_cut_copper_slab")).toBe("#5b9a8f");
+    expect(fallbackTextureColor("minecraft:wooden_slab", { "minecraft:wood_type": "spruce" })).toBe("#6f4c2d");
+    expect(fallbackTextureColor("minecraft:stone_slab", { "minecraft:stone_slab_type": "quartz" })).toBe("#d8d1bf");
+    expect(fallbackTextureColor("minecraft:torch")).toBe("#d49a42");
+    expect(fallbackTextureColor("minecraft:bamboo")).toBe("#7fa847");
+    expect(fallbackTextureColor("minecraft:wheat")).toBe("#c8aa42");
+    expect(fallbackTextureColor("minecraft:white_carpet")).toBe("#d8d8d0");
+    expect(fallbackTextureColor("minecraft:lantern")).toBe("#d8b35a");
+    expect(fallbackTextureColor("minecraft:obsidian")).toBe("#46375f");
+    expect(fallbackTextureColor("minecraft:scaffolding")).toBe("#8a6138");
+    expect(fallbackTextureColor("minecraft:wall_sign")).toBe("#8a6138");
+    expect(fallbackTextureColor("minecraft:glow_lichen")).toBe("#78a88a");
+    expect(fallbackTextureColor("minecraft:oxidized_lightning_rod")).toBe("#5b9a8f");
+    expect(fallbackTextureColor("minecraft:light_gray_concrete")).toBe("#a7abae");
+    expect(fallbackTextureColor("minecraft:light_gray_terracotta")).toBe("#876f66");
+    expect(fallbackTextureColor("minecraft:light_blue_concrete")).toBe("#4f9bc7");
+    expect(fallbackTextureColor("minecraft:prismarine_slab")).toBe("#5f9f96");
+    expect(fallbackTextureColor("minecraft:bamboo_mosaic")).toBe("#c8aa55");
+    expect(fallbackTextureColor("minecraft:gold_block")).toBe("#d9b64a");
+    expect(fallbackTextureColor("minecraft:iron_block")).toBe("#c6c4b8");
+    expect(fallbackTextureColor("minecraft:amethyst_block")).toBe("#9b78c8");
+    expect(fallbackTextureColor("minecraft:glowstone")).toBe("#d8a84a");
     expect(usesMapTint("minecraft:oak_leaves")).toBe(false);
     expect(usesMapTint("minecraft:cherry_leaves")).toBe(false);
     expect(usesMapTint("minecraft:acacia_leaves")).toBe(false);
@@ -182,6 +215,24 @@ describe("api helpers", () => {
     expect(isImageTileZoom(0)).toBe(true);
     expect(isImageTileZoom(3)).toBe(true);
     expect(isImageTileZoom(4)).toBe(false);
+    expect(
+      tileIntersectsChunkBounds(
+        { x: -1, y: 0, z: 0 },
+        { minChunkX: -8, maxChunkX: 8, minChunkZ: -8, maxChunkZ: 8 },
+      ),
+    ).toBe(true);
+    expect(
+      tileIntersectsChunkBounds(
+        { x: -3, y: -4, z: 0 },
+        { minChunkX: -37, maxChunkX: 0, minChunkZ: -51, maxChunkZ: 0 },
+      ),
+    ).toBe(true);
+    expect(
+      tileIntersectsChunkBounds(
+        { x: 4, y: 4, z: 0 },
+        { minChunkX: -37, maxChunkX: 0, minChunkZ: -51, maxChunkZ: 0 },
+      ),
+    ).toBe(false);
   });
 
   it("coalesces low-zoom chunk fetches without exceeding the worker limit", () => {
