@@ -1700,9 +1700,19 @@ async function loadTextureColorIndex(bucket) {
       return { ok: false, reason: "texture_manifest_invalid", colors: new Map() };
     }
 
+    const colors = new Map();
+    for (const [blockId, entry] of Object.entries(entries)) {
+      const color = manifestEntryColor(entry);
+      if (color) {
+        setTextureColor(colors, blockId, color);
+      }
+    }
+    if (colors.size > 0) {
+      return { ok: true, reason: "", colors };
+    }
+
     const atlasBytes = Buffer.from(await atlasObject.arrayBuffer());
     const atlas = PNG.sync.read(atlasBytes);
-    const colors = new Map();
     for (const [blockId, entry] of Object.entries(entries)) {
       const color = averageAtlasEntryColor(atlas, entry);
       if (color) {
@@ -1717,6 +1727,18 @@ async function loadTextureColorIndex(bucket) {
   } catch (error) {
     return { ok: false, reason: "texture_atlas_invalid", colors: new Map(), message: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function manifestEntryColor(entry) {
+  const value = entry?.color || entry?.averageColor;
+  if (typeof value === "string") {
+    return hexToRgba(value);
+  }
+  if (Array.isArray(value) && value.length >= 3) {
+    const color = [clampByte(Number(value[0])), clampByte(Number(value[1])), clampByte(Number(value[2])), clampByte(Number(value[3] ?? 255))];
+    return color.every(Number.isFinite) ? color : null;
+  }
+  return null;
 }
 
 function averageAtlasEntryColor(atlas, entry) {

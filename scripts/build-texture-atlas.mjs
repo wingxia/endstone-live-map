@@ -58,9 +58,10 @@ for (let index = 0; index < result.entries.length; index += 1) {
   const x = (index % columns) * tileSize;
   const y = Math.floor(index / columns) * tileSize;
   blitNearest(entry.png, atlas, x, y, tileSize);
-  manifest.blocks[entry.id] = { x, y, w: tileSize, h: tileSize };
+  const manifestEntry = { x, y, w: tileSize, h: tileSize, color: entry.color };
+  manifest.blocks[entry.id] = manifestEntry;
   for (const alias of entry.aliases) {
-    manifest.blocks[alias] = { x, y, w: tileSize, h: tileSize };
+    manifest.blocks[alias] = manifestEntry;
   }
 }
 
@@ -110,7 +111,8 @@ async function collectEntries(roots, size) {
         if (COMMON_ALIASES[key]) {
           aliases.add(COMMON_ALIASES[key]);
         }
-        const entry = { id, aliases: [...aliases].filter((alias) => alias !== id), png: resizeNearest(png, size), source: root };
+        const resized = resizeNearest(png, size);
+        const entry = { id, aliases: [...aliases].filter((alias) => alias !== id), png: resized, color: averageTextureColor(resized), source: root };
         if (byId.has(id)) {
           overrides.push({ id, from: byId.get(id).source, to: root });
         }
@@ -257,6 +259,30 @@ function blitNearest(source, target, offsetX, offsetY, size) {
   }
 }
 
+function averageTextureColor(source) {
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  let alpha = 0;
+  for (let y = 0; y < source.height; y += 1) {
+    for (let x = 0; x < source.width; x += 1) {
+      const index = (y * source.width + x) * 4;
+      const pixelAlpha = source.data[index + 3];
+      if (pixelAlpha < 8) {
+        continue;
+      }
+      red += source.data[index] * pixelAlpha;
+      green += source.data[index + 1] * pixelAlpha;
+      blue += source.data[index + 2] * pixelAlpha;
+      alpha += pixelAlpha;
+    }
+  }
+  if (alpha < 1) {
+    return [0, 0, 0, 0];
+  }
+  return [clampByte(red / alpha), clampByte(green / alpha), clampByte(blue / alpha), 255];
+}
+
 function copyPixel(source, target, sourceX, sourceY, targetX, targetY) {
   const sourceIndex = (sourceY * source.width + sourceX) * 4;
   const targetIndex = (targetY * target.width + targetX) * 4;
@@ -264,6 +290,10 @@ function copyPixel(source, target, sourceX, sourceY, targetX, targetY) {
   target.data[targetIndex + 1] = source.data[sourceIndex + 1];
   target.data[targetIndex + 2] = source.data[sourceIndex + 2];
   target.data[targetIndex + 3] = source.data[sourceIndex + 3];
+}
+
+function clampByte(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
 }
 
 function parseArgs(values) {

@@ -161,12 +161,12 @@ function createEnv(options = {}) {
     live,
   };
   if (options.textures !== false) {
-    seedTextureAtlas(env, options.textureColors || DEFAULT_TEXTURE_COLORS);
+    seedTextureAtlas(env, options.textureColors || DEFAULT_TEXTURE_COLORS, { manifestColors: options.manifestColors });
   }
   return env;
 }
 
-function seedTextureAtlas(env, colorsByBlock) {
+function seedTextureAtlas(env, colorsByBlock, options = {}) {
   const entries = Object.entries(colorsByBlock);
   const tileSize = 4;
   const columns = Math.max(1, Math.ceil(Math.sqrt(entries.length)));
@@ -178,7 +178,7 @@ function seedTextureAtlas(env, colorsByBlock) {
   entries.forEach(([blockId, color], index) => {
     const x = (index % columns) * tileSize;
     const y = Math.floor(index / columns) * tileSize;
-    manifest.blocks[blockId] = { x, y, w: tileSize, h: tileSize };
+    manifest.blocks[blockId] = options.manifestColors === false ? { x, y, w: tileSize, h: tileSize } : { x, y, w: tileSize, h: tileSize, color };
     for (let pixelY = y; pixelY < y + tileSize; pixelY += 1) {
       for (let pixelX = x; pixelX < x + tileSize; pixelX += 1) {
         const offset = (pixelY * atlas.width + pixelX) * 4;
@@ -578,6 +578,7 @@ describe("worker routes", () => {
 
   it("renders low zoom map tiles from atlas average colors, including obsidian", async () => {
     const env = createEnv({
+      manifestColors: false,
       textureColors: {
         "minecraft:grass_block": [95, 159, 63],
         "minecraft:obsidian": [18, 15, 31],
@@ -613,6 +614,7 @@ describe("worker routes", () => {
 
   it("uses atlas colors for common block families instead of fallback colors", async () => {
     const env = createEnv({
+      manifestColors: false,
       textureColors: {
         "minecraft:stone": [11, 22, 33],
         "minecraft:oak_planks": [120, 70, 30],
@@ -651,6 +653,40 @@ describe("worker routes", () => {
     expect(pngPixel(png, 20, 4)[0]).toBeLessThan(30);
     expect(pngPixel(png, 28, 4)[1]).toBeGreaterThan(150);
     expect(pngPixel(png, 36, 4)[1]).toBeGreaterThan(pngPixel(png, 36, 4)[0]);
+  });
+
+  it("uses manifest colors when runtime atlas decoding is unavailable", async () => {
+    const env = createEnv({
+      textureColors: {
+        "minecraft:grass_block": [95, 159, 63],
+        "minecraft:obsidian": [18, 15, 31],
+      },
+    });
+    await env.MAP_DATA.put("textures/v1/atlas.png", new Uint8Array([1, 2, 3]), {
+      httpMetadata: { contentType: "image/png" },
+    });
+    const blocks = Array.from({ length: 256 }, () => 0);
+    blocks[0] = 1;
+    const upload = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(
+          createChunk({
+            palette: ["minecraft:grass_block", "minecraft:obsidian", "minecraft:air"],
+            blocks,
+            heights: Array.from({ length: 256 }, () => 100),
+          }),
+        ),
+      }),
+      env,
+      {},
+    );
+
+    expect(upload.status).toBe(200);
+    const tile = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
+    const png = readPng(await tile.arrayBuffer());
+    expect(pngPixel(png, 4, 4)[0]).toBeLessThan(30);
   });
 
   it("deletes low zoom image tiles when texture colors are unavailable", async () => {
