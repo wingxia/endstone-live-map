@@ -687,7 +687,7 @@ describe("worker routes", () => {
     blocks[0] = 1;
     await env.MAP_DATA.put(
       "chunks/v1/world/Overworld/0/0.json",
-      JSON.stringify(createChunk({ palette: ["minecraft:grass_block", "minecraft:obsidian", "minecraft:air"], blocks })),
+      JSON.stringify(createChunk({ palette: ["minecraft:grass_block", "minecraft:not_in_atlas", "minecraft:air"], blocks })),
       { httpMetadata: { contentType: "application/json" } },
     );
     await env.MAP_DATA.put(key, new Uint8Array([1, 2, 3]), {
@@ -706,9 +706,38 @@ describe("worker routes", () => {
 
     expect(await response.json()).toMatchObject({
       ok: true,
-      tiles: [expect.objectContaining({ deleted: true, missingColorReason: "texture_color_missing", missingColors: ["minecraft:obsidian"] })],
+      tiles: [expect.objectContaining({ deleted: true, missingColorReason: "texture_color_missing", missingColors: ["minecraft:not_in_atlas"] })],
     });
     expect(env.MAP_DATA.objects.has(key)).toBe(false);
+  });
+
+  it("uses deterministic fallback colors for known blocks missing from the atlas", async () => {
+    const env = createEnv({ textureColors: { "minecraft:grass_block": [95, 159, 63] } });
+    const blocks = Array.from({ length: 256 }, () => 0);
+    blocks[0] = 1;
+    const upload = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(
+          createChunk({
+            palette: ["minecraft:grass_block", "minecraft:oak_leaves", "minecraft:air"],
+            blocks,
+            heights: Array.from({ length: 256 }, () => 100),
+          }),
+        ),
+      }),
+      env,
+      {},
+    );
+    expect(upload.status).toBe(200);
+
+    const tile = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
+    const png = readPng(await tile.arrayBuffer());
+    const pixel = pngPixel(png, 4, 4);
+    expect(pixel[3]).toBe(255);
+    expect(pixel[1]).toBeGreaterThan(pixel[0]);
+    expect(pixel[1]).toBeGreaterThan(pixel[2]);
   });
 
   it("keeps air-only columns transparent in low zoom image tiles", async () => {

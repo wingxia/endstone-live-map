@@ -1777,7 +1777,15 @@ function textureColorForBlock(textureColors, blockId, blockState) {
       return color;
     }
   }
-  return null;
+  return fallbackColorForMissingAtlasEntry(blockId, blockState);
+}
+
+function fallbackColorForMissingAtlasEntry(blockId, blockState) {
+  const fallback = fallbackTextureColor(blockId, blockState);
+  if (!fallback || fallback === "#737f86") {
+    return null;
+  }
+  return hexToRgba(fallback);
 }
 
 function textureColorCandidates(blockId, blockState) {
@@ -2424,6 +2432,17 @@ function decodeBase64(value) {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+function hexToRgba(hex) {
+  const value = String(hex || "#000000").replace("#", "");
+  const normalized = value.length === 3 ? value.split("").map((char) => `${char}${char}`).join("") : value.padEnd(6, "0").slice(0, 6);
+  return [
+    Number.parseInt(normalized.slice(0, 2), 16),
+    Number.parseInt(normalized.slice(2, 4), 16),
+    Number.parseInt(normalized.slice(4, 6), 16),
+    255,
+  ];
 }
 
 function mixColors(left, right, amount) {
