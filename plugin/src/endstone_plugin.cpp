@@ -1360,8 +1360,7 @@ private:
             }
             if (livemap::isEmptyChunkSnapshot(*snapshot)) {
                 background_log_.warning("Skipped empty live map chunk sample for ", chunkName(coord),
-                                        "; chunk will be retried later.");
-                enqueueSeedChunk(coord, false);
+                                        "; dropped sample to avoid retrying unloaded chunks every tick.");
                 continue;
             }
             cacheChunkSnapshot(*snapshot);
