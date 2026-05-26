@@ -135,7 +135,7 @@ export default {
         if (auth) {
           return auth;
         }
-        return handleChunkUpload(request, env);
+        return handleChunkUpload(request, env, ctx);
       }
 
       if (url.pathname === "/api/plugin/chunks/batch") {
@@ -143,7 +143,7 @@ export default {
         if (auth) {
           return auth;
         }
-        return handleChunkBatchUpload(request, env);
+        return handleChunkBatchUpload(request, env, ctx);
       }
 
       if (url.pathname === "/api/plugin/block-updates") {
@@ -151,7 +151,7 @@ export default {
         if (auth) {
           return auth;
         }
-        return handleBlockUpdatesUpload(request, env);
+        return handleBlockUpdatesUpload(request, env, ctx);
       }
 
       if (url.pathname === "/api/plugin/chunks/prune-empty") {
@@ -305,7 +305,7 @@ function mapBucket(env) {
   return env.MAP_DATA || env.MAP_TILES || null;
 }
 
-async function handleChunkUpload(request, env) {
+async function handleChunkUpload(request, env, ctx) {
   const bucket = mapBucket(env);
   if (!bucket) {
     return json({ error: "r2_not_configured" }, 503);
@@ -317,13 +317,13 @@ async function handleChunkUpload(request, env) {
     return json({ ok: true, skippedEmpty: 1, rejected: emptySnapshots, updates: 0 });
   }
   const result = await putChunkSnapshot(bucket, snapshot, { env, broadcast: false, diffForViewers: true });
-  const tiles = await rebuildMapTilesForChunks(bucket, [snapshot]);
+  const tiles = await scheduleMapTilesForChunks(ctx, bucket, [snapshot]);
   await broadcastChunkSnapshot(env, snapshot, result.blockUpdates);
-  await updateWorldMetaForChunks(bucket, [snapshot]);
+  await scheduleWorldMetaForChunks(ctx, bucket, [snapshot]);
   return json({ ok: true, key: result.key, updates: result.updates, tiles });
 }
 
-async function handleChunkBatchUpload(request, env) {
+async function handleChunkBatchUpload(request, env, ctx) {
   const bucket = mapBucket(env);
   if (!bucket) {
     return json({ error: "r2_not_configured" }, 503);
@@ -346,8 +346,8 @@ async function handleChunkBatchUpload(request, env) {
 
   if (storage === "region" && !broadcast) {
     const results = await putChunkRegionSnapshots(bucket, writableSnapshots);
-    const tiles = await rebuildMapTilesForChunks(bucket, writableSnapshots);
-    await updateWorldMetaForChunks(bucket, writableSnapshots);
+    const tiles = await scheduleMapTilesForChunks(ctx, bucket, writableSnapshots);
+    await scheduleWorldMetaForChunks(ctx, bucket, writableSnapshots);
     return json({
       ok: true,
       storage,
@@ -360,11 +360,11 @@ async function handleChunkBatchUpload(request, env) {
   }
 
   const results = await mapWithConcurrency(writableSnapshots, BATCH_WRITE_CONCURRENCY, (snapshot) => putChunkSnapshot(bucket, snapshot, { env, broadcast: false, diffForViewers: broadcast }));
-  const tiles = await rebuildMapTilesForChunks(bucket, writableSnapshots);
+  const tiles = await scheduleMapTilesForChunks(ctx, bucket, writableSnapshots);
   if (broadcast) {
     await mapWithConcurrency(results, MAP_TILE_WRITE_CONCURRENCY, (result, index) => broadcastChunkSnapshot(env, writableSnapshots[index], result.blockUpdates));
   }
-  await updateWorldMetaForChunks(bucket, writableSnapshots);
+  await scheduleWorldMetaForChunks(ctx, bucket, writableSnapshots);
 
   return json({
     ok: true,
@@ -378,7 +378,7 @@ async function handleChunkBatchUpload(request, env) {
   });
 }
 
-async function handleBlockUpdatesUpload(request, env) {
+async function handleBlockUpdatesUpload(request, env, ctx) {
   const bucket = mapBucket(env);
   if (!bucket) {
     return json({ error: "r2_not_configured" }, 503);
@@ -398,7 +398,7 @@ async function handleBlockUpdatesUpload(request, env) {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
     customMetadata: { world: chunk.world, dimension: chunk.dimension },
   });
-  const tiles = applied.length > 0 ? await rebuildMapTilesForChunks(bucket, [chunk]) : [];
+  const tiles = applied.length > 0 ? await scheduleMapTilesForChunks(ctx, bucket, [chunk]) : [];
   const tileVersion = payload.updatedAt;
 
   if (applied.length > 0) {
@@ -1574,6 +1574,29 @@ function uniqueMapTilesForChunks(chunks) {
   return tiles;
 }
 
+async function scheduleMapTilesForChunks(ctx, bucket, chunks) {
+  const tiles = uniqueMapTilesForChunks(chunks);
+  if (tiles.length < 1) {
+    return [];
+  }
+  const rebuild = rebuildMapTiles(bucket, tiles);
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(rebuild);
+  } else {
+    await rebuild;
+  }
+  return tiles;
+}
+
+async function scheduleWorldMetaForChunks(ctx, bucket, chunks) {
+  const update = updateWorldMetaForChunks(bucket, chunks);
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(update);
+  } else {
+    await update;
+  }
+}
+
 function chunkCountForRange(query) {
   return (query.maxChunkX - query.minChunkX + 1) * (query.maxChunkZ - query.minChunkZ + 1);
 }
@@ -1596,18 +1619,7 @@ async function listChunkKeysForRange(bucket, query) {
 }
 
 async function rebuildMapTilesForChunks(bucket, chunks) {
-  const tiles = [];
-  const seen = new Set();
-  for (const chunk of chunks) {
-    for (const tile of mapTilesForChunk(chunk.world, chunk.dimension, chunk.chunkX, chunk.chunkZ)) {
-      const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
-      if (seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      tiles.push(tile);
-    }
-  }
+  const tiles = uniqueMapTilesForChunks(chunks);
   if (tiles.length < 1) {
     return [];
   }

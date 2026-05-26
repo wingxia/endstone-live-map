@@ -167,6 +167,23 @@ function createEnv(options = {}) {
   return env;
 }
 
+function createExecutionContext() {
+  const waits = [];
+  return {
+    waitUntil(promise) {
+      waits.push(Promise.resolve(promise));
+    },
+    async flush() {
+      while (waits.length > 0) {
+        await waits.shift();
+      }
+    },
+    get pending() {
+      return waits.length;
+    },
+  };
+}
+
 function seedTextureAtlas(env, colorsByBlock, options = {}) {
   const entries = Object.entries(colorsByBlock);
   const tileSize = 4;
@@ -509,6 +526,31 @@ describe("worker helpers", () => {
 });
 
 describe("worker routes", () => {
+  it("acknowledges live chunk uploads before asynchronous map tile and metadata rebuilds complete", async () => {
+    const env = createEnv();
+    const ctx = createExecutionContext();
+    const upload = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(createChunk()),
+      }),
+      env,
+      ctx,
+    );
+
+    expect(upload.status).toBe(200);
+    expect(await upload.json()).toMatchObject({ ok: true, tiles: expect.arrayContaining([expect.objectContaining({ zoom: 3 })]) });
+    expect(ctx.pending).toBe(2);
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(true);
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(false);
+
+    await ctx.flush();
+
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z3/0/0.png")).toBe(true);
+    expect(env.MAP_DATA.objects.has("meta/v1/world/Overworld.json")).toBe(true);
+  });
+
   it("accepts authenticated chunk uploads, stores R2 snapshots, and serves chunk ranges", async () => {
     const env = createEnv();
     const heights = Array.from({ length: 256 }, (_, index) => 64 + Math.floor(index / 16) * 6);
@@ -1098,7 +1140,7 @@ describe("worker routes", () => {
       {},
     );
     expect(update.status).toBe(200);
-    expect(await update.json()).toMatchObject({ ok: true, missingBase: false, updates: 1, tiles: expect.arrayContaining([expect.objectContaining({ zoom: 3, deleted: false })]) });
+    expect(await update.json()).toMatchObject({ ok: true, missingBase: false, updates: 1, tiles: expect.arrayContaining([expect.objectContaining({ zoom: 3 })]) });
     expect(env.live.messages.at(-1)).toContain("block_updates");
     expect(env.live.messages.at(-1)).toContain("tileVersion");
     const stored = await env.MAP_DATA.objects.get("chunks/v1/world/Overworld/0/0.json").json();
