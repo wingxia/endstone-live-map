@@ -21,7 +21,7 @@ export { fallbackTextureColor };
 
 const BLOCKS_PER_CHUNK = 16;
 const TILE_SIZE = 256;
-const MIN_ZOOM = 0;
+export const MIN_MAP_ZOOM = -1;
 const MAX_ZOOM = 4;
 const IMAGE_TILE_MAX_ZOOM = 3;
 const TILE_KEEP_BUFFER = 2;
@@ -496,7 +496,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
 
   return new ChunkGridLayer({
     tileSize: TILE_SIZE,
-    minZoom: MIN_ZOOM,
+    minZoom: MIN_MAP_ZOOM,
     maxZoom: MAX_ZOOM,
     noWrap: false,
     updateWhenZooming: false,
@@ -549,7 +549,7 @@ export function chunkRangeForTile(coords: Pick<Coords, "x" | "y" | "z">): TileCh
 }
 
 export function isImageTileZoom(zoom: number) {
-  return zoom >= MIN_ZOOM && zoom <= IMAGE_TILE_MAX_ZOOM;
+  return zoom >= MIN_MAP_ZOOM && zoom <= IMAGE_TILE_MAX_ZOOM;
 }
 
 export function lowZoomTileCoverage(coords: Pick<Coords, "x" | "y" | "z">): ChunkFetchRange {

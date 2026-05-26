@@ -25,6 +25,7 @@ describe("api helpers", () => {
 
   it("builds low zoom map image tile urls", () => {
     expect(mapImageTileUrl("Bedrock level", "Overworld", 3, -1, 2)).toBe("/api/map-tiles/Bedrock_level/Overworld/z3/-1/2.png");
+    expect(mapImageTileUrl("Bedrock level", "Overworld", -1, 0, -1)).toBe("/api/map-tiles/Bedrock_level/Overworld/z-1/0/-1.png");
     expect(mapImageTileUrl("Bedrock level", "Overworld", 0, 0, 0, 123)).toBe("/api/map-tiles/Bedrock_level/Overworld/z0/0/0.png?_=123");
   });
 
@@ -207,6 +208,13 @@ describe("api helpers", () => {
       minChunkZ: 0,
       maxChunkZ: 15,
     });
+    expect(lowZoomTileCoverage({ x: 0, y: -1, z: -1 })).toEqual({
+      minChunkX: 0,
+      maxChunkX: 31,
+      minChunkZ: -32,
+      maxChunkZ: -1,
+    });
+    expect(isImageTileZoom(-1)).toBe(true);
     expect(lowZoomTileCoverage({ x: 0, y: 0, z: 3 })).toEqual({
       minChunkX: 0,
       maxChunkX: 1,

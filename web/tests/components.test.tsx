@@ -95,6 +95,36 @@ describe("LandList", () => {
 
     expect(selected).toBe("public");
   });
+
+  it("filters lands by name and owner", () => {
+    render(
+      <LandList
+        lands={[
+          createLand({ id: "spawn", name: "主城区", owner: "GieZi8670" }),
+          createLand({ id: "farm", name: "农场", owner: "WingXia" }),
+        ]}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("搜索领地"), { target: { value: "wing" } });
+
+    expect(screen.getByText("农场")).toBeInTheDocument();
+    expect(screen.queryByText("主城区")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("搜索领地"), { target: { value: "主城" } });
+
+    expect(screen.getByText("主城区")).toBeInTheDocument();
+    expect(screen.queryByText("农场")).not.toBeInTheDocument();
+  });
+
+  it("shows a distinct empty state when land search has no matches", () => {
+    render(<LandList lands={[createLand({ id: "spawn", name: "主城区", owner: "GieZi8670" })]} />);
+
+    fireEvent.change(screen.getByLabelText("搜索领地"), { target: { value: "missing" } });
+
+    expect(screen.getByText("没有匹配的公开传送领地")).toBeInTheDocument();
+    expect(screen.queryByText("当前维度没有公开传送领地")).not.toBeInTheDocument();
+  });
 });
 
 function createLand(overrides: Partial<LandClaim> = {}): LandClaim {

@@ -571,6 +571,49 @@ test("coalesces mobile zoomed-out chunk loading and keeps dragging responsive", 
   await expect.poll(() => pageHasGrassImageTile(page)).toBe(true);
 });
 
+test("zooms out to the extra z-1 image tile level", async ({ page }) => {
+  const imageTileRequests: string[] = [];
+  await mockBasicMap(page, {
+    world: {
+      version: 1,
+      world: "Bedrock level",
+      dimension: "Overworld",
+      status: "complete",
+      chunkCount: 4096,
+      importedAt: 1,
+      updatedAt: 1,
+      bounds: {
+        minChunkX: -64,
+        maxChunkX: 64,
+        minChunkZ: -64,
+        maxChunkZ: 64,
+        minBlockX: -1024,
+        maxBlockX: 1039,
+        minBlockZ: -1024,
+        maxBlockZ: 1039,
+      },
+      sampleChunks: [{ chunkX: 0, chunkZ: 0 }],
+      topBlocks: { "minecraft:grass_block": 256 },
+    },
+  });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    imageTileRequests.push(route.request().url());
+    await route.fulfill({ contentType: "image/png", body: GRASS_TILE_PNG });
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+
+  for (let index = 0; index < 5; index += 1) {
+    await expect(page.getByRole("button", { name: "Zoom out" })).toBeEnabled();
+    await page.getByRole("button", { name: "Zoom out" }).click();
+    await page.waitForTimeout(250);
+  }
+
+  await expect.poll(() => imageTileRequests.some((url) => url.includes("/api/map-tiles/Bedrock_level/Overworld/z-1/"))).toBe(true);
+  await expect.poll(() => pageHasGrassImageTile(page)).toBe(true);
+});
+
 test("uses low zoom image tiles and keeps max zoom chunk JSON rendering", async ({ page }) => {
   const chunkRequests: string[] = [];
   const imageTileRequests: string[] = [];
@@ -1624,6 +1667,125 @@ test("centers the map on clicked players and public land teleports", async ({ pa
   await expect.poll(() => chunkQueries.some((query) => queryIncludesChunk(query, -22, -30)) || mapTileRequestsIncludeChunk(imageTileRequests, -22, -30)).toBe(true);
 });
 
+test("filters land list search and keeps filtered land focus working", async ({ page }) => {
+  const chunkQueries: Array<{ minChunkX: number; maxChunkX: number; minChunkZ: number; maxChunkZ: number }> = [];
+  const imageTileRequests: string[] = [];
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        worlds: [
+          {
+            version: 1,
+            world: "Bedrock level",
+            dimension: "Overworld",
+            status: "complete",
+            chunkCount: 256,
+            importedAt: 1,
+            updatedAt: 1,
+            bounds: {
+              minChunkX: -80,
+              maxChunkX: 80,
+              minChunkZ: -80,
+              maxChunkZ: 80,
+              minBlockX: -1280,
+              maxBlockX: 1295,
+              minBlockZ: -1280,
+              maxBlockZ: 1295,
+            },
+            topBlocks: { "minecraft:grass_block": 256 },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    const url = new URL(route.request().url());
+    chunkQueries.push({
+      minChunkX: Number(url.searchParams.get("minChunkX")),
+      maxChunkX: Number(url.searchParams.get("maxChunkX")),
+      minChunkZ: Number(url.searchParams.get("minChunkZ")),
+      maxChunkZ: Number(url.searchParams.get("maxChunkZ")),
+    });
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [], missing: [] }) });
+  });
+  await page.route("**/api/map-tiles/**", async (route) => {
+    imageTileRequests.push(route.request().url());
+    await route.fulfill({ status: 404, body: "tile not found" });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({ status: 404, body: "texture manifest not found" });
+  });
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        world: "Bedrock_level",
+        dimension: "Overworld",
+        updatedAt: 123,
+        claims: [
+          {
+            id: "spawn",
+            owner: "GieZi8670",
+            name: "主城区",
+            world: "Bedrock_level",
+            dimension: "Overworld",
+            minX: -375,
+            maxX: -227,
+            minY: 70,
+            maxY: 300,
+            minZ: -580,
+            maxZ: -473,
+            teleport: { x: -352, y: 70, z: -479 },
+            publicTeleport: true,
+            members: [],
+            parent: "",
+            children: [],
+            nested: false,
+            updatedAt: 123,
+          },
+          {
+            id: "farm",
+            owner: "WingXia",
+            name: "农场",
+            world: "Bedrock_level",
+            dimension: "Overworld",
+            minX: 16,
+            maxX: 31,
+            minY: 70,
+            maxY: 300,
+            minZ: -32,
+            maxZ: -17,
+            teleport: { x: 24, y: 70, z: -24 },
+            publicTeleport: true,
+            members: [],
+            parent: "",
+            children: [],
+            nested: false,
+            updatedAt: 123,
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("主城区")).toBeVisible();
+  await expect(page.getByText("农场")).toBeVisible();
+
+  await page.getByLabel("搜索领地").fill("wing");
+  await expect(page.getByText("农场")).toBeVisible();
+  await expect(page.getByText("主城区")).toHaveCount(0);
+
+  await page.getByRole("button", { name: /农场/ }).click();
+  await expect.poll(() => chunkQueries.some((query) => queryIncludesChunk(query, 1, -2)) || mapTileRequestsIncludeChunk(imageTileRequests, 1, -2)).toBe(true);
+
+  await page.getByLabel("搜索领地").fill("zzz");
+  await expect(page.getByText("没有匹配的公开传送领地")).toBeVisible();
+});
+
 async function pageHasGrassPixels(page: Page) {
   return page.evaluate(() => {
     const grass: [number, number, number] = [95, 159, 63];
@@ -1862,7 +2024,7 @@ function queryIncludesChunk(
 
 function mapTileRequestsIncludeChunk(urls: string[], chunkX: number, chunkZ: number) {
   return urls.some((value) => {
-    const match = /\/api\/map-tiles\/[^/]+\/[^/]+\/z([0-3])\/(-?\d+)\/(-?\d+)\.png/.exec(value);
+    const match = /\/api\/map-tiles\/[^/]+\/[^/]+\/z(-?\d+)\/(-?\d+)\/(-?\d+)\.png/.exec(value);
     if (!match) {
       return false;
     }

@@ -22,6 +22,17 @@ textarea {
   font: inherit;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 390px;
@@ -379,6 +390,41 @@ h2 {
   border-radius: 8px;
   background: #233645;
   color: #7dd3fc;
+}
+
+.land-list-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.land-search {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid #283541;
+  border-radius: 7px;
+  background: #101820;
+  color: #718292;
+}
+
+.land-search:focus-within {
+  border-color: #4aa883;
+  outline: 2px solid rgba(88, 211, 156, 0.22);
+}
+
+.land-search input {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #e7edf3;
+}
+
+.land-search input::placeholder {
+  color: #718292;
 }
 
 .land-list {

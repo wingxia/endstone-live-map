@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type LandClaim, type PlayerState, type WorldMeta } from "../api";
 import { blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "./coords";
-import { createChunkGridLayer, INITIAL_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
+import { createChunkGridLayer, INITIAL_MAP_ZOOM, MIN_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
 const LIVE_PLAYER_PADDING_BLOCKS = 96;
 
@@ -58,7 +58,7 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
         crs: L.CRS.Simple,
         zoomControl: false,
         attributionControl: false,
-        minZoom: 0,
+        minZoom: MIN_MAP_ZOOM,
         maxZoom: INITIAL_MAP_ZOOM,
       }).setView([0, 0], INITIAL_MAP_ZOOM);
 
