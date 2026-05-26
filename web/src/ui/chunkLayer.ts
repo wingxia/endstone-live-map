@@ -1,6 +1,6 @@
 import type { Coords, DoneCallback, GridLayer } from "leaflet";
 
-import { fallbackTextureColor } from "../../../shared/blockColors.mjs";
+import { fallbackTextureColor, usesMapTint as usesSharedMapTint } from "../../../shared/blockColors.mjs";
 import {
   fetchChunks,
   fetchTextureManifest,
@@ -1206,16 +1206,7 @@ function stripNamespace(blockId: string) {
 }
 
 export function usesMapTint(blockId: string) {
-  const id = blockId.toLowerCase();
-  return (
-    id.includes("water") ||
-    id.includes("bubble_column") ||
-    id.includes("grass_block") ||
-    id.includes("short_grass") ||
-    id.includes("tall_grass") ||
-    id.includes("fern") ||
-    id.includes("vine")
-  );
+  return usesSharedMapTint(blockId);
 }
 
 export function usesTransparentTextureUnderlay(blockId: string) {

@@ -14,6 +14,7 @@ import worker, {
   normalizeChunkBatchPayload,
   normalizeChunkSnapshot,
   fallbackTextureColor,
+  usesMapTint,
   normalizeLandPayload,
   normalizeMapTileBackfillPayload,
   normalizeMarkerPayload,
@@ -411,6 +412,9 @@ describe("worker helpers", () => {
 
   it("colors stair and slab block ids by material instead of matching air inside stairs", () => {
     expect(fallbackTextureColor("minecraft:air")).toBe("#111820");
+    expect(usesMapTint("minecraft:grass_block")).toBe(true);
+    expect(usesMapTint("minecraft:water")).toBe(true);
+    expect(usesMapTint("minecraft:stone")).toBe(false);
     expect(fallbackTextureColor("minecraft:spruce_stairs")).toBe("#6f4c2d");
     expect(fallbackTextureColor("minecraft:spruce_stairs")).not.toBe(fallbackTextureColor("minecraft:air"));
     expect(fallbackTextureColor("minecraft:oak_slab")).toBe("#9f7442");
@@ -611,6 +615,38 @@ describe("worker routes", () => {
     expect(pixel[0]).toBeLessThan(30);
     expect(pixel[1]).toBeLessThan(30);
     expect(pixel[2]).toBeLessThan(45);
+  });
+
+  it("renders map-tinted low zoom blocks from tint colors instead of grayscale atlas colors", async () => {
+    const env = createEnv({
+      textureColors: {
+        "minecraft:grass_block": [152, 152, 152],
+        "minecraft:water": [152, 152, 152],
+      },
+    });
+    const upload = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify(
+          createChunk({
+            palette: ["minecraft:grass_block", "minecraft:water", "minecraft:air"],
+            heights: Array.from({ length: 256 }, () => 100),
+          }),
+        ),
+      }),
+      env,
+      {},
+    );
+    expect(upload.status).toBe(200);
+
+    const tile = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
+    const png = readPng(await tile.arrayBuffer());
+    const grass = pngPixel(png, 4, 4);
+    expect(grass[3]).toBe(255);
+    expect(grass[1]).toBeGreaterThan(grass[0] + 30);
+    expect(grass[1]).toBeGreaterThan(grass[2] + 30);
+    expect(Math.abs(grass[0] - grass[1])).toBeGreaterThan(20);
   });
 
   it("uses atlas colors for common block families instead of fallback colors", async () => {
@@ -1304,6 +1340,22 @@ describe("worker routes", () => {
     await env.MAP_DATA.put("chunk-regions/v1/world/Overworld/0/0.json", JSON.stringify({ version: 1, world: "world", dimension: "Overworld", chunks: [createChunk({ updatedAt: 10 })] }), {
       httpMetadata: { contentType: "application/json" },
     });
+    await env.MAP_DATA.put(
+      "meta/v1/world/Overworld.json",
+      JSON.stringify(
+        normalizeWorldMeta({
+          world: "world",
+          dimension: "Overworld",
+          status: "live",
+          chunkCount: 1,
+          bounds: { minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0 },
+          topBlocks: { "minecraft:grass_block": 256 },
+          importedAt: 10,
+          updatedAt: 10,
+        }),
+      ),
+      { httpMetadata: { contentType: "application/json" } },
+    );
     await env.MAP_DATA.put(key, new Uint8Array([1, 2, 3]), {
       httpMetadata: { contentType: "image/png" },
       customMetadata: { tileVersion: "99" },
@@ -1334,7 +1386,9 @@ describe("worker routes", () => {
     expect(forcedBody).toMatchObject({ ok: true, force: true, tiles: [expect.objectContaining({ deleted: false })] });
     expect(forcedBody.tiles[0]).not.toHaveProperty("skipped");
     expect(PNG.sync.read(Buffer.from(await env.MAP_DATA.objects.get(key).arrayBuffer())).width).toBe(256);
-    expect(env.MAP_DATA.objects.get(key).customMetadata.tileVersion).toBe("10");
+    expect(Number(env.MAP_DATA.objects.get(key).customMetadata.tileVersion)).toBeGreaterThan(99);
+    const meta = await env.MAP_DATA.objects.get("meta/v1/world/Overworld.json").json();
+    expect(meta.updatedAt).toBe(Number(env.MAP_DATA.objects.get(key).customMetadata.tileVersion));
   });
 
   it("does not read existing image tiles during force backfill", async () => {

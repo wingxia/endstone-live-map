@@ -1,9 +1,9 @@
 import { Buffer } from "node:buffer";
 import { createConnection } from "mysql2/promise";
 import { PNG } from "pngjs";
-import { fallbackTextureColor } from "../../shared/blockColors.mjs";
+import { fallbackTextureColor, usesMapTint } from "../../shared/blockColors.mjs";
 
-export { fallbackTextureColor };
+export { fallbackTextureColor, usesMapTint };
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -580,6 +580,7 @@ async function handleMapTileBackfill(request, env) {
   const effectiveLimit = payload.dryRun ? payload.limit : Math.min(payload.limit, MAP_TILE_BACKFILL_WRITE_LIMIT);
   const selected = tiles.slice(start, start + effectiveLimit);
   const nextCursor = start + selected.length < tiles.length ? String(start + selected.length) : null;
+  const rebuildVersion = payload.force ? Date.now() : 0;
   const tileRefs = selected.map((tile) => ({
     zoom: tile.zoom,
     tileX: tile.tileX,
@@ -591,9 +592,13 @@ async function handleMapTileBackfill(request, env) {
     ? []
     : await rebuildMapTiles(bucket, selected, {
         force: payload.force,
+        rebuildVersion,
         concurrency: MAP_TILE_BACKFILL_WRITE_CONCURRENCY,
         readConcurrency: MAP_TILE_BACKFILL_READ_CONCURRENCY,
       });
+  if (!payload.dryRun && rebuildVersion > 0 && results.some((tile) => !tile.skipped)) {
+    await touchWorldMetaTileVersion(bucket, payload.world, payload.dimension, rebuildVersion);
+  }
 
   return json({
     ok: true,
@@ -770,6 +775,22 @@ async function updateWorldMetaForChunks(bucket, snapshots) {
       });
     }),
   );
+}
+
+async function touchWorldMetaTileVersion(bucket, world, dimension, updatedAt) {
+  const key = worldMetaKey(world, dimension);
+  const existing = normalizeOptionalWorldMeta(await readR2Json(await bucket.get(key)));
+  if (!existing) {
+    return;
+  }
+  const next = {
+    ...existing,
+    updatedAt: Math.max(existing.updatedAt || 0, updatedAt),
+  };
+  await bucket.put(key, JSON.stringify(next), {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+    customMetadata: { world: next.world, dimension: next.dimension },
+  });
 }
 
 async function handleWorldsGet(env) {
@@ -1603,14 +1624,15 @@ async function rebuildMapTile(bucket, tile, options = {}) {
   const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range }, { readConcurrency: options.readConcurrency });
   const textureColors = options.textureColors || (await loadTextureColorIndex(bucket));
   const { png, hasPixels, tileVersion, missingColors, missingColorReason } = renderMapTilePng(tile, chunksByCoord, textureColors);
+  const nextTileVersion = Math.max(tileVersion, options.rebuildVersion || 0);
   const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
   if (missingColors.length > 0) {
     await bucket.delete(key);
-    return { ...tile, key, deleted: true, missingColors, missingColorReason, chunks: chunksByCoord.size };
+    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, missingColors, missingColorReason, chunks: chunksByCoord.size };
   }
   if (!hasPixels) {
     await bucket.delete(key);
-    return { ...tile, key, deleted: true, chunks: chunksByCoord.size };
+    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, chunks: chunksByCoord.size };
   }
   if (!options.force) {
     const existingVersion = await mapTileObjectVersion(bucket, key);
@@ -1621,9 +1643,9 @@ async function rebuildMapTile(bucket, tile, options = {}) {
   const buffer = PNG.sync.write(png, { colorType: 6, inputColorType: 6 });
   await bucket.put(key, buffer, {
     httpMetadata: { contentType: "image/png" },
-    customMetadata: { world: tile.world, dimension: tile.dimension, zoom: String(tile.zoom), tileVersion: String(tileVersion) },
+    customMetadata: { world: tile.world, dimension: tile.dimension, zoom: String(tile.zoom), tileVersion: String(nextTileVersion) },
   });
-  return { ...tile, key, deleted: false, chunks: chunksByCoord.size };
+  return { ...tile, key, deleted: false, tileVersion: nextTileVersion, chunks: chunksByCoord.size };
 }
 
 function renderMapTilePng(tile, chunksByCoord, textureColors) {
@@ -1792,6 +1814,12 @@ function blockColorKeys(blockId) {
 function textureColorForBlock(textureColors, blockId, blockState) {
   if (!textureColors.ok) {
     return null;
+  }
+  if (usesMapTint(blockId)) {
+    const tint = fallbackColorForMissingAtlasEntry(blockId, blockState);
+    if (tint) {
+      return tint;
+    }
   }
   for (const candidate of textureColorCandidates(blockId, blockState)) {
     const color = textureColors.colors.get(candidate);

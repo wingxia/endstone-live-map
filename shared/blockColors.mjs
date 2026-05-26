@@ -345,6 +345,19 @@ export function fallbackTextureColor(blockId, blockState = {}) {
   return "#737f86";
 }
 
+export function usesMapTint(blockId) {
+  const id = String(blockId || "").toLowerCase();
+  return (
+    id.includes("water") ||
+    id.includes("bubble_column") ||
+    id.includes("grass_block") ||
+    id.includes("short_grass") ||
+    id.includes("tall_grass") ||
+    id.includes("fern") ||
+    id.includes("vine")
+  );
+}
+
 function stripBlockNamespace(id) {
   const parts = String(id || "").split(":");
   return parts[parts.length - 1] || "air";
