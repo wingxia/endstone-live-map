@@ -195,6 +195,20 @@ std::string serializeBlockUpdateBatch(const BlockUpdateBatch &batch)
     return out.str();
 }
 
+std::string serializeBlockUpdateBatches(const std::vector<BlockUpdateBatch> &batches)
+{
+    std::ostringstream out;
+    out << "{\"batches\":[";
+    for (std::size_t i = 0; i < batches.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << serializeBlockUpdateBatch(batches[i]);
+    }
+    out << "]}";
+    return out.str();
+}
+
 std::string serializeChunkReady(const ChunkCoord &coord)
 {
     std::ostringstream out;

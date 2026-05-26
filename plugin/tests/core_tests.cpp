@@ -358,6 +358,11 @@ void testProtocol()
     assert(update_json.find("\"state\":{\"bite_counter\":3}") != std::string::npos);
     assert(update_json.find("\"overlayBlock\":\"minecraft:poppy\"") != std::string::npos);
     assert(update_json.find("\"overlayState\":{\"facing_direction\":0}") != std::string::npos);
+    livemap::BlockUpdateBatch second = batch;
+    second.chunk_x = 1;
+    const auto update_batches_json = livemap::serializeBlockUpdateBatches({batch, second});
+    assert(update_batches_json.find("\"batches\":[{\"world\":\"world\"") != std::string::npos);
+    assert(update_batches_json.find("\"chunkX\":1") != std::string::npos);
 }
 
 void testBase64()
@@ -470,7 +475,8 @@ void testSettingsLegacyKeys()
             << "  \"http_timeout_seconds\": 999,\n"
             << "  \"dirty_block_push_seconds\": 0,\n"
             << "  \"land_push_seconds\": 1,\n"
-            << "  \"max_dirty_blocks_per_push\": 999,\n"
+            << "  \"max_dirty_blocks_per_push\": 99999,\n"
+            << "  \"max_dirty_chunks_per_push\": 999,\n"
             << "  \"max_upload_queue_size\": 99999,\n"
             << "  \"upload_tiles\": false,\n"
             << "  \"auto_seed_chunks\": true,\n"
@@ -499,7 +505,8 @@ void testSettingsLegacyKeys()
     assert(settings.http_timeout_seconds == 120);
     assert(settings.dirty_block_push_seconds == 1);
     assert(settings.land_push_seconds == 10);
-    assert(settings.max_dirty_blocks_per_push == 512);
+    assert(settings.max_dirty_blocks_per_push == 4096);
+    assert(settings.max_dirty_chunks_per_push == 256);
     assert(settings.max_upload_queue_size == 4096);
     assert(!settings.upload_chunks);
     assert(settings.auto_seed_chunks);
@@ -507,6 +514,16 @@ void testSettingsLegacyKeys()
     assert(!settings.upload_players);
     assert(!settings.upload_lands);
     std::filesystem::remove(path);
+}
+
+void testSettingsDirtyBatchDefaults()
+{
+    const auto path = std::filesystem::temp_directory_path() / "live_map_dirty_batch_defaults_test.json";
+    std::filesystem::remove(path);
+    const auto settings = livemap::loadSettings(path);
+    assert(settings.dirty_block_push_seconds == 60);
+    assert(settings.max_dirty_blocks_per_push == 2048);
+    assert(settings.max_dirty_chunks_per_push == 64);
 }
 
 void testSettingsNewKeysOverrideLegacyKeys()
@@ -542,6 +559,44 @@ void testSettingsNewKeysOverrideLegacyKeys()
     std::filesystem::remove(path);
 }
 
+void testDirtyBlockChunkLimitedDrain()
+{
+    livemap::DirtyBlockTracker tracker;
+    assert(tracker.markBlock("world", "Overworld", 0, 0, 64));
+    assert(!tracker.markBlock("world", "Overworld", 0, 0, 70));
+    assert(tracker.markBlock("world", "Overworld", 1, 0, 64));
+    assert(tracker.markBlock("world", "Overworld", 16, 0, 64));
+    assert(tracker.markBlock("world", "Overworld", 32, 0, 64));
+    assert(tracker.size() == 4);
+
+    const auto first = tracker.drainForChunkLimit(3, 2);
+    assert(first.size() == 3);
+    assert(tracker.size() == 1);
+    bool saw_updated_column = false;
+    for (const auto &column : first) {
+        if (column.coord.x == 0 && column.coord.z == 0) {
+            assert(column.touched_y == 70);
+            saw_updated_column = true;
+        }
+    }
+    assert(saw_updated_column);
+
+    const auto second = tracker.drainForChunkLimit(10, 10);
+    assert(second.size() == 1);
+    assert(tracker.empty());
+
+    livemap::DirtyBlockTracker sparse_tracker;
+    assert(sparse_tracker.markBlock("world", "Overworld", 0, 0, 64));
+    assert(sparse_tracker.markBlock("world", "Overworld", 16, 0, 64));
+    assert(sparse_tracker.markBlock("world", "Overworld", 32, 0, 64));
+    const auto sparse_first = sparse_tracker.drainForChunkLimit(10, 2);
+    assert(sparse_first.size() == 2);
+    assert(sparse_tracker.size() == 1);
+    const auto sparse_second = sparse_tracker.drainForChunkLimit(10, 2);
+    assert(sparse_second.size() == 1);
+    assert(sparse_tracker.empty());
+}
+
 }  // namespace
 
 int main()
@@ -560,7 +615,9 @@ int main()
     testChunkSnapshotFingerprint();
     testChunkBaselineIndex();
     testSettingsLegacyKeys();
+    testSettingsDirtyBatchDefaults();
     testSettingsNewKeysOverrideLegacyKeys();
+    testDirtyBlockChunkLimitedDrain();
     std::cout << "livemap core tests passed\n";
     return 0;
 }

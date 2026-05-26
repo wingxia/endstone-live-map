@@ -76,6 +76,7 @@ public:
     [[nodiscard]] std::size_t size() const;
     [[nodiscard]] bool empty() const;
     std::vector<DirtyBlockColumn> drain(std::size_t limit);
+    std::vector<DirtyBlockColumn> drainForChunkLimit(std::size_t column_limit, std::size_t chunk_limit);
     void clear();
 
 private:

@@ -26,6 +26,7 @@ std::string serializePlayerSnapshot(const std::vector<PlayerState> &players);
 std::string serializeChunkSnapshot(const ChunkSnapshot &snapshot);
 std::string serializeChunkBatch(const std::vector<ChunkSnapshot> &snapshots, bool broadcast);
 std::string serializeBlockUpdateBatch(const BlockUpdateBatch &batch);
+std::string serializeBlockUpdateBatches(const std::vector<BlockUpdateBatch> &batches);
 std::string serializeChunkReady(const ChunkCoord &coord);
 std::string serializeHeartbeat(std::string_view server_id, std::int64_t now_ms);
 

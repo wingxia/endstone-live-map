@@ -15,6 +15,8 @@ const CHUNK_BLOCK_COUNT = 256;
 const MAX_CHUNK_PALETTE_SIZE = CHUNK_BLOCK_COUNT * 2;
 const MAX_CHUNKS_PER_REQUEST = 256;
 const MAX_CHUNKS_PER_BATCH = 384;
+const MAX_BLOCK_UPDATE_BATCH_UPDATES = 4096;
+const MAX_BLOCK_UPDATE_BATCH_CHUNKS = 256;
 const REGION_SIZE_CHUNKS = 16;
 const BATCH_WRITE_CONCURRENCY = 32;
 const MAP_TILE_PREFIX = "map-tiles/v1/";
@@ -152,6 +154,14 @@ export default {
           return auth;
         }
         return handleBlockUpdatesUpload(request, env, ctx);
+      }
+
+      if (url.pathname === "/api/plugin/block-updates/batch") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleBlockUpdatesBatchUpload(request, env, ctx);
       }
 
       if (url.pathname === "/api/plugin/chunks/prune-empty") {
@@ -385,10 +395,66 @@ async function handleBlockUpdatesUpload(request, env, ctx) {
   }
 
   const payload = normalizeBlockUpdateBatch(await request.json());
+  const result = await applyBlockUpdateBatchToStorage(bucket, payload);
+  if (result.missingBase) {
+    return json({ ok: true, missingBase: true, key: result.key, updates: 0 });
+  }
+  const tiles = result.applied.length > 0 ? await scheduleMapTilesForChunks(ctx, bucket, [result.chunk]) : [];
+  const tileVersion = payload.updatedAt;
+
+  if (result.applied.length > 0) {
+    await broadcastBlockUpdates(env, result.chunk, result.applied, tileVersion);
+  }
+
+  return json({ ok: true, missingBase: false, key: result.key, updates: result.applied.length, tiles });
+}
+
+async function handleBlockUpdatesBatchUpload(request, env, ctx) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
+  let payload;
+  try {
+    payload = normalizeBlockUpdateBatches(await request.json());
+  } catch (error) {
+    return json({ error: "invalid_block_update_batch", message: error instanceof Error ? error.message : String(error) }, 400);
+  }
+  const results = await mapWithConcurrency(payload.batches, BATCH_WRITE_CONCURRENCY, (batch) => applyBlockUpdateBatchToStorage(bucket, batch));
+  const appliedResults = results.filter((result) => !result.missingBase && result.applied.length > 0);
+  const updatedChunks = appliedResults.map((result) => result.chunk);
+  const tiles = updatedChunks.length > 0 ? await scheduleMapTilesForChunks(ctx, bucket, updatedChunks) : [];
+  if (updatedChunks.length > 0) {
+    await scheduleWorldMetaForChunks(ctx, bucket, updatedChunks);
+  }
+  await mapWithConcurrency(appliedResults, MAP_TILE_WRITE_CONCURRENCY, (result) => broadcastBlockUpdates(env, result.chunk, result.applied, result.chunk.updatedAt));
+
+  const missingBase = results
+    .filter((result) => result.missingBase)
+    .map((result) => ({
+      world: result.batch.world,
+      dimension: result.batch.dimension,
+      chunkX: result.batch.chunkX,
+      chunkZ: result.batch.chunkZ,
+      key: result.key,
+    }));
+  const applied = appliedResults.reduce((sum, result) => sum + result.applied.length, 0);
+  return json({
+    ok: true,
+    missingBase: missingBase.length > 0,
+    missingBaseChunks: missingBase,
+    chunks: appliedResults.length,
+    updates: applied,
+    tiles,
+  });
+}
+
+async function applyBlockUpdateBatchToStorage(bucket, payload) {
   const key = chunkKey(payload.world, payload.dimension, payload.chunkX, payload.chunkZ);
   const existing = await readR2Json(await bucket.get(key));
   if (!existing) {
-    return json({ ok: true, missingBase: true, key, updates: 0 });
+    return { batch: payload, key, missingBase: true, applied: [], chunk: null };
   }
 
   const chunk = normalizeChunkSnapshot(existing);
@@ -398,26 +464,23 @@ async function handleBlockUpdatesUpload(request, env, ctx) {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
     customMetadata: { world: chunk.world, dimension: chunk.dimension },
   });
-  const tiles = applied.length > 0 ? await scheduleMapTilesForChunks(ctx, bucket, [chunk]) : [];
-  const tileVersion = payload.updatedAt;
+  return { batch: payload, key, missingBase: false, applied, chunk };
+}
 
-  if (applied.length > 0) {
-    await broadcastLive(
-      env,
-      JSON.stringify({
-        type: "block_updates",
-        world: chunk.world,
-        dimension: chunk.dimension,
-        chunkX: chunk.chunkX,
-        chunkZ: chunk.chunkZ,
-        updates: applied,
-        updatedAt: chunk.updatedAt,
-        tileVersion,
-      }),
-    );
-  }
-
-  return json({ ok: true, missingBase: false, key, updates: applied.length, tiles });
+async function broadcastBlockUpdates(env, chunk, updates, tileVersion) {
+  await broadcastLive(
+    env,
+    JSON.stringify({
+      type: "block_updates",
+      world: chunk.world,
+      dimension: chunk.dimension,
+      chunkX: chunk.chunkX,
+      chunkZ: chunk.chunkZ,
+      updates,
+      updatedAt: chunk.updatedAt,
+      tileVersion,
+    }),
+  );
 }
 
 async function putChunkSnapshot(bucket, snapshot, options) {
@@ -1135,6 +1198,26 @@ export function normalizeBlockUpdateBatch(payload) {
     updates,
     updatedAt: numberOrThrow(payload.updatedAt ?? Date.now(), "updatedAt"),
   };
+}
+
+export function normalizeBlockUpdateBatches(payload) {
+  const batches = Array.isArray(payload.batches) ? payload.batches.map((batch) => normalizeBlockUpdateBatch(batch)) : [];
+  if (batches.length < 1 || batches.length > MAX_BLOCK_UPDATE_BATCH_CHUNKS) {
+    throw new Error(`batches must contain 1-${MAX_BLOCK_UPDATE_BATCH_CHUNKS} entries`);
+  }
+  const totalUpdates = batches.reduce((sum, batch) => sum + batch.updates.length, 0);
+  if (totalUpdates > MAX_BLOCK_UPDATE_BATCH_UPDATES) {
+    throw new Error(`updates must contain 1-${MAX_BLOCK_UPDATE_BATCH_UPDATES} total entries`);
+  }
+  const seen = new Set();
+  for (const batch of batches) {
+    const key = `${batch.world}\0${batch.dimension}\0${batch.chunkX}\0${batch.chunkZ}`;
+    if (seen.has(key)) {
+      throw new Error("duplicate chunk update batch");
+    }
+    seen.add(key);
+  }
+  return { batches, totalUpdates };
 }
 
 function normalizeBlockUpdate(update) {

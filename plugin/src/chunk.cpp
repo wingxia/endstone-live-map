@@ -1,5 +1,4 @@
 #include "livemap/chunk.hpp"
-
 #include "livemap/tile_math.hpp"
 
 #include <algorithm>
@@ -202,6 +201,56 @@ std::vector<DirtyBlockColumn> DirtyBlockTracker::drain(std::size_t limit)
         dirty_.erase(column.coord);
     }
     return sorted;
+}
+
+std::vector<DirtyBlockColumn> DirtyBlockTracker::drainForChunkLimit(std::size_t column_limit, std::size_t chunk_limit)
+{
+    std::vector<DirtyBlockColumn> sorted;
+    sorted.reserve(dirty_.size());
+    for (const auto &[coord, touched_y] : dirty_) {
+        sorted.push_back({coord, touched_y});
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const auto &left, const auto &right) {
+        const auto left_chunk = chunkForBlock(left.coord.world, left.coord.dimension, left.coord.x, left.coord.z);
+        const auto right_chunk = chunkForBlock(right.coord.world, right.coord.dimension, right.coord.x, right.coord.z);
+        const auto left_tile_x = floorDiv(left_chunk.x, 2);
+        const auto right_tile_x = floorDiv(right_chunk.x, 2);
+        if (left_tile_x != right_tile_x) {
+            return left_tile_x < right_tile_x;
+        }
+        const auto left_tile_z = floorDiv(left_chunk.z, 2);
+        const auto right_tile_z = floorDiv(right_chunk.z, 2);
+        if (left_tile_z != right_tile_z) {
+            return left_tile_z < right_tile_z;
+        }
+        if (left_chunk == right_chunk) {
+            if (left.coord == right.coord) {
+                return left.touched_y < right.touched_y;
+            }
+            return left.coord < right.coord;
+        }
+        return left_chunk < right_chunk;
+    });
+
+    std::vector<DirtyBlockColumn> selected;
+    selected.reserve(std::min(column_limit, sorted.size()));
+    std::unordered_set<ChunkCoord, ChunkCoordHash> chunks;
+    for (const auto &column : sorted) {
+        if (selected.size() >= column_limit) {
+            break;
+        }
+        const auto chunk = chunkForBlock(column.coord.world, column.coord.dimension, column.coord.x, column.coord.z);
+        if (chunks.find(chunk) == chunks.end() && chunks.size() >= chunk_limit) {
+            continue;
+        }
+        chunks.insert(chunk);
+        selected.push_back(column);
+    }
+
+    for (const auto &column : selected) {
+        dirty_.erase(column.coord);
+    }
+    return selected;
 }
 
 void DirtyBlockTracker::clear()

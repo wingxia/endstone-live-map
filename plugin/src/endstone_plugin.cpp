@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -81,6 +82,57 @@ livemap::ChunkCoord chunkCoordForSnapshot(const livemap::ChunkSnapshot &snapshot
     return {snapshot.world, snapshot.dimension, snapshot.chunk_x, snapshot.chunk_z};
 }
 
+std::vector<livemap::ChunkCoord> missingBaseChunksFromBody(const std::string &body)
+{
+    std::vector<livemap::ChunkCoord> chunks;
+    std::size_t cursor = 0;
+    while (true) {
+        cursor = body.find("\"world\":\"", cursor);
+        if (cursor == std::string::npos) {
+            break;
+        }
+        cursor += 9;
+        const auto world_end = body.find('"', cursor);
+        if (world_end == std::string::npos) {
+            break;
+        }
+        const auto world = body.substr(cursor, world_end - cursor);
+        cursor = body.find("\"dimension\":\"", world_end);
+        if (cursor == std::string::npos) {
+            break;
+        }
+        cursor += 13;
+        const auto dimension_end = body.find('"', cursor);
+        if (dimension_end == std::string::npos) {
+            break;
+        }
+        const auto dimension = body.substr(cursor, dimension_end - cursor);
+        cursor = body.find("\"chunkX\":", dimension_end);
+        if (cursor == std::string::npos) {
+            break;
+        }
+        cursor += 9;
+        char *end = nullptr;
+        const auto chunk_x = static_cast<int>(std::strtol(body.c_str() + cursor, &end, 10));
+        if (end == body.c_str() + cursor) {
+            break;
+        }
+        cursor = body.find("\"chunkZ\":", static_cast<std::size_t>(end - body.c_str()));
+        if (cursor == std::string::npos) {
+            break;
+        }
+        cursor += 9;
+        end = nullptr;
+        const auto chunk_z = static_cast<int>(std::strtol(body.c_str() + cursor, &end, 10));
+        if (end == body.c_str() + cursor) {
+            break;
+        }
+        chunks.push_back({world, dimension, chunk_x, chunk_z});
+        cursor = static_cast<std::size_t>(end - body.c_str());
+    }
+    return chunks;
+}
+
 livemap::BlockStateMap blockStateMapFromEndstone(const endstone::BlockStates &states)
 {
     livemap::BlockStateMap normalized;
@@ -127,7 +179,7 @@ struct UploadJob {
     std::vector<ChunkUploadMeta> chunks;
     std::vector<livemap::ChunkSnapshot> snapshots;
     std::size_t update_count{};
-    bool resample_after_success{};
+    std::vector<livemap::ChunkCoord> resample_after_success_chunks;
     std::int64_t queued_at_ms{};
 };
 
@@ -136,7 +188,7 @@ struct UploadResult {
     std::vector<ChunkUploadMeta> chunks;
     std::vector<livemap::ChunkSnapshot> snapshots;
     std::size_t update_count{};
-    bool resample_after_success{};
+    std::vector<livemap::ChunkCoord> resample_after_success_chunks;
     std::int64_t queued_at_ms{};
     std::int64_t started_at_ms{};
     std::int64_t finished_at_ms{};
@@ -300,8 +352,8 @@ private:
             {
                 std::scoped_lock lock(mutex_);
                 results_.push_back({job.kind, std::move(job.chunks), std::move(job.snapshots), job.update_count,
-                                    job.resample_after_success, job.queued_at_ms, started_at_ms, finished_at_ms,
-                                    std::move(transport)});
+                                    std::move(job.resample_after_success_chunks), job.queued_at_ms, started_at_ms,
+                                    finished_at_ms, std::move(transport)});
             }
         }
     }
@@ -427,7 +479,7 @@ private:
             const auto finished_at_ms = nowMs();
             {
                 std::scoped_lock lock(mutex_);
-                results_.push_back({UploadJob::Kind::PlayerSnapshot, {}, {}, payload.item_count, false,
+                results_.push_back({UploadJob::Kind::PlayerSnapshot, {}, {}, payload.item_count, {},
                                     payload.queued_at_ms, started_at_ms, finished_at_ms, std::move(transport)});
             }
         }
@@ -517,7 +569,8 @@ public:
             settings_.chunk_upload_batch_size, " chunkUploadFlush=", settings_.chunk_upload_flush_seconds,
             "s httpTimeout=", settings_.http_timeout_seconds, "s dirtyBlockPush=", settings_.dirty_block_push_seconds,
             "s maxDirtyBlocks=",
-            settings_.max_dirty_blocks_per_push, " maxUploadQueue=", settings_.max_upload_queue_size,
+            settings_.max_dirty_blocks_per_push, " maxDirtyChunks=", settings_.max_dirty_chunks_per_push,
+            " maxUploadQueue=", settings_.max_upload_queue_size,
             " uploadLands=", settings_.upload_lands, " landPush=", settings_.land_push_seconds,
             "s landConfig=", settings_.land_config_file, " dimensions=", settings_.dimensions.size(), ".");
     }
@@ -827,7 +880,7 @@ private:
         }
 
         if (!enqueueUpload({UploadJob::Kind::Lands, "/api/plugin/lands", livemap::serializeLandBatch(parsed.claims),
-                            {}, {}, parsed.claims.size(), false})) {
+                            {}, {}, parsed.claims.size(), {}})) {
             background_log_.warning("Dropped live map land snapshot because upload queue is full.");
             return;
         }
@@ -1131,7 +1184,7 @@ private:
 
         const auto json = livemap::serializeChunkBatch(snapshots, true);
         if (!enqueueUpload({UploadJob::Kind::ChunkBatch, "/api/plugin/chunks/batch", json, metas, snapshots,
-                            snapshots.size(), false})) {
+                            snapshots.size(), {}})) {
             restorePendingChunkUploads(std::move(snapshots), metas);
             background_log_.warning("Delayed live map chunk batch upload because upload queue is full.");
             return false;
@@ -1257,16 +1310,16 @@ private:
                     persistChunkBaselines();
                 }
                 else if (result.kind == UploadJob::Kind::BlockUpdates) {
-                    const auto name = result.chunks.empty() ? std::string{"unknown"} : chunkName(result.chunks[0].coord);
                     confirmUploadedChunkBatch(result.chunks);
                     confirmUploadedChunkSnapshots(result.snapshots);
-                    background_log_.info("Uploaded ", result.update_count, " dirty block update(s) for ", name,
-                                         " HTTP ", result.transport.response_code, ".");
-                    if (result.resample_after_success && active_) {
-                        for (const auto &chunk : result.chunks) {
-                            enqueueSeedChunk(chunk.coord, true);
+                    background_log_.info("Uploaded ", result.update_count, " dirty block update(s) for ",
+                                         result.chunks.size(), " chunk(s) HTTP ", result.transport.response_code, ".");
+                    if (!result.resample_after_success_chunks.empty() && active_) {
+                        for (const auto &chunk : result.resample_after_success_chunks) {
+                            enqueueSeedChunk(chunk, true);
                         }
-                        background_log_.info("Queued base resample after dirty update for ", name,
+                        background_log_.info("Queued ", result.resample_after_success_chunks.size(),
+                                             " base resample(s) after dirty update batch",
                                              " because confirmed snapshot was not available.");
                     }
                     persistChunkBaselines();
@@ -1285,13 +1338,49 @@ private:
             }
 
             if (result.kind == UploadJob::Kind::BlockUpdates && result.transport.missing_base) {
-                const auto name = result.chunks.empty() ? std::string{"unknown"} : chunkName(result.chunks[0].coord);
-                removeConfirmedChunkBaselines(result.chunks);
-                background_log_.warning("Dirty block update missing base chunk ", name, "; queued base resample.");
+                auto missing_chunks = missingBaseChunksFromBody(result.transport.body);
+                if (missing_chunks.empty()) {
+                    for (const auto &chunk : result.chunks) {
+                        missing_chunks.push_back(chunk.coord);
+                    }
+                }
+                std::vector<ChunkUploadMeta> missing_metas;
+                missing_metas.reserve(missing_chunks.size());
+                for (const auto &missing : missing_chunks) {
+                    missing_metas.push_back({missing, 0, 0});
+                }
+                std::vector<ChunkUploadMeta> uploaded_metas;
+                for (const auto &chunk : result.chunks) {
+                    if (std::find(missing_chunks.begin(), missing_chunks.end(), chunk.coord) == missing_chunks.end()) {
+                        uploaded_metas.push_back(chunk);
+                    }
+                }
+                std::vector<livemap::ChunkSnapshot> uploaded_snapshots;
+                for (const auto &snapshot : result.snapshots) {
+                    if (std::find(missing_chunks.begin(), missing_chunks.end(), chunkCoordForSnapshot(snapshot)) ==
+                        missing_chunks.end()) {
+                        uploaded_snapshots.push_back(snapshot);
+                    }
+                }
+                if (!uploaded_metas.empty()) {
+                    confirmUploadedChunkBatch(uploaded_metas);
+                    confirmUploadedChunkSnapshots(uploaded_snapshots);
+                    if (!result.resample_after_success_chunks.empty() && active_) {
+                        for (const auto &chunk : result.resample_after_success_chunks) {
+                            if (std::find(missing_chunks.begin(), missing_chunks.end(), chunk) != missing_chunks.end()) {
+                                continue;
+                            }
+                            enqueueSeedChunk(chunk, true);
+                        }
+                    }
+                }
+                removeConfirmedChunkBaselines(missing_metas);
+                background_log_.warning("Dirty block batch missing ", missing_chunks.size(),
+                                        " base chunk(s); queued base resample.");
                 persistChunkBaselines();
                 if (active_) {
-                    for (const auto &chunk : result.chunks) {
-                        enqueueSeedChunk(chunk.coord, false);
+                    for (const auto &chunk : missing_chunks) {
+                        enqueueSeedChunk(chunk, false);
                     }
                 }
                 continue;
@@ -1380,8 +1469,9 @@ private:
         std::vector<livemap::DirtyBlockColumn> dirty_columns;
         {
             std::scoped_lock lock(state_mutex_);
-            dirty_columns =
-                dirty_blocks_.drain(static_cast<std::size_t>(std::max(1, settings_.max_dirty_blocks_per_push)));
+            dirty_columns = dirty_blocks_.drainForChunkLimit(
+                static_cast<std::size_t>(std::max(1, settings_.max_dirty_blocks_per_push)),
+                static_cast<std::size_t>(std::max(1, settings_.max_dirty_chunks_per_push)));
         }
         if (dirty_columns.empty()) {
             return;
@@ -1459,7 +1549,15 @@ private:
             background_log_.info("Queued ", queued_overlay_resamples,
                                  " live map chunk resample(s) for decoration-only column changes.");
         }
-        background_log_.info("Uploading live map dirty block updates for ", grouped.size(), " chunk(s).");
+        background_log_.info("Uploading live map dirty block updates for ", grouped.size(), " chunk(s) in one batch.");
+        std::vector<livemap::BlockUpdateBatch> batches;
+        std::vector<ChunkUploadMeta> metas;
+        std::vector<livemap::ChunkSnapshot> updated_snapshots;
+        std::vector<livemap::ChunkCoord> resample_after_success_chunks;
+        std::size_t update_count = 0;
+        batches.reserve(grouped.size());
+        metas.reserve(grouped.size());
+        resample_after_success_chunks.reserve(grouped.size());
         for (const auto &[coord, updates] : grouped) {
             livemap::BlockUpdateBatch batch;
             batch.world = coord.world;
@@ -1468,23 +1566,33 @@ private:
             batch.chunk_z = coord.z;
             batch.updates = updates;
             batch.updated_at_ms = nowMs();
-            bool resample_after_success = false;
-            std::vector<livemap::ChunkSnapshot> updated_snapshots;
-            const auto meta = prepareDirtyBaselineMeta(coord, updates, batch.updated_at_ms, resample_after_success,
-                                                       updated_snapshots);
+            bool chunk_resample_after_success = false;
+            const auto meta = prepareDirtyBaselineMeta(coord, updates, batch.updated_at_ms,
+                                                       chunk_resample_after_success, updated_snapshots);
             if (!meta.has_value()) {
                 enqueueSeedChunk(coord, false);
                 background_log_.warning("Queued base resample for ", chunkName(coord),
                                         " because dirty update has no local baseline.");
                 continue;
             }
-            if (!enqueueUpload({UploadJob::Kind::BlockUpdates, "/api/plugin/block-updates",
-                                livemap::serializeBlockUpdateBatch(batch), {*meta}, updated_snapshots, updates.size(),
-                                resample_after_success})) {
-                enqueueSeedChunk(coord, false);
-                background_log_.warning("Queued base resample for ", chunkName(coord),
-                                        " because upload queue is full.");
+            if (chunk_resample_after_success) {
+                resample_after_success_chunks.push_back(coord);
             }
+            metas.push_back(*meta);
+            update_count += updates.size();
+            batches.push_back(std::move(batch));
+        }
+        if (batches.empty()) {
+            return;
+        }
+        if (!enqueueUpload({UploadJob::Kind::BlockUpdates, "/api/plugin/block-updates/batch",
+                            livemap::serializeBlockUpdateBatches(batches), metas, updated_snapshots, update_count,
+                            resample_after_success_chunks})) {
+            for (const auto &meta : metas) {
+                enqueueSeedChunk(meta.coord, false);
+            }
+            background_log_.warning("Queued ", metas.size(),
+                                    " base resample(s) because dirty block batch upload queue is full.");
         }
     }
 

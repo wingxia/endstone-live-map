@@ -9,6 +9,7 @@ import worker, {
   mapTileKey,
   mapTilesForChunk,
   normalizeBlockUpdateBatch,
+  normalizeBlockUpdateBatches,
   normalizeCleanupPayload,
   normalizeEmptyChunkPrunePayload,
   normalizeChunkBatchPayload,
@@ -59,9 +60,11 @@ class MockR2Bucket {
     this.objects = new Map();
     this.getCalls = [];
     this.listCalls = [];
+    this.putCalls = [];
   }
 
   async put(key, body, options = {}) {
+    this.putCalls.push(key);
     this.objects.set(key, new MockR2Object(body, options.httpMetadata?.contentType || "application/octet-stream", options.customMetadata || {}));
   }
 
@@ -328,6 +331,44 @@ describe("worker helpers", () => {
         },
       ],
     });
+    const normalized = normalizeBlockUpdateBatch({
+      world: "world",
+      dimension: "Overworld",
+      chunkX: 0,
+      chunkZ: 0,
+      updates: [{ localX: 0, localZ: 0, block: "minecraft:stone", height: 64 }],
+    });
+    expect(normalizeBlockUpdateBatches({ batches: [normalized, { ...normalized, chunkX: 1 }] }).totalUpdates).toBe(2);
+    expect(() => normalizeBlockUpdateBatches({ batches: [normalized, normalized] })).toThrow(/duplicate/);
+    expect(() =>
+      normalizeBlockUpdateBatches({
+        batches: [
+          {
+            ...normalized,
+            updates: Array.from({ length: 257 }, (_, index) => ({
+              localX: index % 16,
+              localZ: Math.floor(index / 16) % 16,
+              block: "minecraft:stone",
+              height: 64,
+            })),
+          },
+        ],
+      }),
+    ).toThrow(/1-256/);
+    expect(() =>
+      normalizeBlockUpdateBatches({
+        batches: Array.from({ length: 17 }, (_, chunkX) => ({
+          ...normalized,
+          chunkX,
+          updates: Array.from({ length: 256 }, (_, index) => ({
+            localX: index % 16,
+            localZ: Math.floor(index / 16),
+            block: "minecraft:stone",
+            height: 64,
+          })),
+        })),
+      }),
+    ).toThrow(/1-4096/);
   });
 
   it("detects block updates between chunk snapshots", () => {
@@ -1219,6 +1260,132 @@ describe("worker routes", () => {
     expect(update.status).toBe(200);
     expect(await update.json()).toMatchObject({ ok: true, missingBase: true, updates: 0 });
     expect(env.live.messages).toHaveLength(0);
+  });
+
+  it("applies dirty block update batches and writes shared map tiles once", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ chunkX: 0, chunkZ: 0 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/1/0.json", JSON.stringify(createChunk({ chunkX: 1, chunkZ: 0 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    env.MAP_DATA.putCalls = [];
+
+    const update = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/block-updates/batch", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batches: [
+            {
+              world: "world",
+              dimension: "Overworld",
+              chunkX: 0,
+              chunkZ: 0,
+              updates: [{ localX: 1, localZ: 1, block: "minecraft:stone", height: 70 }],
+              updatedAt: 30,
+            },
+            {
+              world: "world",
+              dimension: "Overworld",
+              chunkX: 1,
+              chunkZ: 0,
+              updates: [{ localX: 2, localZ: 2, block: "minecraft:oak_planks", height: 72 }],
+              updatedAt: 31,
+            },
+          ],
+        }),
+      }),
+      env,
+      {},
+    );
+
+    const body = await update.json();
+    expect(update.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, missingBase: false, chunks: 2, updates: 2 });
+    expect(env.live.messages.filter((message) => String(message).includes("block_updates"))).toHaveLength(2);
+    expect(env.MAP_DATA.putCalls.filter((key) => key === "chunks/v1/world/Overworld/0/0.json")).toHaveLength(1);
+    expect(env.MAP_DATA.putCalls.filter((key) => key === "chunks/v1/world/Overworld/1/0.json")).toHaveLength(1);
+    expect(env.MAP_DATA.putCalls.filter((key) => key === "map-tiles/v1/world/Overworld/z0/0/0.png")).toHaveLength(1);
+    expect(env.MAP_DATA.putCalls.filter((key) => key === "map-tiles/v1/world/Overworld/z1/0/0.png")).toHaveLength(1);
+    expect(env.MAP_DATA.putCalls.filter((key) => key === "map-tiles/v1/world/Overworld/z2/0/0.png")).toHaveLength(1);
+    expect(env.MAP_DATA.putCalls.filter((key) => key === "map-tiles/v1/world/Overworld/z3/0/0.png")).toHaveLength(1);
+  });
+
+  it("reports missing base chunks in dirty block update batches without failing good chunks", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ chunkX: 0, chunkZ: 0 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const update = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/block-updates/batch", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batches: [
+            {
+              world: "world",
+              dimension: "Overworld",
+              chunkX: 0,
+              chunkZ: 0,
+              updates: [{ localX: 1, localZ: 1, block: "minecraft:stone", height: 70 }],
+              updatedAt: 30,
+            },
+            {
+              world: "world",
+              dimension: "Overworld",
+              chunkX: 2,
+              chunkZ: 0,
+              updates: [{ localX: 2, localZ: 2, block: "minecraft:oak_planks", height: 72 }],
+              updatedAt: 31,
+            },
+          ],
+        }),
+      }),
+      env,
+      {},
+    );
+
+    expect(update.status).toBe(200);
+    expect(await update.json()).toMatchObject({
+      ok: true,
+      missingBase: true,
+      chunks: 1,
+      updates: 1,
+      missingBaseChunks: [expect.objectContaining({ chunkX: 2, chunkZ: 0 })],
+    });
+  });
+
+  it("rejects oversized dirty block update batches", async () => {
+    const env = createEnv();
+    const update = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/block-updates/batch", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batches: Array.from({ length: 17 }, (_, chunkX) => ({
+            world: "world",
+            dimension: "Overworld",
+            chunkX,
+            chunkZ: 0,
+            updates: Array.from({ length: 256 }, (_, index) => ({
+              localX: index % 16,
+              localZ: Math.floor(index / 16),
+              block: "minecraft:stone",
+              height: 70,
+            })),
+            updatedAt: 30,
+          })),
+        }),
+      }),
+      env,
+      {},
+    );
+
+    expect(update.status).toBe(400);
+    expect(await update.json()).toMatchObject({ error: "invalid_block_update_batch" });
   });
 
   it("accepts authenticated chunk batch uploads without broadcasting by default", async () => {
