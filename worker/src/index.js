@@ -1718,29 +1718,29 @@ async function rebuildMapTile(bucket, tile, options = {}) {
   const range = chunkRangeForMapTile(tile);
   const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range }, { readConcurrency: options.readConcurrency });
   const textureColors = options.textureColors || (await loadTextureColorIndex(bucket));
-  const { png, hasPixels, tileVersion, missingColors, missingColorReason } = renderMapTilePng(tile, chunksByCoord, textureColors);
-  const nextTileVersion = Math.max(tileVersion, options.rebuildVersion || 0);
+  const { png, hasPixels, tileVersion: sourceVersion, missingColors, missingColorReason } = renderMapTilePng(tile, chunksByCoord, textureColors);
+  const nextTileVersion = Math.max(sourceVersion, options.rebuildVersion || 0);
   const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
+  if (!options.force) {
+    const existingSourceVersion = await mapTileObjectSourceVersion(bucket, key);
+    if (existingSourceVersion > sourceVersion) {
+      return { ...tile, key, skipped: true, deleted: false, tileVersion: nextTileVersion, sourceVersion, existingSourceVersion, chunks: chunksByCoord.size };
+    }
+  }
   if (missingColors.length > 0) {
     await bucket.delete(key);
-    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, missingColors, missingColorReason, chunks: chunksByCoord.size };
+    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, missingColors, missingColorReason, chunks: chunksByCoord.size };
   }
   if (!hasPixels) {
     await bucket.delete(key);
-    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, chunks: chunksByCoord.size };
-  }
-  if (!options.force) {
-    const existingVersion = await mapTileObjectVersion(bucket, key);
-    if (existingVersion > tileVersion) {
-      return { ...tile, key, skipped: true, deleted: false, chunks: chunksByCoord.size };
-    }
+    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, chunks: chunksByCoord.size };
   }
   const buffer = PNG.sync.write(png, { colorType: 6, inputColorType: 6 });
   await bucket.put(key, buffer, {
     httpMetadata: { contentType: "image/png" },
-    customMetadata: { world: tile.world, dimension: tile.dimension, zoom: String(tile.zoom), tileVersion: String(nextTileVersion) },
+    customMetadata: { world: tile.world, dimension: tile.dimension, zoom: String(tile.zoom), tileVersion: String(nextTileVersion), sourceVersion: String(sourceVersion) },
   });
-  return { ...tile, key, deleted: false, tileVersion: nextTileVersion, chunks: chunksByCoord.size };
+  return { ...tile, key, deleted: false, tileVersion: nextTileVersion, sourceVersion, chunks: chunksByCoord.size };
 }
 
 function renderMapTilePng(tile, chunksByCoord, textureColors) {
@@ -1889,9 +1889,9 @@ function averageRgbaColors(colors) {
   return [clampByte(red / colors.length), clampByte(green / colors.length), clampByte(blue / colors.length), clampByte(alpha / colors.length)];
 }
 
-async function mapTileObjectVersion(bucket, key) {
+async function mapTileObjectSourceVersion(bucket, key) {
   const existing = await bucket.get(key);
-  const version = Number(existing?.customMetadata?.tileVersion || 0);
+  const version = Number(existing?.customMetadata?.sourceVersion || 0);
   return Number.isFinite(version) ? version : 0;
 }
 
