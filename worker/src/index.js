@@ -354,17 +354,22 @@ async function handleChunkBatchUpload(request, env, ctx) {
     return json({ ok: true, storage, chunks: 0, skippedEmpty: emptySnapshots.length, rejected: emptySnapshots, keys: [], updates: 0 });
   }
 
-  if (storage === "region" && !broadcast) {
+  if (storage === "region") {
     const results = await putChunkRegionSnapshots(bucket, writableSnapshots);
     const tiles = await scheduleMapTilesForChunks(ctx, bucket, writableSnapshots);
+    if (broadcast) {
+      await broadcastChunksReady(env, writableSnapshots);
+    }
     await scheduleWorldMetaForChunks(ctx, bucket, writableSnapshots);
     return json({
       ok: true,
       storage,
       chunks: writableSnapshots.length,
       skippedEmpty: emptySnapshots.length,
+      rejected: emptySnapshots,
       regions: results.length,
       keys: results.map((result) => result.key),
+      updates: 0,
       tiles,
     });
   }
@@ -535,6 +540,34 @@ async function broadcastChunkSnapshot(env, snapshot, updates = []) {
       }),
     );
   }
+}
+
+async function broadcastChunksReady(env, snapshots) {
+  const groups = new Map();
+  for (const snapshot of snapshots) {
+    const key = `${snapshot.world}\n${snapshot.dimension}`;
+    if (!groups.has(key)) {
+      groups.set(key, { world: snapshot.world, dimension: snapshot.dimension, chunks: [], updatedAt: 0 });
+    }
+    const group = groups.get(key);
+    const updatedAt = snapshot.updatedAt || 0;
+    group.updatedAt = Math.max(group.updatedAt, updatedAt);
+    group.chunks.push({ chunkX: snapshot.chunkX, chunkZ: snapshot.chunkZ, updatedAt });
+  }
+
+  await mapWithConcurrency([...groups.values()], MAP_TILE_WRITE_CONCURRENCY, (group) =>
+    broadcastLive(
+      env,
+      JSON.stringify({
+        type: "chunks_ready",
+        world: group.world,
+        dimension: group.dimension,
+        chunks: group.chunks,
+        updatedAt: group.updatedAt,
+        tileVersion: group.updatedAt,
+      }),
+    ),
+  );
 }
 
 function rejectedEmptyChunkSnapshots(snapshots) {

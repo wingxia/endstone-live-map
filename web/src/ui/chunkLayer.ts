@@ -10,6 +10,7 @@ import {
   type BlockStateMap,
   type BlockUpdatesMessage,
   type ChunkReadyMessage,
+  type ChunksReadyMessage,
   type ChunkSnapshot,
   type TextureAtlasEntry,
   type TextureManifest,
@@ -75,6 +76,7 @@ export interface ChunkLayerHandle extends GridLayer {
   setKnownBounds: (bounds: ChunkLayerBounds | null, tileVersion?: string | number) => void;
   setWorldDimension: (world: string, dimension: string) => void;
   refreshChunk: (message: ChunkReadyMessage) => void;
+  refreshChunks: (message: ChunksReadyMessage) => void;
   applyBlockUpdates: (message: BlockUpdatesMessage) => void;
   getBlockInfo: (x: number, z: number) => BlockInfo | null;
 }
@@ -144,6 +146,24 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       this.dataVersion += 1;
       this.imageTileVersion = message.tileVersion || message.updatedAt || this.dataVersion;
       this.refreshVisibleTiles({ chunkX: message.chunkX, chunkZ: message.chunkZ }, { cacheBust: message.updatedAt || this.dataVersion });
+    }
+
+    refreshChunks(message: ChunksReadyMessage) {
+      if (!sameWorldDimension(message.world, message.dimension, this.worldName, this.dimensionName)) {
+        return;
+      }
+      const chunks = message.chunks.filter((chunk) => typeof chunk.chunkX === "number" && typeof chunk.chunkZ === "number");
+      if (chunks.length < 1) {
+        return;
+      }
+      for (const chunk of chunks) {
+        const key = cacheKey(message.world, message.dimension, chunk.chunkX, chunk.chunkZ);
+        this.chunkCache.delete(key);
+        this.missingChunkCache.delete(key);
+      }
+      this.dataVersion += 1;
+      this.imageTileVersion = message.tileVersion || message.updatedAt || this.dataVersion;
+      this.refreshVisibleTilesForChunks(chunks, { cacheBust: message.updatedAt || this.dataVersion });
     }
 
     applyBlockUpdates(message: BlockUpdatesMessage) {
@@ -423,10 +443,14 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     }
 
     private refreshVisibleTiles(changedChunk: { chunkX: number; chunkZ: number }, options: Pick<TileDrawOptions, "cacheBust"> = {}) {
+      this.refreshVisibleTilesForChunks([changedChunk], options);
+    }
+
+    private refreshVisibleTilesForChunks(changedChunks: { chunkX: number; chunkZ: number }[], options: Pick<TileDrawOptions, "cacheBust"> = {}) {
       const internals = this as unknown as GridLayerInternals;
       let refreshed = false;
       for (const tile of Object.values(internals._tiles || {})) {
-        if (!tile.current || !tileIntersectsChunk(tile.coords, changedChunk)) {
+        if (!tile.current || !changedChunks.some((chunk) => tileIntersectsChunk(tile.coords, chunk))) {
           continue;
         }
         refreshed = true;

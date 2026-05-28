@@ -8,9 +8,12 @@
 #include "livemap/upload_queue.hpp"
 
 #include <endstone/endstone.hpp>
+#include <endstone/event/chunk/chunk_load_event.h>
+#include <endstone/event/chunk/chunk_unload_event.h>
 
 #include <atomic>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cmath>
@@ -70,11 +73,30 @@ struct ChunkUploadMeta {
     std::int64_t updated_at_ms{};
 };
 
-constexpr std::int64_t kChunkBatchRetryDelayMs = 30000;
+constexpr std::int64_t kChunkBatchRetryMinDelayMs = 30000;
+constexpr std::int64_t kChunkBatchRetryMaxDelayMs = 300000;
 
 std::string chunkName(const livemap::ChunkCoord &coord)
 {
     return coord.world + "/" + coord.dimension + "/" + std::to_string(coord.x) + "/" + std::to_string(coord.z);
+}
+
+std::string responseSnippet(const std::string &body)
+{
+    constexpr std::size_t kMaxSnippetLength = 256;
+    if (body.empty()) {
+        return "<empty>";
+    }
+    std::string snippet;
+    snippet.reserve(std::min(body.size(), kMaxSnippetLength));
+    for (const auto ch : body) {
+        if (snippet.size() >= kMaxSnippetLength) {
+            snippet += "...";
+            break;
+        }
+        snippet.push_back(std::isspace(static_cast<unsigned char>(ch)) ? ' ' : ch);
+    }
+    return snippet;
 }
 
 livemap::ChunkCoord chunkCoordForSnapshot(const livemap::ChunkSnapshot &snapshot)
@@ -506,12 +528,16 @@ public:
     void onBlockBreak(endstone::BlockBreakEvent &event);
     void onBlockFromTo(endstone::BlockFromToEvent &event);
     void onBlockExplode(endstone::BlockExplodeEvent &event);
+    void onChunkLoad(endstone::ChunkLoadEvent &event);
+    void onChunkUnload(endstone::ChunkUnloadEvent &event);
 
 private:
     LiveMapPlugin &plugin_;
 };
 
 class LiveMapPlugin : public endstone::Plugin {
+    friend class LiveMapListener;
+
 public:
     void onEnable() override
     {
@@ -543,6 +569,9 @@ public:
         registerEvent(&LiveMapListener::onBlockBreak, *listener_, endstone::EventPriority::Monitor, true);
         registerEvent(&LiveMapListener::onBlockFromTo, *listener_, endstone::EventPriority::Monitor, true);
         registerEvent(&LiveMapListener::onBlockExplode, *listener_, endstone::EventPriority::Monitor, true);
+        registerEvent(&LiveMapListener::onChunkLoad, *listener_, endstone::EventPriority::Monitor, true);
+        registerEvent(&LiveMapListener::onChunkUnload, *listener_, endstone::EventPriority::Monitor, true);
+        refreshLoadedChunks();
 
         const auto player_ticks = static_cast<std::uint64_t>(std::max(1, settings_.player_push_seconds) * 20);
         const auto seed_ticks = static_cast<std::uint64_t>(std::max(1, settings_.seed_pulse_seconds) * 20);
@@ -572,7 +601,8 @@ public:
             settings_.max_dirty_blocks_per_push, " maxDirtyChunks=", settings_.max_dirty_chunks_per_push,
             " maxUploadQueue=", settings_.max_upload_queue_size,
             " uploadLands=", settings_.upload_lands, " landPush=", settings_.land_push_seconds,
-            "s landConfig=", settings_.land_config_file, " dimensions=", settings_.dimensions.size(), ".");
+            "s landConfig=", settings_.land_config_file, " dimensions=", settings_.dimensions.size(),
+            " loadedChunks=", loadedChunkCount(), ".");
     }
 
     void onDisable() override
@@ -655,6 +685,7 @@ public:
         }
 
         sender.sendMessage("Live map queued base chunks: " + std::to_string(seedQueueSize()) +
+                           ", deferred base chunks: " + std::to_string(deferredSeedQueueSize()) +
                            ", dirty block columns: " + std::to_string(dirtyCount()));
         return true;
     }
@@ -707,12 +738,129 @@ private:
         return seed_queue_.size();
     }
 
+    [[nodiscard]] std::size_t deferredSeedQueueSize() const
+    {
+        std::scoped_lock lock(state_mutex_);
+        return deferred_seed_chunks_.size();
+    }
+
+    [[nodiscard]] std::size_t loadedChunkCount() const
+    {
+        std::scoped_lock lock(state_mutex_);
+        return loaded_chunks_.size();
+    }
+
+    [[nodiscard]] bool isChunkLoaded(const livemap::ChunkCoord &coord) const
+    {
+        std::scoped_lock lock(state_mutex_);
+        return loaded_chunks_.find(coord) != loaded_chunks_.end();
+    }
+
+    bool deferSeedChunk(const livemap::ChunkCoord &coord, bool force)
+    {
+        std::scoped_lock lock(state_mutex_);
+        auto found = deferred_seed_chunks_.find(coord);
+        if (found == deferred_seed_chunks_.end()) {
+            deferred_seed_chunks_.emplace(coord, force);
+            return true;
+        }
+        if (force && !found->second) {
+            found->second = true;
+            return true;
+        }
+        return false;
+    }
+
+    void markChunkLoaded(const livemap::ChunkCoord &coord)
+    {
+        bool queued = false;
+        bool force = false;
+        {
+            std::scoped_lock lock(state_mutex_);
+            loaded_chunks_.insert(coord);
+            auto deferred = deferred_seed_chunks_.find(coord);
+            if (deferred == deferred_seed_chunks_.end()) {
+                return;
+            }
+            force = deferred->second;
+            deferred_seed_chunks_.erase(deferred);
+            if (force) {
+                queued_seed_chunks_.erase(coord);
+            }
+            if (queued_seed_chunks_.insert(coord).second) {
+                seed_queue_.push_back({coord, nowMs(), force});
+                queued = true;
+            }
+        }
+        if (queued) {
+            background_log_.info("Queued deferred live map base chunk ", chunkName(coord),
+                                 " after chunk load; force=", force, ".");
+        }
+    }
+
+    void markChunkUnloaded(const livemap::ChunkCoord &coord)
+    {
+        std::scoped_lock lock(state_mutex_);
+        loaded_chunks_.erase(coord);
+    }
+
+    void refreshLoadedChunks()
+    {
+        std::unordered_set<livemap::ChunkCoord, livemap::ChunkCoordHash> loaded;
+        auto *level = getServer().getLevel();
+        if (level != nullptr) {
+            for (const auto &dimension_name : settings_.dimensions) {
+                auto *dimension = level->getDimension(dimension_name);
+                if (dimension == nullptr) {
+                    continue;
+                }
+                for (const auto &chunk : dimension->getLoadedChunks()) {
+                    if (chunk == nullptr) {
+                        continue;
+                    }
+                    loaded.insert({dimension->getLevel().getName(), dimension->getName(), chunk->getX(), chunk->getZ()});
+                }
+            }
+        }
+        std::scoped_lock lock(state_mutex_);
+        loaded_chunks_ = std::move(loaded);
+    }
+
+    void handleChunkLoad(const endstone::Chunk &chunk)
+    {
+        auto &dimension = chunk.getDimension();
+        if (!dimensionEnabled(dimension.getName())) {
+            return;
+        }
+        markChunkLoaded({dimension.getLevel().getName(), dimension.getName(), chunk.getX(), chunk.getZ()});
+    }
+
+    void handleChunkUnload(const endstone::Chunk &chunk)
+    {
+        auto &dimension = chunk.getDimension();
+        if (!dimensionEnabled(dimension.getName())) {
+            return;
+        }
+        markChunkUnloaded({dimension.getLevel().getName(), dimension.getName(), chunk.getX(), chunk.getZ()});
+    }
+
     std::size_t enqueueSeedChunk(const livemap::ChunkCoord &coord, bool force)
     {
         if (!settings_.upload_chunks || settings_.plugin_token.empty()) {
             return 0;
         }
         std::scoped_lock lock(state_mutex_);
+        auto deferred = deferred_seed_chunks_.find(coord);
+        if (deferred != deferred_seed_chunks_.end() && loaded_chunks_.find(coord) == loaded_chunks_.end()) {
+            if (force && !deferred->second) {
+                deferred->second = true;
+                return 1;
+            }
+            return 0;
+        }
+        if (deferred != deferred_seed_chunks_.end()) {
+            deferred_seed_chunks_.erase(deferred);
+        }
         if (!force && queued_seed_chunks_.find(coord) != queued_seed_chunks_.end()) {
             return 0;
         }
@@ -1139,10 +1287,21 @@ private:
         }
     }
 
-    void delayChunkBatchRetry(std::int64_t retry_after_ms)
+    std::int64_t delayChunkBatchRetry()
     {
         std::scoped_lock lock(state_mutex_);
+        const auto retry_after_ms = chunk_upload_retry_delay_ms_;
         chunk_upload_backoff_until_ms_ = std::max(chunk_upload_backoff_until_ms_, nowMs() + retry_after_ms);
+        chunk_upload_retry_delay_ms_ =
+            std::min(chunk_upload_retry_delay_ms_ * 2, kChunkBatchRetryMaxDelayMs);
+        return retry_after_ms;
+    }
+
+    void resetChunkBatchRetry()
+    {
+        std::scoped_lock lock(state_mutex_);
+        chunk_upload_retry_delay_ms_ = kChunkBatchRetryMinDelayMs;
+        chunk_upload_backoff_until_ms_ = 0;
     }
 
     bool flushPendingChunkUploads(bool force)
@@ -1182,7 +1341,7 @@ private:
             return false;
         }
 
-        const auto json = livemap::serializeChunkBatch(snapshots, true);
+        const auto json = livemap::serializeChunkBatch(snapshots, true, livemap::ChunkBatchStorage::Region);
         if (!enqueueUpload({UploadJob::Kind::ChunkBatch, "/api/plugin/chunks/batch", json, metas, snapshots,
                             snapshots.size(), {}})) {
             restorePendingChunkUploads(std::move(snapshots), metas);
@@ -1305,6 +1464,7 @@ private:
                 if (result.kind == UploadJob::Kind::ChunkBatch) {
                     confirmUploadedChunkBatch(result.chunks);
                     confirmUploadedChunkSnapshots(result.snapshots);
+                    resetChunkBatchRetry();
                     background_log_.info("Uploaded chunk batch ", result.chunks.size(), " chunk(s) HTTP ",
                                          result.transport.response_code, ".");
                     persistChunkBaselines();
@@ -1387,14 +1547,15 @@ private:
             }
 
             if (result.kind == UploadJob::Kind::ChunkBatch) {
-                getLogger().error("Failed to upload chunk batch {} chunk(s) HTTP {} curl {} error={}",
+                getLogger().error("Failed to upload chunk batch {} chunk(s) HTTP {} curl {} error={} body={}",
                                   result.chunks.size(), result.transport.response_code, result.transport.curl_code,
-                                  result.transport.error);
+                                  result.transport.error, responseSnippet(result.transport.body));
                 if (active_ && shouldBackoffChunkBatchRetry(result.transport)) {
                     restorePendingChunkUploads(std::move(result.snapshots), std::move(result.chunks));
-                    delayChunkBatchRetry(kChunkBatchRetryDelayMs);
+                    const auto retry_after_ms = delayChunkBatchRetry();
                     background_log_.warning("Delayed retry for failed live map chunk batch by ",
-                                            kChunkBatchRetryDelayMs / 1000, "s.");
+                                            retry_after_ms / 1000, "s; response=", responseSnippet(result.transport.body),
+                                            ".");
                     continue;
                 }
             }
@@ -1440,6 +1601,13 @@ private:
             const auto &coord = queued.coord;
             auto *dimension = level->getDimension(coord.dimension);
             if (dimension == nullptr) {
+                continue;
+            }
+            if (!isChunkLoaded(coord)) {
+                if (deferSeedChunk(coord, queued.force)) {
+                    background_log_.info("Deferred live map base chunk ", chunkName(coord),
+                                         " until the chunk is loaded; force=", queued.force, ".");
+                }
                 continue;
             }
             auto snapshot = sampleChunk(*dimension, coord);
@@ -1610,6 +1778,8 @@ private:
     livemap::DirtyBlockTracker dirty_blocks_;
     std::deque<QueuedSeed> seed_queue_;
     std::unordered_set<livemap::ChunkCoord, livemap::ChunkCoordHash> queued_seed_chunks_;
+    std::unordered_set<livemap::ChunkCoord, livemap::ChunkCoordHash> loaded_chunks_;
+    std::unordered_map<livemap::ChunkCoord, bool, livemap::ChunkCoordHash> deferred_seed_chunks_;
     std::unordered_map<std::string, std::int64_t> player_next_seed_ms_;
     std::unordered_map<std::string, std::int64_t> player_first_seen_ms_;
     std::unordered_map<std::string, std::string> player_last_seed_center_;
@@ -1625,6 +1795,7 @@ private:
     BackgroundLog background_log_;
     std::int64_t last_chunk_upload_flush_ms_ = 0;
     std::int64_t chunk_upload_backoff_until_ms_ = 0;
+    std::int64_t chunk_upload_retry_delay_ms_ = kChunkBatchRetryMinDelayMs;
     std::size_t skipped_cached_chunks_ = 0;
     std::int64_t last_chunk_cache_log_ms_ = 0;
 };
@@ -1656,6 +1827,16 @@ void LiveMapListener::onBlockExplode(endstone::BlockExplodeEvent &event)
             plugin_.markBlock(*block);
         }
     }
+}
+
+void LiveMapListener::onChunkLoad(endstone::ChunkLoadEvent &event)
+{
+    plugin_.handleChunkLoad(event.getChunk());
+}
+
+void LiveMapListener::onChunkUnload(endstone::ChunkUnloadEvent &event)
+{
+    plugin_.handleChunkUnload(event.getChunk());
 }
 
 }  // namespace

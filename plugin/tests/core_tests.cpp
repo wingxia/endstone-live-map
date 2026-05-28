@@ -344,6 +344,9 @@ void testProtocol()
     assert(chunk_batch_json.find("\"broadcast\":true") != std::string::npos);
     assert(chunk_batch_json.find("\"storage\":\"chunk\"") != std::string::npos);
     assert(chunk_batch_json.find("\"chunks\":[{\"world\":\"world\"") != std::string::npos);
+    const auto region_batch_json = livemap::serializeChunkBatch({snapshot}, true, livemap::ChunkBatchStorage::Region);
+    assert(region_batch_json.find("\"broadcast\":true") != std::string::npos);
+    assert(region_batch_json.find("\"storage\":\"region\"") != std::string::npos);
 
     livemap::BlockUpdateBatch batch;
     batch.world = "world";

@@ -1538,6 +1538,40 @@ describe("worker routes", () => {
     expect(body.missing).toHaveLength(2);
   });
 
+  it("broadcasts one chunks_ready message for region chunk batch uploads", async () => {
+    const env = createEnv();
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/batch", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          storage: "region",
+          broadcast: true,
+          chunks: [createChunk({ chunkX: 0, updatedAt: 10 }), createChunk({ chunkX: 1, updatedAt: 20 }), createEmptyChunk({ chunkX: 2, updatedAt: 30 })],
+        }),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ storage: "region", chunks: 2, skippedEmpty: 1, updates: 0 });
+    expect(env.MAP_DATA.objects.has("chunk-regions/v1/world/Overworld/0/0.json")).toBe(true);
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(false);
+    expect(env.live.messages).toHaveLength(1);
+    expect(JSON.parse(env.live.messages[0])).toMatchObject({
+      type: "chunks_ready",
+      world: "world",
+      dimension: "Overworld",
+      updatedAt: 20,
+      tileVersion: 20,
+      chunks: [
+        { chunkX: 0, chunkZ: 0, updatedAt: 10 },
+        { chunkX: 1, chunkZ: 0, updatedAt: 20 },
+      ],
+    });
+  });
+
   it("backfills low zoom image tiles in batches and supports dry runs", async () => {
     const env = createEnv();
     await env.MAP_DATA.put("chunk-regions/v1/world/Overworld/0/0.json", JSON.stringify({ version: 1, world: "world", dimension: "Overworld", chunks: [createChunk()] }), {

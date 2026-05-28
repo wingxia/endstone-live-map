@@ -8,6 +8,11 @@
 
 namespace livemap {
 
+enum class ChunkBatchStorage {
+    Chunk,
+    Region,
+};
+
 struct PlayerState {
     std::string id;
     std::string name;
@@ -24,7 +29,8 @@ struct PlayerState {
 std::string jsonEscape(std::string_view value);
 std::string serializePlayerSnapshot(const std::vector<PlayerState> &players);
 std::string serializeChunkSnapshot(const ChunkSnapshot &snapshot);
-std::string serializeChunkBatch(const std::vector<ChunkSnapshot> &snapshots, bool broadcast);
+std::string serializeChunkBatch(const std::vector<ChunkSnapshot> &snapshots, bool broadcast,
+                                ChunkBatchStorage storage = ChunkBatchStorage::Chunk);
 std::string serializeBlockUpdateBatch(const BlockUpdateBatch &batch);
 std::string serializeBlockUpdateBatches(const std::vector<BlockUpdateBatch> &batches);
 std::string serializeChunkReady(const ChunkCoord &coord);

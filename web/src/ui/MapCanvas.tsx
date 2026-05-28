@@ -1,7 +1,7 @@
 import { Clipboard, ClipboardCheck } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type LandClaim, type PlayerState, type WorldMeta } from "../api";
+import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type ChunksReadyMessage, type LandClaim, type PlayerState, type WorldMeta } from "../api";
 import { blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "./coords";
 import { createChunkGridLayer, INITIAL_MAP_ZOOM, MIN_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
@@ -26,11 +26,12 @@ interface MapCanvasProps {
   lands: LandClaim[];
   worldMeta: WorldMeta | null;
   chunkReady: ChunkReadyMessage | null;
+  chunksReady: ChunksReadyMessage | null;
   blockUpdates: BlockUpdatesMessage | null;
   focusTarget: { x: number; z: number; nonce: number } | null;
 }
 
-export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkReady, blockUpdates, focusTarget }: MapCanvasProps) {
+export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkReady, chunksReady, blockUpdates, focusTarget }: MapCanvasProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const stateRef = useRef<{
     map: import("leaflet").Map;
@@ -149,6 +150,12 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
       stateRef.current?.chunkLayer.refreshChunk(chunkReady);
     }
   }, [chunkReady]);
+
+  useEffect(() => {
+    if (chunksReady) {
+      stateRef.current?.chunkLayer.refreshChunks(chunksReady);
+    }
+  }, [chunksReady]);
 
   useEffect(() => {
     if (blockUpdates) {

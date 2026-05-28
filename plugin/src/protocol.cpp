@@ -159,10 +159,11 @@ std::string serializeChunkSnapshot(const ChunkSnapshot &snapshot)
     return out.str();
 }
 
-std::string serializeChunkBatch(const std::vector<ChunkSnapshot> &snapshots, bool broadcast)
+std::string serializeChunkBatch(const std::vector<ChunkSnapshot> &snapshots, bool broadcast, ChunkBatchStorage storage)
 {
     std::ostringstream out;
-    out << "{\"broadcast\":" << (broadcast ? "true" : "false") << ",\"storage\":\"chunk\",\"chunks\":[";
+    out << "{\"broadcast\":" << (broadcast ? "true" : "false") << ",\"storage\":\""
+        << (storage == ChunkBatchStorage::Region ? "region" : "chunk") << "\",\"chunks\":[";
     for (std::size_t i = 0; i < snapshots.size(); ++i) {
         if (i != 0) {
             out << ',';

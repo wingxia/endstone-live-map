@@ -74,6 +74,7 @@ export function App() {
           lands={publicLands}
           worldMeta={selectedWorldMeta}
           chunkReady={live.chunkReady}
+          chunksReady={live.chunksReady}
           blockUpdates={live.blockUpdates}
           focusTarget={focusTarget}
         />

@@ -1303,6 +1303,81 @@ test("does not request chunk data before a world import exists when only live pl
   expect(imageTileRequests).toBeGreaterThan(0);
 });
 
+test("refreshes visible chunk tiles from chunks_ready live batches", async ({ page }) => {
+  const chunkRequests: string[] = [];
+
+  await page.addInitScript(() => {
+    class MockWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = MockWebSocket.OPEN;
+      url: string;
+
+      constructor(url: string) {
+        super();
+        this.url = url;
+        setTimeout(() => {
+          this.dispatchEvent(new Event("open"));
+          (window as unknown as { __sendChunksReady?: () => void }).__sendChunksReady = () => {
+            this.dispatchEvent(
+              new MessageEvent("message", {
+                data: JSON.stringify({
+                  type: "chunks_ready",
+                  world: "Bedrock level",
+                  dimension: "Overworld",
+                  chunks: [{ chunkX: 0, chunkZ: 0, updatedAt: 55 }],
+                  updatedAt: 55,
+                  tileVersion: 55,
+                }),
+              }),
+            );
+          };
+        }, 50);
+      }
+
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.dispatchEvent(new Event("close"));
+      }
+
+      send() {}
+    }
+
+    Object.assign(MockWebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+    window.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+  });
+  await mockBasicMap(page, {
+    chunkRoute: async (route) => {
+      chunkRequests.push(route.request().url());
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          chunks: [
+            {
+              world: "Bedrock level",
+              dimension: "Overworld",
+              chunkX: 0,
+              chunkZ: 0,
+              palette: ["minecraft:grass_block"],
+              blocks: Array.from({ length: 256 }, () => 0),
+              heights: Array.from({ length: 256 }, () => 64),
+              updatedAt: 55,
+            },
+          ],
+          missing: [],
+        }),
+      });
+    },
+  });
+
+  await page.goto("/");
+  await expect.poll(() => chunkRequests.length).toBeGreaterThan(0);
+  await page.evaluate(() => (window as unknown as { __sendChunksReady?: () => void }).__sendChunksReady?.());
+  await expect.poll(() => chunkRequests.some((url) => new URL(url).searchParams.get("_") === "55")).toBe(true);
+});
+
 test("does not reset user zoom on live player refresh", async ({ page }) => {
   await page.route("**/api/live", async (route) => route.abort());
   await page.route("**/api/lands?**", async (route) => {

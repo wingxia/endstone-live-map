@@ -141,6 +141,21 @@ export interface ChunkReadyMessage {
   tileVersion?: number;
 }
 
+export interface ReadyChunk {
+  chunkX: number;
+  chunkZ: number;
+  updatedAt?: number;
+}
+
+export interface ChunksReadyMessage {
+  type: "chunks_ready";
+  world: string;
+  dimension: string;
+  chunks: ReadyChunk[];
+  updatedAt: number;
+  tileVersion?: number;
+}
+
 export interface BlockUpdatesMessage {
   type: "block_updates";
   world: string;
@@ -160,14 +175,16 @@ export interface LandsUpdatedMessage {
 }
 
 export interface LiveMessage {
-  type: "player_snapshot" | "chunk_ready" | "block_updates" | "lands_updated" | "heartbeat";
+  type: "player_snapshot" | "chunk_ready" | "chunks_ready" | "block_updates" | "lands_updated" | "heartbeat";
   players?: PlayerState[];
   world?: string;
   dimension?: string;
   chunkX?: number;
   chunkZ?: number;
+  chunks?: ReadyChunk[];
   updates?: BlockUpdate[];
   updatedAt?: number;
+  tileVersion?: number;
 }
 
 export function chunkUrl(query: ChunkQuery, options: ChunkFetchOptions = {}): string {
