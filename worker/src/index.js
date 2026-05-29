@@ -616,7 +616,7 @@ async function handleChunksGet(url, env) {
 
   const chunks = [];
   const missing = [];
-  const chunksByCoord = await readChunksForRange(bucket, query);
+  const chunksByCoord = summaryOnly ? await readChunkSummariesForRange(bucket, query) : await readChunksForRange(bucket, query);
 
   for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
     for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
@@ -625,7 +625,7 @@ async function handleChunksGet(url, env) {
       if (!chunk) {
         missing.push({ chunkX, chunkZ });
       } else {
-        chunks.push(summaryOnly ? chunkSummary(chunk) : chunk);
+        chunks.push(chunk);
       }
     }
   }
@@ -1597,6 +1597,68 @@ async function readChunkRegions(bucket, query, chunksByCoord) {
           continue;
         }
         chunksByCoord.set(coordKey(normalized.chunkX, normalized.chunkZ), normalized);
+      }
+    }),
+  );
+}
+
+async function readChunkSummariesForRange(bucket, query) {
+  const chunkCount = chunkCountForRange(query);
+  if (chunkCount < CHUNK_DIRECT_READ_LIMIT) {
+    const chunksByCoord = await readChunksForRange(bucket, query);
+    return new Map([...chunksByCoord.entries()].map(([key, chunk]) => [key, chunkSummary(chunk)]));
+  }
+
+  const chunksByCoord = new Map();
+  await readChunkRegionSummaries(bucket, query, chunksByCoord);
+
+  const directKeys = await listChunkKeysForRange(bucket, query);
+  for (const key of directKeys) {
+    const parsed = parseChunkKey(key);
+    if (!parsed || chunksByCoord.has(coordKey(parsed.chunkX, parsed.chunkZ))) {
+      continue;
+    }
+    chunksByCoord.set(coordKey(parsed.chunkX, parsed.chunkZ), {
+      world: parsed.world,
+      dimension: parsed.dimension,
+      chunkX: parsed.chunkX,
+      chunkZ: parsed.chunkZ,
+      hasNonAir: true,
+    });
+  }
+
+  return chunksByCoord;
+}
+
+async function readChunkRegionSummaries(bucket, query, chunksByCoord) {
+  const minRegionX = floorDiv(query.minChunkX, REGION_SIZE_CHUNKS);
+  const maxRegionX = floorDiv(query.maxChunkX, REGION_SIZE_CHUNKS);
+  const minRegionZ = floorDiv(query.minChunkZ, REGION_SIZE_CHUNKS);
+  const maxRegionZ = floorDiv(query.maxChunkZ, REGION_SIZE_CHUNKS);
+  const keys = [];
+  for (const regionX of range(minRegionX, maxRegionX)) {
+    for (const regionZ of range(minRegionZ, maxRegionZ)) {
+      keys.push(chunkRegionKey(query.world, query.dimension, regionX, regionZ));
+    }
+  }
+
+  await Promise.all(
+    keys.map(async (key) => {
+      const region = await readR2Json(await bucket.get(key));
+      for (const chunk of Array.isArray(region?.chunks) ? region.chunks : []) {
+        const chunkX = Number(chunk?.chunkX);
+        const chunkZ = Number(chunk?.chunkZ);
+        if (!Number.isFinite(chunkX) || !Number.isFinite(chunkZ) || chunkX < query.minChunkX || chunkX > query.maxChunkX || chunkZ < query.minChunkZ || chunkZ > query.maxChunkZ) {
+          continue;
+        }
+        chunksByCoord.set(coordKey(chunkX, chunkZ), {
+          world: cleanSegment(chunk.world || query.world),
+          dimension: cleanSegment(chunk.dimension || query.dimension),
+          chunkX,
+          chunkZ,
+          updatedAt: Number.isFinite(Number(chunk.updatedAt)) ? Number(chunk.updatedAt) : undefined,
+          hasNonAir: true,
+        });
       }
     }),
   );

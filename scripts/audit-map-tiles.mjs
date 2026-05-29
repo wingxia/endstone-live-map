@@ -41,6 +41,8 @@ function parseArgs(argv) {
     workerUrl: process.env.WORKER_URL || "https://map.buhe.li",
     token: process.env.PLUGIN_TOKEN || "",
     concurrency: 6,
+    chunkConcurrency: 0,
+    tileConcurrency: 0,
     maxIterations: 3,
     repairLimit: Number.POSITIVE_INFINITY,
     requestTimeoutMs: 45000,
@@ -71,6 +73,10 @@ function parseArgs(argv) {
       options.dimension = requiredValue(values, ++index, flag);
     } else if (flag === "--concurrency") {
       options.concurrency = Math.max(1, numberValue(values, ++index, flag));
+    } else if (flag === "--chunk-concurrency") {
+      options.chunkConcurrency = Math.max(1, numberValue(values, ++index, flag));
+    } else if (flag === "--tile-concurrency") {
+      options.tileConcurrency = Math.max(1, numberValue(values, ++index, flag));
     } else if (flag === "--max-iterations") {
       options.maxIterations = Math.max(1, numberValue(values, ++index, flag));
     } else if (flag === "--repair-limit") {
@@ -89,6 +95,8 @@ function parseArgs(argv) {
   }
 
   options.workerUrl = options.workerUrl.replace(/\/+$/, "");
+  options.chunkConcurrency = options.chunkConcurrency || options.concurrency;
+  options.tileConcurrency = options.tileConcurrency || options.concurrency;
   return options;
 }
 
@@ -160,7 +168,7 @@ async function auditWorld(options, meta) {
   let completed = 0;
 
   console.error(`Scanning ${meta.world}/${meta.dimension}: ${ranges.length} chunk ranges`);
-  await mapWithConcurrency(ranges, options.concurrency, async (range) => {
+  await mapWithConcurrency(ranges, options.chunkConcurrency, async (range) => {
     const chunks = await fetchChunksForAuditRange(options, meta, range, stats);
     stats.chunksRead += chunks.length;
     for (const chunk of chunks) {
@@ -186,7 +194,7 @@ async function auditWorld(options, meta) {
   const tiles = [...tileRefs.values()].sort((a, b) => a.zoom - b.zoom || a.tileZ - b.tileZ || a.tileX - b.tileX);
   stats.uniqueTiles = tiles.length;
   console.error(`Checking ${meta.world}/${meta.dimension}: ${tiles.length} image tiles`);
-  const checkedTiles = await mapWithConcurrency(tiles, options.concurrency, (tile) => inspectMapTile(options, tile));
+  const checkedTiles = await mapWithConcurrency(tiles, options.tileConcurrency, (tile) => inspectMapTile(options, tile));
   const issues = checkedTiles.filter((tile) => tile.issue);
   return { ...stats, issues };
 }
