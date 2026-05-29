@@ -608,6 +608,7 @@ async function handleChunksGet(url, env) {
   }
 
   const query = normalizeChunkQuery(url.searchParams);
+  const summaryOnly = url.searchParams.get("summary") === "1" || url.searchParams.get("summary") === "true";
   const chunkCount = (query.maxChunkX - query.minChunkX + 1) * (query.maxChunkZ - query.minChunkZ + 1);
   if (chunkCount > MAX_CHUNKS_PER_REQUEST) {
     return json({ error: "too_many_chunks", max: MAX_CHUNKS_PER_REQUEST }, 400);
@@ -624,7 +625,7 @@ async function handleChunksGet(url, env) {
       if (!chunk) {
         missing.push({ chunkX, chunkZ });
       } else {
-        chunks.push(chunk);
+        chunks.push(summaryOnly ? chunkSummary(chunk) : chunk);
       }
     }
   }
@@ -632,6 +633,17 @@ async function handleChunksGet(url, env) {
   chunks.sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
   missing.sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
   return json({ chunks, missing }, 200, { "Cache-Control": "public, max-age=15" });
+}
+
+function chunkSummary(chunk) {
+  return {
+    world: chunk.world,
+    dimension: chunk.dimension,
+    chunkX: chunk.chunkX,
+    chunkZ: chunk.chunkZ,
+    updatedAt: chunk.updatedAt,
+    hasNonAir: !isEmptyChunkSnapshot(chunk),
+  };
 }
 
 async function handleMapTileGet(url, env) {

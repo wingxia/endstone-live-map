@@ -9,6 +9,16 @@ const MAP_TILE_MAX_ZOOM = 3;
 const MAP_TILE_BASE_ZOOM = 4;
 const MIN_COLUMN_HEIGHT = -64;
 
+class HttpError extends Error {
+  constructor(status, url, body) {
+    super(`HTTP ${status} for ${url}: ${JSON.stringify(body)}`);
+    this.name = "HttpError";
+    this.status = status;
+    this.url = url;
+    this.body = body;
+  }
+}
+
 const args = parseArgs(process.argv.slice(2));
 
 try {
@@ -141,6 +151,8 @@ async function auditWorld(options, meta) {
     bounds: meta.bounds,
     chunkCount: meta.chunkCount,
     scannedRanges: ranges.length,
+    rangeRequests: 0,
+    splitRanges: 0,
     chunksRead: 0,
     nonAirChunks: 0,
     uniqueTiles: 0,
@@ -149,8 +161,7 @@ async function auditWorld(options, meta) {
 
   console.error(`Scanning ${meta.world}/${meta.dimension}: ${ranges.length} chunk ranges`);
   await mapWithConcurrency(ranges, options.concurrency, async (range) => {
-    const response = await fetchJson(chunkUrl(options.workerUrl, meta.world, meta.dimension, range), {}, options);
-    const chunks = Array.isArray(response.chunks) ? response.chunks : [];
+    const chunks = await fetchChunksForAuditRange(options, meta, range, stats);
     stats.chunksRead += chunks.length;
     for (const chunk of chunks) {
       if (!chunkHasNonAirPixels(chunk)) {
@@ -178,6 +189,25 @@ async function auditWorld(options, meta) {
   const checkedTiles = await mapWithConcurrency(tiles, options.concurrency, (tile) => inspectMapTile(options, tile));
   const issues = checkedTiles.filter((tile) => tile.issue);
   return { ...stats, issues };
+}
+
+async function fetchChunksForAuditRange(options, meta, range, stats) {
+  try {
+    stats.rangeRequests += 1;
+    const response = await fetchJson(chunkUrl(options.workerUrl, meta.world, meta.dimension, range), {}, options);
+    return Array.isArray(response.chunks) ? response.chunks : [];
+  } catch (error) {
+    if (!shouldSplitChunkRange(error, range)) {
+      throw error;
+    }
+    stats.splitRanges += 1;
+    console.error(`Splitting ${meta.world}/${meta.dimension} ${formatChunkRange(range)} after ${error instanceof Error ? error.message : String(error)}`);
+    const chunks = [];
+    for (const part of splitChunkRange(range)) {
+      chunks.push(...(await fetchChunksForAuditRange(options, meta, part, stats)));
+    }
+    return chunks;
+  }
 }
 
 function withoutIssues(worldSummary) {
@@ -317,8 +347,51 @@ function chunkUrl(workerUrl, world, dimension, range) {
     maxChunkX: String(range.maxChunkX),
     minChunkZ: String(range.minChunkZ),
     maxChunkZ: String(range.maxChunkZ),
+    summary: "1",
   });
   return `${workerUrl}/api/chunks?${params.toString()}`;
+}
+
+function formatChunkRange(range) {
+  return `${range.minChunkX}..${range.maxChunkX},${range.minChunkZ}..${range.maxChunkZ}`;
+}
+
+function shouldSplitChunkRange(error, range) {
+  if (chunkRangeArea(range) <= 1) {
+    return false;
+  }
+  if (error instanceof HttpError) {
+    return error.status === 429 || error.status >= 500;
+  }
+  return isRetriableError(error);
+}
+
+function splitChunkRange(range) {
+  const midX = Math.floor((range.minChunkX + range.maxChunkX) / 2);
+  const midZ = Math.floor((range.minChunkZ + range.maxChunkZ) / 2);
+  const xParts = range.minChunkX < range.maxChunkX
+    ? [
+        [range.minChunkX, midX],
+        [midX + 1, range.maxChunkX],
+      ]
+    : [[range.minChunkX, range.maxChunkX]];
+  const zParts = range.minChunkZ < range.maxChunkZ
+    ? [
+        [range.minChunkZ, midZ],
+        [midZ + 1, range.maxChunkZ],
+      ]
+    : [[range.minChunkZ, range.maxChunkZ]];
+  const parts = [];
+  for (const [minChunkX, maxChunkX] of xParts) {
+    for (const [minChunkZ, maxChunkZ] of zParts) {
+      parts.push({ minChunkX, maxChunkX, minChunkZ, maxChunkZ });
+    }
+  }
+  return parts;
+}
+
+function chunkRangeArea(range) {
+  return (range.maxChunkX - range.minChunkX + 1) * (range.maxChunkZ - range.minChunkZ + 1);
 }
 
 function mapTileUrl(workerUrl, tile) {
@@ -365,6 +438,9 @@ function mapTileRefKey(tile) {
 }
 
 function chunkHasNonAirPixels(chunk) {
+  if (typeof chunk.hasNonAir === "boolean") {
+    return chunk.hasNonAir;
+  }
   for (let index = 0; index < 256; index += 1) {
     const block = chunk.palette?.[chunk.blocks?.[index]] || "minecraft:air";
     if (!isAirBlock(block)) {
@@ -388,7 +464,7 @@ async function fetchJson(url, fetchOptions = {}, options) {
   const response = await fetchWithRetry(url, fetchOptions, options);
   const body = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status} for ${url}: ${JSON.stringify(body)}`);
+    throw new HttpError(response.status, url, body);
   }
   return body;
 }

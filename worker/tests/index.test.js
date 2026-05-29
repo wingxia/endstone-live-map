@@ -1149,6 +1149,30 @@ describe("worker routes", () => {
     expect(env.MAP_DATA.getCalls).toContain("chunk-regions/v1/world/Overworld/0/0.json");
   });
 
+  it("returns compact chunk summaries when requested", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ chunkX: 0, chunkZ: 0 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/1/0.json", JSON.stringify(createEmptyChunk({ chunkX: 1, chunkZ: 0 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const chunks = await worker.fetch(
+      new Request("https://map.buhe.li/api/chunks?world=world&dimension=Overworld&minChunkX=0&maxChunkX=1&minChunkZ=0&maxChunkZ=0&summary=1"),
+      env,
+      {},
+    );
+
+    const body = await chunks.json();
+    expect(body.chunks).toEqual([
+      expect.objectContaining({ chunkX: 0, chunkZ: 0, hasNonAir: true }),
+      expect.objectContaining({ chunkX: 1, chunkZ: 0, hasNonAir: false }),
+    ]);
+    expect(body.chunks[0]).not.toHaveProperty("blocks");
+    expect(body.chunks[0]).not.toHaveProperty("palette");
+  });
+
   it("broadcasts block updates when viewers are connected", async () => {
     const env = createEnv();
     env.live.sessions = 1;
