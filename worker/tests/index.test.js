@@ -852,7 +852,7 @@ describe("worker routes", () => {
     expect(pngPixel(png, 4, 4)[0]).toBeLessThan(30);
   });
 
-  it("deletes low zoom image tiles when texture colors are unavailable", async () => {
+  it("renders low zoom image tiles from fallback colors when texture colors are unavailable", async () => {
     const env = createEnv({ textures: false });
     const key = "map-tiles/v1/world/Overworld/z3/0/0.png";
     await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk()), {
@@ -872,14 +872,12 @@ describe("worker routes", () => {
       {},
     );
 
-    expect(await response.json()).toMatchObject({
-      ok: true,
-      tiles: [expect.objectContaining({ deleted: true, missingColorReason: "texture_manifest_missing", missingColors: ["minecraft:grass_block"] })],
-    });
-    expect(env.MAP_DATA.objects.has(key)).toBe(false);
+    expect(await response.json()).toMatchObject({ ok: true, tiles: [expect.objectContaining({ deleted: false })] });
+    const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
+    expect(pngPixel(png, 4, 4)[3]).toBe(255);
   });
 
-  it("deletes low zoom image tiles when a non-air block is missing from the atlas", async () => {
+  it("renders low zoom image tiles with default fallback when a non-air block is missing from the atlas", async () => {
     const env = createEnv({ textureColors: { "minecraft:grass_block": [95, 159, 63] } });
     const key = "map-tiles/v1/world/Overworld/z3/0/0.png";
     const blocks = Array.from({ length: 256 }, () => 0);
@@ -903,11 +901,12 @@ describe("worker routes", () => {
       {},
     );
 
-    expect(await response.json()).toMatchObject({
-      ok: true,
-      tiles: [expect.objectContaining({ deleted: true, missingColorReason: "texture_color_missing", missingColors: ["minecraft:not_in_atlas"] })],
-    });
-    expect(env.MAP_DATA.objects.has(key)).toBe(false);
+    expect(await response.json()).toMatchObject({ ok: true, tiles: [expect.objectContaining({ deleted: false })] });
+    const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
+    const fallback = pngPixel(png, 4, 4);
+    expect(fallback[3]).toBe(255);
+    expect(Math.abs(fallback[0] - fallback[1])).toBeLessThan(20);
+    expect(Math.abs(fallback[1] - fallback[2])).toBeLessThan(20);
   });
 
   it("does not delete newer low zoom tiles during stale rebuilds with missing colors", async () => {
@@ -1536,6 +1535,31 @@ describe("worker routes", () => {
     const body = await chunks.json();
     expect(body.chunks).toHaveLength(2);
     expect(body.missing).toHaveLength(2);
+  });
+
+  it("generates low zoom image tiles for negative-coordinate region chunk batches", async () => {
+    const env = createEnv();
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/batch", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          storage: "region",
+          chunks: [createChunk({ chunkX: -1, chunkZ: -1 })],
+        }),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ storage: "region", chunks: 1 });
+    for (const zoom of [-1, 0, 1, 2, 3]) {
+      const key = mapTileKey("world", "Overworld", zoom, -1, -1);
+      expect(env.MAP_DATA.objects.has(key)).toBe(true);
+      const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
+      expect(pngPixel(png, 252, 252)[3]).toBe(255);
+    }
   });
 
   it("broadcasts one chunks_ready message for region chunk batch uploads", async () => {

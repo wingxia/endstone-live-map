@@ -2035,19 +2035,18 @@ function blockColorKeys(blockId) {
 }
 
 function textureColorForBlock(textureColors, blockId, blockState) {
-  if (!textureColors.ok) {
-    return null;
-  }
-  if (usesMapTint(blockId)) {
-    const tint = fallbackColorForMissingAtlasEntry(blockId, blockState);
-    if (tint) {
-      return tint;
+  if (textureColors.ok) {
+    if (usesMapTint(blockId)) {
+      const tint = fallbackColorForMissingAtlasEntry(blockId, blockState);
+      if (tint) {
+        return tint;
+      }
     }
-  }
-  for (const candidate of textureColorCandidates(blockId, blockState)) {
-    const color = textureColors.colors.get(candidate);
-    if (color) {
-      return color;
+    for (const candidate of textureColorCandidates(blockId, blockState)) {
+      const color = textureColors.colors.get(candidate);
+      if (color) {
+        return color;
+      }
     }
   }
   return fallbackColorForMissingAtlasEntry(blockId, blockState);
@@ -2055,7 +2054,7 @@ function textureColorForBlock(textureColors, blockId, blockState) {
 
 function fallbackColorForMissingAtlasEntry(blockId, blockState) {
   const fallback = fallbackTextureColor(blockId, blockState);
-  if (!fallback || fallback === "#737f86") {
+  if (!fallback) {
     return null;
   }
   return hexToRgba(fallback);
