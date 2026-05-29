@@ -1607,7 +1607,7 @@ async function readChunksForRange(bucket, query, options = {}) {
     }
   }
 
-  const readKeys = missingKeys.length <= CHUNK_DIRECT_READ_LIMIT ? missingKeys : await listChunkKeysForRange(bucket, query);
+  const readKeys = chunkCount < CHUNK_DIRECT_READ_LIMIT ? missingKeys : await listChunkKeysForRange(bucket, query);
   await mapWithConcurrency(readKeys, options.readConcurrency || BATCH_WRITE_CONCURRENCY, async (key) => {
     const chunk = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(key)));
     if (chunk) {

@@ -1117,10 +1117,12 @@ describe("worker routes", () => {
     const body = await chunks.json();
     expect(body.chunks).toHaveLength(3);
     expect(body.missing).toHaveLength(253);
-    expect(env.MAP_DATA.listCalls.filter((prefix) => prefix.startsWith("chunks/v1/world/Overworld/"))).toHaveLength(0);
+    expect(env.MAP_DATA.listCalls.filter((prefix) => prefix.startsWith("chunks/v1/world/Overworld/"))).toHaveLength(16);
     expect(env.MAP_DATA.getCalls[0]).toBe("chunk-regions/v1/world/Overworld/0/0.json");
-    expect(env.MAP_DATA.getCalls).toContain("chunks/v1/world/Overworld/0/0.json");
-    expect(env.MAP_DATA.getCalls).toContain("chunks/v1/world/Overworld/1/0.json");
+    expect(env.MAP_DATA.getCalls.filter((key) => key.startsWith("chunks/v1/world/Overworld/")).sort()).toEqual([
+      "chunks/v1/world/Overworld/0/0.json",
+      "chunks/v1/world/Overworld/1/0.json",
+    ]);
   });
 
   it("reads direct chunk keys before region fallback for small ranges", async () => {
