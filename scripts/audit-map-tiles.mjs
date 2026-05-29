@@ -34,6 +34,7 @@ function parseArgs(argv) {
     maxIterations: 3,
     repairLimit: Number.POSITIVE_INFINITY,
     requestTimeoutMs: 45000,
+    requestRetries: 3,
     world: "",
     dimension: "",
     failOnMismatch: false,
@@ -66,6 +67,8 @@ function parseArgs(argv) {
       options.repairLimit = Math.max(1, numberValue(values, ++index, flag));
     } else if (flag === "--request-timeout-ms") {
       options.requestTimeoutMs = Math.max(1000, numberValue(values, ++index, flag));
+    } else if (flag === "--request-retries") {
+      options.requestRetries = Math.max(0, numberValue(values, ++index, flag));
     } else if (flag === "--fail-on-mismatch") {
       options.failOnMismatch = true;
     } else if (flag === "--sample-only") {
@@ -97,7 +100,7 @@ function numberValue(values, index, flag) {
 
 async function auditMapTiles(options) {
   const startedAt = new Date().toISOString();
-  const worlds = await fetchJson(`${options.workerUrl}/api/worlds`, { signal: AbortSignal.timeout(options.requestTimeoutMs) });
+  const worlds = await fetchJson(`${options.workerUrl}/api/worlds`, {}, options);
   const metas = (worlds.worlds || []).filter((meta) => {
     if (options.world && meta.world !== options.world) {
       return false;
@@ -146,7 +149,7 @@ async function auditWorld(options, meta) {
 
   console.error(`Scanning ${meta.world}/${meta.dimension}: ${ranges.length} chunk ranges`);
   await mapWithConcurrency(ranges, options.concurrency, async (range) => {
-    const response = await fetchJson(chunkUrl(options.workerUrl, meta.world, meta.dimension, range), { signal: AbortSignal.timeout(options.requestTimeoutMs) });
+    const response = await fetchJson(chunkUrl(options.workerUrl, meta.world, meta.dimension, range), {}, options);
     const chunks = Array.isArray(response.chunks) ? response.chunks : [];
     stats.chunksRead += chunks.length;
     for (const chunk of chunks) {
@@ -210,9 +213,8 @@ async function repairUntilClean(options) {
 
 async function repairMapTile(options, issue) {
   const range = chunkRangeForMapTile(issue);
-  const response = await fetch(`${options.workerUrl}/api/plugin/map-tiles/backfill`, {
+  const response = await fetchWithRetry(`${options.workerUrl}/api/plugin/map-tiles/backfill`, {
     method: "POST",
-    signal: AbortSignal.timeout(options.requestTimeoutMs),
     headers: {
       Authorization: `Bearer ${options.token}`,
       "Content-Type": "application/json",
@@ -229,7 +231,7 @@ async function repairMapTile(options, issue) {
       force: true,
       limit: 1,
     }),
-  });
+  }, options);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(`backfill failed for ${mapTileRefKey(issue)}: HTTP ${response.status} ${JSON.stringify(body)}`);
@@ -243,7 +245,7 @@ async function repairMapTile(options, issue) {
 }
 
 async function inspectMapTile(options, tile) {
-  const response = await fetch(mapTileUrl(options.workerUrl, tile), { cache: "no-store", signal: AbortSignal.timeout(options.requestTimeoutMs) });
+  const response = await fetchWithRetry(mapTileUrl(options.workerUrl, tile), { cache: "no-store" }, options);
   const bytes = Buffer.from(await response.arrayBuffer());
   const result = {
     ...tile,
@@ -382,13 +384,53 @@ function isAirBlock(block) {
   return id === "minecraft:air" || id === "minecraft:cave_air" || id === "minecraft:void_air" || id === "air" || id === "cave_air" || id === "void_air";
 }
 
-async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
+async function fetchJson(url, fetchOptions = {}, options) {
+  const response = await fetchWithRetry(url, fetchOptions, options);
   const body = await response.json().catch(() => null);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} for ${url}: ${JSON.stringify(body)}`);
   }
   return body;
+}
+
+async function fetchWithRetry(url, fetchOptions, options) {
+  const attempts = (options.requestRetries || 0) + 1;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        ...fetchOptions,
+        signal: AbortSignal.timeout(options.requestTimeoutMs),
+      });
+      if (!isRetriableStatus(response.status) || attempt === attempts) {
+        return response;
+      }
+      lastError = new Error(`HTTP ${response.status} for ${url}`);
+      await response.arrayBuffer().catch(() => null);
+    } catch (error) {
+      lastError = error;
+      if (!isRetriableError(error) || attempt === attempts) {
+        throw error;
+      }
+    }
+    const delayMs = Math.min(5000, 250 * 2 ** (attempt - 1));
+    console.error(`Retrying ${url} after ${lastError instanceof Error ? lastError.message : String(lastError)} (${attempt}/${attempts - 1})`);
+    await sleep(delayMs);
+  }
+  throw lastError || new Error(`failed to fetch ${url}`);
+}
+
+function isRetriableStatus(status) {
+  return status === 429 || status >= 500;
+}
+
+function isRetriableError(error) {
+  const name = error instanceof Error ? error.name : "";
+  return name === "TimeoutError" || name === "AbortError" || name === "TypeError";
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function mapWithConcurrency(items, concurrency, fn) {
