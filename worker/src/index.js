@@ -1905,31 +1905,62 @@ function renderSubPixelMapTilePng(png, tileRange, blockScale, chunksByCoord, tex
   let hasPixels = false;
   let tileVersion = 0;
   const missingColors = new Set();
+  const pixelCount = MAP_TILE_SIZE * MAP_TILE_SIZE;
+  const red = new Uint32Array(pixelCount);
+  const green = new Uint32Array(pixelCount);
+  const blue = new Uint32Array(pixelCount);
+  const alpha = new Uint32Array(pixelCount);
+  const samples = new Uint16Array(pixelCount);
 
   for (const chunk of chunksByCoord.values()) {
     tileVersion = Math.max(tileVersion, chunk.updatedAt || 0);
+    for (let localZ = 0; localZ < 16; localZ += 1) {
+      for (let localX = 0; localX < 16; localX += 1) {
+        const worldX = chunk.chunkX * 16 + localX;
+        const worldZ = chunk.chunkZ * 16 + localZ;
+        if (worldX < tileRange.minBlockX || worldX > tileRange.maxBlockX || worldZ < tileRange.minBlockZ || worldZ > tileRange.maxBlockZ) {
+          continue;
+        }
+        const index = localZ * 16 + localX;
+        const height = chunk.heights[index] ?? MIN_COLUMN_HEIGHT;
+        const blockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
+        const blockState = chunk.blockStates[index] || {};
+        const overlayHeight = chunk.overlayHeights[index] ?? MIN_COLUMN_HEIGHT;
+        const overlayBlockId = overlayHeight > MIN_COLUMN_HEIGHT ? chunk.palette[chunk.overlayBlocks[index]] || "minecraft:air" : "minecraft:air";
+        const overlayState = chunk.overlayStates[index] || {};
+        if (isAirBlock(blockId) && (isAirBlock(overlayBlockId) || overlayHeight <= MIN_COLUMN_HEIGHT)) {
+          continue;
+        }
+        const color = mapTileColumnColor(blockId, blockState, overlayBlockId, overlayState, Math.max(height, overlayHeight), worldX, worldZ, chunksByCoord, textureColors, missingColors);
+        if (!color) {
+          continue;
+        }
+        const pixelX = Math.floor((worldX - tileRange.minBlockX) / blocksPerPixel);
+        const pixelY = Math.floor((worldZ - tileRange.minBlockZ) / blocksPerPixel);
+        if (pixelX < 0 || pixelX >= MAP_TILE_SIZE || pixelY < 0 || pixelY >= MAP_TILE_SIZE) {
+          continue;
+        }
+        const pixelIndex = pixelY * MAP_TILE_SIZE + pixelX;
+        red[pixelIndex] += color[0];
+        green[pixelIndex] += color[1];
+        blue[pixelIndex] += color[2];
+        alpha[pixelIndex] += color[3];
+        samples[pixelIndex] += 1;
+      }
+    }
   }
 
-  for (let pixelY = 0; pixelY < MAP_TILE_SIZE; pixelY += 1) {
-    for (let pixelX = 0; pixelX < MAP_TILE_SIZE; pixelX += 1) {
-      const color = aggregateMapTilePixelColor(
-        tileRange.minBlockX + pixelX * blocksPerPixel,
-        tileRange.minBlockZ + pixelY * blocksPerPixel,
-        blocksPerPixel,
-        chunksByCoord,
-        textureColors,
-        missingColors,
-      );
-      if (!color) {
-        continue;
-      }
-      const offset = (pixelY * MAP_TILE_SIZE + pixelX) * 4;
-      png.data[offset] = color[0];
-      png.data[offset + 1] = color[1];
-      png.data[offset + 2] = color[2];
-      png.data[offset + 3] = color[3];
-      hasPixels = true;
+  for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
+    const count = samples[pixelIndex];
+    if (count < 1) {
+      continue;
     }
+    const offset = pixelIndex * 4;
+    png.data[offset] = clampByte(red[pixelIndex] / count);
+    png.data[offset + 1] = clampByte(green[pixelIndex] / count);
+    png.data[offset + 2] = clampByte(blue[pixelIndex] / count);
+    png.data[offset + 3] = clampByte(alpha[pixelIndex] / count);
+    hasPixels = true;
   }
 
   if (hasPixels) {
@@ -1942,54 +1973,6 @@ function renderSubPixelMapTilePng(png, tileRange, blockScale, chunksByCoord, tex
     missingColors: [...missingColors].sort(),
     missingColorReason: missingColors.size > 0 ? textureColors.reason || "texture_color_missing" : "",
   };
-}
-
-function aggregateMapTilePixelColor(startWorldX, startWorldZ, blocksPerPixel, chunksByCoord, textureColors, missingColors) {
-  const colors = [];
-  for (let offsetZ = 0; offsetZ < blocksPerPixel; offsetZ += 1) {
-    for (let offsetX = 0; offsetX < blocksPerPixel; offsetX += 1) {
-      const worldX = startWorldX + offsetX;
-      const worldZ = startWorldZ + offsetZ;
-      const chunk = chunksByCoord.get(coordKey(floorDiv(worldX, 16), floorDiv(worldZ, 16)));
-      if (!chunk) {
-        continue;
-      }
-      const localX = mod(worldX, 16);
-      const localZ = mod(worldZ, 16);
-      const index = localZ * 16 + localX;
-      const height = chunk.heights[index] ?? MIN_COLUMN_HEIGHT;
-      const blockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
-      const blockState = chunk.blockStates[index] || {};
-      const overlayHeight = chunk.overlayHeights[index] ?? MIN_COLUMN_HEIGHT;
-      const overlayBlockId = overlayHeight > MIN_COLUMN_HEIGHT ? chunk.palette[chunk.overlayBlocks[index]] || "minecraft:air" : "minecraft:air";
-      const overlayState = chunk.overlayStates[index] || {};
-      if (isAirBlock(blockId) && (isAirBlock(overlayBlockId) || overlayHeight <= MIN_COLUMN_HEIGHT)) {
-        continue;
-      }
-      const color = mapTileColumnColor(blockId, blockState, overlayBlockId, overlayState, Math.max(height, overlayHeight), worldX, worldZ, chunksByCoord, textureColors, missingColors);
-      if (color) {
-        colors.push(color);
-      }
-    }
-  }
-  return averageRgbaColors(colors);
-}
-
-function averageRgbaColors(colors) {
-  if (colors.length < 1) {
-    return null;
-  }
-  let red = 0;
-  let green = 0;
-  let blue = 0;
-  let alpha = 0;
-  for (const color of colors) {
-    red += color[0];
-    green += color[1];
-    blue += color[2];
-    alpha += color[3];
-  }
-  return [clampByte(red / colors.length), clampByte(green / colors.length), clampByte(blue / colors.length), clampByte(alpha / colors.length)];
 }
 
 async function mapTileObjectSourceVersion(bucket, key) {
