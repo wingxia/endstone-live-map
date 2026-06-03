@@ -1834,20 +1834,16 @@ async function rebuildMapTile(bucket, tile, options = {}) {
       return { ...tile, key, skipped: true, deleted: false, tileVersion: nextTileVersion, sourceVersion, existingSourceVersion, chunks: chunksByCoord.size };
     }
   }
-  if (missingColors.length > 0) {
-    await bucket.delete(key);
-    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, missingColors, missingColorReason, chunks: chunksByCoord.size };
-  }
   if (!hasPixels) {
     await bucket.delete(key);
-    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, chunks: chunksByCoord.size };
+    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, missingColors, missingColorReason, chunks: chunksByCoord.size };
   }
   const buffer = PNG.sync.write(png, { colorType: 6, inputColorType: 6 });
   await bucket.put(key, buffer, {
     httpMetadata: { contentType: "image/png" },
     customMetadata: { world: tile.world, dimension: tile.dimension, zoom: String(tile.zoom), tileVersion: String(nextTileVersion), sourceVersion: String(sourceVersion) },
   });
-  return { ...tile, key, deleted: false, tileVersion: nextTileVersion, sourceVersion, chunks: chunksByCoord.size };
+  return { ...tile, key, deleted: false, tileVersion: nextTileVersion, sourceVersion, missingColors, missingColorReason, chunks: chunksByCoord.size };
 }
 
 function renderMapTilePng(tile, chunksByCoord, textureColors) {

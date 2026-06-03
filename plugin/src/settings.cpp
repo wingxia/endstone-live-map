@@ -130,12 +130,16 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.chunk_upload_batch_size = intValue(source, "chunk_upload_batch_size", settings.chunk_upload_batch_size);
     settings.chunk_upload_flush_seconds =
         intValue(source, "chunk_upload_flush_seconds", settings.chunk_upload_flush_seconds);
+    settings.chunk_upload_cooldown_seconds =
+        intValue(source, "chunk_upload_cooldown_seconds", settings.chunk_upload_cooldown_seconds);
     settings.http_timeout_seconds = intValue(source, "http_timeout_seconds", settings.http_timeout_seconds);
     settings.dirty_block_push_seconds = intValue(source, "dirty_block_push_seconds", settings.dirty_block_push_seconds);
     settings.land_push_seconds = intValue(source, "land_push_seconds", settings.land_push_seconds);
     settings.max_dirty_blocks_per_push = intValue(source, "max_dirty_blocks_per_push", settings.max_dirty_blocks_per_push);
     settings.max_dirty_chunks_per_push = intValue(source, "max_dirty_chunks_per_push", settings.max_dirty_chunks_per_push);
     settings.max_upload_queue_size = intValue(source, "max_upload_queue_size", settings.max_upload_queue_size);
+    settings.max_pending_chunk_uploads =
+        intValue(source, "max_pending_chunk_uploads", settings.max_pending_chunk_uploads);
     settings.upload_chunks = legacyBoolValue(source, "upload_chunks", "upload_tiles", settings.upload_chunks);
     settings.auto_seed_chunks = boolValue(source, "auto_seed_chunks", settings.auto_seed_chunks);
     settings.upload_dirty_blocks = boolValue(source, "upload_dirty_blocks", settings.upload_dirty_blocks);
@@ -153,12 +157,14 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.player_seed_join_delay_seconds = std::clamp(settings.player_seed_join_delay_seconds, 0, 300);
     settings.chunk_upload_batch_size = std::clamp(settings.chunk_upload_batch_size, 1, 128);
     settings.chunk_upload_flush_seconds = std::clamp(settings.chunk_upload_flush_seconds, 1, 60);
+    settings.chunk_upload_cooldown_seconds = std::clamp(settings.chunk_upload_cooldown_seconds, 1, 600);
     settings.http_timeout_seconds = std::clamp(settings.http_timeout_seconds, 5, 120);
     settings.dirty_block_push_seconds = std::clamp(settings.dirty_block_push_seconds, 1, 60);
     settings.land_push_seconds = std::clamp(settings.land_push_seconds, 10, 3600);
     settings.max_dirty_blocks_per_push = std::clamp(settings.max_dirty_blocks_per_push, 1, 4096);
     settings.max_dirty_chunks_per_push = std::clamp(settings.max_dirty_chunks_per_push, 1, 256);
     settings.max_upload_queue_size = std::clamp(settings.max_upload_queue_size, 1, 4096);
+    settings.max_pending_chunk_uploads = std::clamp(settings.max_pending_chunk_uploads, 1, 65536);
     return settings;
 }
 
@@ -185,12 +191,14 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"player_seed_join_delay_seconds\": 10,\n"
         << "  \"chunk_upload_batch_size\": 8,\n"
         << "  \"chunk_upload_flush_seconds\": 10,\n"
+        << "  \"chunk_upload_cooldown_seconds\": 60,\n"
         << "  \"http_timeout_seconds\": 30,\n"
         << "  \"dirty_block_push_seconds\": 60,\n"
         << "  \"land_push_seconds\": 60,\n"
         << "  \"max_dirty_blocks_per_push\": 2048,\n"
         << "  \"max_dirty_chunks_per_push\": 64,\n"
         << "  \"max_upload_queue_size\": 256,\n"
+        << "  \"max_pending_chunk_uploads\": 4096,\n"
         << "  \"upload_chunks\": true,\n"
         << "  \"auto_seed_chunks\": false,\n"
         << "  \"upload_dirty_blocks\": true,\n"

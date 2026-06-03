@@ -679,6 +679,38 @@ describe("worker routes", () => {
     expect(pngPixel(png, 0, 0)[2]).toBeGreaterThan(pngPixel(png, 8, 8)[2]);
   });
 
+  it("renders the same source chunk at every image zoom", async () => {
+    const env = createEnv();
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/batch", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          storage: "region",
+          chunks: [createChunk({ chunkX: 3, chunkZ: 2, updatedAt: 42 })],
+        }),
+      }),
+      env,
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    for (const zoom of [-1, 0, 1, 2, 3]) {
+      const tileRef = mapTilesForChunk("world", "Overworld", 3, 2).find((tile) => tile.zoom === zoom);
+      expect(tileRef).toBeTruthy();
+      const key = mapTileKey("world", "Overworld", zoom, tileRef.tileX, tileRef.tileZ);
+      expect(env.MAP_DATA.objects.has(key)).toBe(true);
+      const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
+      const range = chunkRangeForMapTile(tileRef);
+      const blockScale = 2 ** zoom;
+      const sampleWorldX = 3 * 16;
+      const sampleWorldZ = 2 * 16;
+      const sampleX = Math.floor((sampleWorldX - range.minBlockX) * blockScale);
+      const sampleY = Math.floor((sampleWorldZ - range.minBlockZ) * blockScale);
+      expect(pngPixel(png, sampleX, sampleY)[3]).toBe(255);
+    }
+  });
+
   it("renders stair map tiles with material colors instead of dark air fallback", async () => {
     const env = createEnv();
     const stairIndex = 1;
@@ -936,6 +968,51 @@ describe("worker routes", () => {
 
     expect(await response.json()).toMatchObject({ ok: true, tiles: [expect.objectContaining({ skipped: true, sourceVersion: 10, existingSourceVersion: 99 })] });
     expect(Buffer.from(await env.MAP_DATA.objects.get(key).arrayBuffer())).toEqual(Buffer.from([1, 2, 3]));
+  });
+
+  it("keeps valid low zoom pixels when neighboring source blocks lack atlas colors", async () => {
+    const env = createEnv({
+      textureColors: {
+        "minecraft:grass_block": [95, 159, 63],
+      },
+    });
+    const blocks = Array.from({ length: 256 }, () => 0);
+    blocks[0] = 1;
+    await env.MAP_DATA.put(
+      "chunk-regions/v1/world/Overworld/0/0.json",
+      JSON.stringify({
+        version: 1,
+        world: "world",
+        dimension: "Overworld",
+        regionSize: 16,
+        regionX: 0,
+        regionZ: 0,
+        chunks: [
+          createChunk({ chunkX: 0, chunkZ: 0, updatedAt: 10 }),
+          createChunk({ chunkX: 1, chunkZ: 0, palette: ["minecraft:grass_block", "minecraft:not_in_atlas", "minecraft:air"], blocks, updatedAt: 20 }),
+        ],
+      }),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-tiles/backfill", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", zoom: 2, minChunkX: 0, maxChunkX: 1, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true }),
+      }),
+      env,
+      {},
+    );
+
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      tiles: [expect.objectContaining({ deleted: false })],
+    });
+    const key = "map-tiles/v1/world/Overworld/z2/0/0.png";
+    expect(env.MAP_DATA.objects.has(key)).toBe(true);
+    const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
+    expect(pngPixel(png, 0, 0)[3]).toBe(255);
   });
 
   it("uses deterministic fallback colors for known blocks missing from the atlas", async () => {
