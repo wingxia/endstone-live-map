@@ -1305,6 +1305,43 @@ describe("worker routes", () => {
     expect(PNG.sync.read(Buffer.from(await env.MAP_DATA.objects.get(key).arrayBuffer())).width).toBe(256);
   });
 
+  it("materializes selected region chunks into direct chunk objects", async () => {
+    const env = createEnv();
+    const regionChunks = Array.from({ length: 256 }, (_, index) => ({
+      chunkX: index % 16,
+      chunkZ: Math.floor(index / 16),
+      blocks: "invalid",
+    }));
+    regionChunks[13 * 16 + 12] = createChunk({ chunkX: 12, chunkZ: 13, updatedAt: 42 });
+    await env.MAP_DATA.put(
+      "chunk-regions/v1/world/Overworld/0/0.json",
+      JSON.stringify({ version: 1, world: "world", dimension: "Overworld", chunks: regionChunks }),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/materialize", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chunks: [
+            { world: "world", dimension: "Overworld", chunkX: 12, chunkZ: 13 },
+            { world: "world", dimension: "Overworld", chunkX: 11, chunkZ: 13 },
+          ],
+        }),
+      }),
+      env,
+      {},
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, requested: 2, materialized: 1, missing: 1 });
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/12/13.json")).toBe(true);
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/11/13.json")).toBe(false);
+    expect((await env.MAP_DATA.objects.get("chunks/v1/world/Overworld/12/13.json").json()).updatedAt).toBe(42);
+  });
+
   it("returns compact chunk summaries when requested", async () => {
     const env = createEnv();
     await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ chunkX: 0, chunkZ: 0 })), {

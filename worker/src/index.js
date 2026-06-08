@@ -158,6 +158,14 @@ export default {
         return handleChunkBatchUpload(request, env, ctx);
       }
 
+      if (url.pathname === "/api/plugin/chunks/materialize") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleChunkMaterialize(request, env);
+      }
+
       if (url.pathname === "/api/plugin/block-updates") {
         const auth = requirePluginAuth(request, env);
         if (auth) {
@@ -429,6 +437,77 @@ async function handleChunkBatchUpload(request, env, ctx) {
     updates: results.reduce((sum, result) => sum + result.updates, 0),
     tiles,
   });
+}
+
+async function handleChunkMaterialize(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
+  const payload = await request.json();
+  const chunks = normalizeChunkMaterializePayload(payload);
+  const results = new Array(chunks.length);
+  const missingGroups = new Map();
+  for (const ref of chunks) {
+    const key = chunkKey(ref.world, ref.dimension, ref.chunkX, ref.chunkZ);
+    const direct = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(key)));
+    if (direct) {
+      results[ref.index] = { ...withoutIndex(ref), key, materialized: false, source: "direct" };
+      continue;
+    }
+
+    const regionX = floorDiv(ref.chunkX, REGION_SIZE_CHUNKS);
+    const regionZ = floorDiv(ref.chunkZ, REGION_SIZE_CHUNKS);
+    const regionKey = chunkRegionKey(ref.world, ref.dimension, regionX, regionZ);
+    if (!missingGroups.has(regionKey)) {
+      missingGroups.set(regionKey, { key: regionKey, refs: [] });
+    }
+    missingGroups.get(regionKey).refs.push({ ...ref, key });
+  }
+
+  for (const group of missingGroups.values()) {
+    const wanted = new Map(group.refs.map((ref) => [coordKey(ref.chunkX, ref.chunkZ), ref]));
+    const found = new Set();
+    const region = await readR2Json(await bucket.get(group.key));
+    for (const chunk of Array.isArray(region?.chunks) ? region.chunks : []) {
+      const rawChunkX = Number(chunk?.chunkX);
+      const rawChunkZ = Number(chunk?.chunkZ);
+      const ref = Number.isFinite(rawChunkX) && Number.isFinite(rawChunkZ) ? wanted.get(coordKey(rawChunkX, rawChunkZ)) : null;
+      if (!ref) {
+        continue;
+      }
+      const snapshot = normalizeOptionalChunkSnapshot(chunk);
+      if (!snapshot) {
+        continue;
+      }
+      await bucket.put(ref.key, JSON.stringify(snapshot), {
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        customMetadata: { world: snapshot.world, dimension: snapshot.dimension },
+      });
+      found.add(coordKey(ref.chunkX, ref.chunkZ));
+      results[ref.index] = { ...withoutIndex(ref), materialized: true, source: "region", updatedAt: snapshot.updatedAt };
+    }
+    for (const ref of group.refs) {
+      if (!found.has(coordKey(ref.chunkX, ref.chunkZ))) {
+        results[ref.index] = { ...withoutIndex(ref), materialized: false, source: "missing" };
+      }
+    }
+  }
+
+  return json({
+    ok: true,
+    requested: chunks.length,
+    materialized: results.filter((result) => result.materialized).length,
+    direct: results.filter((result) => result.source === "direct").length,
+    missing: results.filter((result) => result.source === "missing").length,
+    chunks: results,
+  });
+}
+
+function withoutIndex(value) {
+  const { index: _index, ...rest } = value;
+  return rest;
 }
 
 async function handleBlockUpdatesUpload(request, env, ctx) {
@@ -1403,6 +1482,20 @@ export function normalizeBlockUpdateBatches(payload) {
   return { batches, totalUpdates };
 }
 
+function normalizeChunkMaterializePayload(payload) {
+  const chunks = Array.isArray(payload?.chunks) ? payload.chunks : [];
+  if (chunks.length < 1 || chunks.length > MAX_CHUNKS_PER_BATCH) {
+    throw new Error(`chunks must contain 1-${MAX_CHUNKS_PER_BATCH} entries`);
+  }
+  return chunks.map((chunk, index) => ({
+    index,
+    world: cleanSegment(chunk.world || "world"),
+    dimension: cleanSegment(chunk.dimension || "Overworld"),
+    chunkX: numberOrThrow(chunk.chunkX, `chunks[${index}].chunkX`),
+    chunkZ: numberOrThrow(chunk.chunkZ, `chunks[${index}].chunkZ`),
+  }));
+}
+
 function normalizeBlockUpdate(update) {
   const localX = numberOrThrow(update.localX, "updates.localX");
   const localZ = numberOrThrow(update.localZ, "updates.localZ");
@@ -1745,10 +1838,19 @@ async function readStoredChunkSnapshot(bucket, world, dimension, chunkX, chunkZ)
     return direct;
   }
 
+  return readRegionChunkSnapshot(bucket, world, dimension, chunkX, chunkZ);
+}
+
+async function readRegionChunkSnapshot(bucket, world, dimension, chunkX, chunkZ) {
   const region = await readR2Json(await bucket.get(chunkRegionKey(world, dimension, floorDiv(chunkX, REGION_SIZE_CHUNKS), floorDiv(chunkZ, REGION_SIZE_CHUNKS))));
   for (const chunk of Array.isArray(region?.chunks) ? region.chunks : []) {
+    const rawChunkX = Number(chunk?.chunkX);
+    const rawChunkZ = Number(chunk?.chunkZ);
+    if (rawChunkX !== chunkX || rawChunkZ !== chunkZ) {
+      continue;
+    }
     const normalized = normalizeOptionalChunkSnapshot(chunk);
-    if (normalized && normalized.chunkX === chunkX && normalized.chunkZ === chunkZ) {
+    if (normalized) {
       return normalized;
     }
   }
