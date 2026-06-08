@@ -45,6 +45,8 @@ const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
 const EMPTY_CHUNK_PRUNE_WRITE_LIMIT = 8;
 const CHUNK_REGION_MIGRATION_DEFAULT_LIMIT = 2;
 const CHUNK_REGION_MIGRATION_MAX_LIMIT = 10;
+const CHUNK_REGION_MIGRATION_CHUNK_DEFAULT_LIMIT = 24;
+const CHUNK_REGION_MIGRATION_CHUNK_MAX_LIMIT = 64;
 const CHUNK_DIRECT_READ_LIMIT = REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS;
 const MIN_COLUMN_HEIGHT = -64;
 const SEA_LEVEL = 63;
@@ -1268,8 +1270,16 @@ async function handleChunkRegionMigration(request, env) {
   });
   const objects = page.objects || [];
   const results = [];
+  let nextCursor = page.truncated ? page.cursor || "" : null;
+  let nextChunkCursor = "";
   for (const object of objects) {
-    results.push(await migrateChunkRegionObject(bucket, object.key, options));
+    const result = await migrateChunkRegionObject(bucket, object.key, options);
+    results.push(result);
+    if (result.cursor !== null) {
+      nextCursor = options.cursor || "";
+      nextChunkCursor = result.cursor;
+      break;
+    }
   }
 
   return json({
@@ -1281,7 +1291,8 @@ async function handleChunkRegionMigration(request, env) {
     skippedEmpty: results.reduce((sum, result) => sum + result.skippedEmpty, 0),
     invalidChunks: results.reduce((sum, result) => sum + result.invalidChunks, 0),
     deletedRegions: results.filter((result) => result.deletedRegion).length,
-    cursor: page.truncated ? page.cursor || "" : null,
+    cursor: nextCursor,
+    chunkCursor: nextChunkCursor || null,
     results,
   });
 }
@@ -1694,6 +1705,11 @@ export function normalizeChunkRegionMigrationPayload(payload) {
     prefix,
     limit: Math.min(CHUNK_REGION_MIGRATION_MAX_LIMIT, Math.max(1, numberOrThrow(payload.limit ?? CHUNK_REGION_MIGRATION_DEFAULT_LIMIT, "limit"))),
     cursor: typeof payload.cursor === "string" && payload.cursor.length > 0 ? payload.cursor : "",
+    chunkCursor: Math.max(0, numberOrThrow(payload.chunkCursor ?? 0, "chunkCursor")),
+    chunkLimit: Math.min(
+      CHUNK_REGION_MIGRATION_CHUNK_MAX_LIMIT,
+      Math.max(1, numberOrThrow(payload.chunkLimit ?? CHUNK_REGION_MIGRATION_CHUNK_DEFAULT_LIMIT, "chunkLimit")),
+    ),
     dryRun: payload.dryRun !== false,
     deleteRegions: payload.deleteRegions === true,
     confirm: String(payload.confirm || ""),
@@ -2012,14 +2028,16 @@ async function readChunksForRange(bucket, query, options = {}) {
 async function migrateChunkRegionObject(bucket, key, options) {
   const region = await readR2Json(await bucket.get(key));
   if (!region || !Array.isArray(region.chunks)) {
-    return { key, migrated: 0, skippedEmpty: 0, invalidChunks: 0, deletedRegion: false, invalidRegion: true };
+    return { key, migrated: 0, skippedEmpty: 0, invalidChunks: 0, deletedRegion: false, invalidRegion: true, cursor: null };
   }
 
   let migrated = 0;
   let skippedEmpty = 0;
   let invalidChunks = 0;
   const directKeys = [];
-  for (const chunk of region.chunks) {
+  const start = Math.max(0, Math.min(region.chunks.length, options.chunkCursor || 0));
+  const end = Math.min(region.chunks.length, start + options.chunkLimit);
+  for (const chunk of region.chunks.slice(start, end)) {
     const normalized = normalizeOptionalChunkSnapshot(chunk);
     if (!normalized) {
       invalidChunks += 1;
@@ -2041,13 +2059,14 @@ async function migrateChunkRegionObject(bucket, key, options) {
     migrated += 1;
   }
 
+  const cursor = end < region.chunks.length ? String(end) : null;
   let deletedRegion = false;
-  if (!options.dryRun && options.deleteRegions) {
+  if (cursor === null && !options.dryRun && options.deleteRegions) {
     await bucket.delete(key);
     deletedRegion = true;
   }
 
-  return { key, migrated, skippedEmpty, invalidChunks, deletedRegion, directKeys };
+  return { key, migrated, skippedEmpty, invalidChunks, deletedRegion, cursor, scanned: end - start, remaining: Math.max(0, region.chunks.length - end), directKeys };
 }
 
 async function findEmptyChunksForRange(bucket, query) {
