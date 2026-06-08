@@ -23,7 +23,7 @@ on:
       concurrency:
         description: Audit/rebuild scan concurrency
         required: false
-        default: "6"
+        default: "2"
 
 jobs:
   rebuild:
@@ -54,7 +54,7 @@ jobs:
           DIMENSION: ${{ inputs.dimension }}
           CONCURRENCY: ${{ inputs.concurrency }}
         run: |
-          args=(rebuild --worker-url "$WORKER_URL" --delete-existing --concurrency "$CONCURRENCY" --request-timeout-ms 60000 --request-retries 5)
+          args=(rebuild --worker-url "$WORKER_URL" --delete-existing --concurrency "$CONCURRENCY" --request-timeout-ms 60000 --request-retries 4)
           if [ -n "$WORLD" ]; then
             args+=(--world "$WORLD")
           fi

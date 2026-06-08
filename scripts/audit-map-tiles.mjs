@@ -335,10 +335,22 @@ async function repairBaseTilesForRange(options, issue, range) {
 }
 
 async function backfillAllMapTilesForRange(options, meta, range, zoom) {
+  if (options.mode === "rebuild" && zoom === MAP_TILE_BASE_ZOOM && chunkRangeArea(range) > 1) {
+    const stats = { calls: 0, matched: 0, written: 0, deleted: 0 };
+    for (const part of splitChunkRange(range)) {
+      const result = await backfillAllMapTilesForRange(options, meta, part, zoom);
+      stats.calls += result.calls;
+      stats.matched += result.matched;
+      stats.written += result.written;
+      stats.deleted += result.deleted;
+    }
+    return stats;
+  }
+
   const stats = { calls: 0, matched: 0, written: 0, deleted: 0 };
   let cursor = "";
   do {
-    const body = await backfillOneMapTilePage(options, meta, range, zoom, { cursor, limit: 100 });
+    const body = await backfillOneMapTilePageWithSplit(options, meta, range, zoom, { cursor, limit: 25 });
     stats.calls += 1;
     stats.matched += body.matched || 0;
     stats.written += body.written || 0;
@@ -346,6 +358,25 @@ async function backfillAllMapTilesForRange(options, meta, range, zoom) {
     cursor = body.cursor || "";
   } while (cursor);
   return stats;
+}
+
+async function backfillOneMapTilePageWithSplit(options, meta, range, zoom, page) {
+  try {
+    return await backfillOneMapTilePage(options, meta, range, zoom, page);
+  } catch (error) {
+    if (!shouldSplitBackfillRange(error, range)) {
+      throw error;
+    }
+    const aggregate = { ok: true, matched: 0, written: 0, cursor: null, tiles: [] };
+    console.error(`Splitting backfill ${meta.world}/${meta.dimension}/z${zoom} ${formatChunkRange(range)} after ${error instanceof Error ? error.message : String(error)}`);
+    for (const part of splitChunkRange(range)) {
+      const result = await backfillAllMapTilesForRange(options, meta, part, zoom);
+      aggregate.matched += result.matched;
+      aggregate.written += result.written;
+      aggregate.tiles.push(...Array.from({ length: result.deleted }, () => ({ deleted: true })));
+    }
+    return aggregate;
+  }
 }
 
 async function backfillOneMapTilePage(options, meta, range, zoom, { cursor = "", limit = 100 } = {}) {
@@ -494,6 +525,19 @@ function shouldSplitChunkRange(error, range) {
   }
   if (error instanceof HttpError) {
     return error.status === 429 || error.status >= 500;
+  }
+  return isRetriableError(error);
+}
+
+function shouldSplitBackfillRange(error, range) {
+  if (chunkRangeArea(range) <= 1) {
+    return false;
+  }
+  if (error instanceof HttpError) {
+    return error.status === 429 || error.status >= 500;
+  }
+  if (error instanceof Error && /HTTP (429|5\d\d)/.test(error.message)) {
+    return true;
   }
   return isRetriableError(error);
 }
