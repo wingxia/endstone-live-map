@@ -507,9 +507,11 @@ describe("worker helpers", () => {
   });
 
   it("normalizes chunk region migration payloads", () => {
-    expect(normalizeChunkRegionMigrationPayload({ world: "Bedrock level", dimension: "Overworld", limit: 99, dryRun: false, deleteRegions: true })).toMatchObject({
+    expect(normalizeChunkRegionMigrationPayload({ world: "Bedrock level", dimension: "Overworld", limit: 99, chunkLimit: 99, chunkCursor: 3, dryRun: false, deleteRegions: true })).toMatchObject({
       prefix: "chunk-regions/v1/Bedrock_level/Overworld/",
       limit: 10,
+      chunkLimit: 64,
+      chunkCursor: 3,
       dryRun: false,
       deleteRegions: true,
     });
@@ -1797,7 +1799,7 @@ describe("worker routes", () => {
         version: 1,
         world: "world",
         dimension: "Overworld",
-        chunks: [createChunk({ chunkX: 0, chunkZ: 0, updatedAt: 11 }), createEmptyChunk({ chunkX: 1, chunkZ: 0, updatedAt: 12 })],
+        chunks: [createChunk({ chunkX: 0, chunkZ: 0, updatedAt: 11 }), createChunk({ chunkX: 1, chunkZ: 0, updatedAt: 12 }), createEmptyChunk({ chunkX: 2, chunkZ: 0, updatedAt: 13 })],
       }),
       { httpMetadata: { contentType: "application/json" } },
     );
@@ -1806,33 +1808,49 @@ describe("worker routes", () => {
       new Request("https://map.buhe.li/api/plugin/chunks/migrate-regions", {
         method: "POST",
         headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-        body: JSON.stringify({ world: "world", dimension: "Overworld", dryRun: true, limit: 1 }),
+        body: JSON.stringify({ world: "world", dimension: "Overworld", dryRun: true, limit: 1, chunkLimit: 2 }),
       }),
       env,
       {},
     );
 
     expect(dryRun.status).toBe(200);
-    expect(await dryRun.json()).toMatchObject({ ok: true, dryRun: true, matched: 1, migrated: 1, skippedEmpty: 1, deletedRegions: 0 });
+    expect(await dryRun.json()).toMatchObject({ ok: true, dryRun: true, matched: 1, migrated: 2, skippedEmpty: 0, deletedRegions: 0, cursor: "", chunkCursor: "2" });
     expect(env.MAP_DATA.objects.has(legacyRegionKey)).toBe(true);
     expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(false);
+
+    const firstReal = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/migrate-regions", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", dryRun: false, deleteRegions: true, confirm: "migrate-chunk-regions-v1", limit: 1, chunkLimit: 2 }),
+      }),
+      env,
+      {},
+    );
+
+    expect(firstReal.status).toBe(200);
+    const firstBody = await firstReal.json();
+    expect(firstBody).toMatchObject({ ok: true, dryRun: false, matched: 1, migrated: 2, skippedEmpty: 0, deletedRegions: 0, cursor: "", chunkCursor: "2" });
+    expect(env.MAP_DATA.objects.has(legacyRegionKey)).toBe(true);
 
     const real = await worker.fetch(
       new Request("https://map.buhe.li/api/plugin/chunks/migrate-regions", {
         method: "POST",
         headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-        body: JSON.stringify({ world: "world", dimension: "Overworld", dryRun: false, deleteRegions: true, confirm: "migrate-chunk-regions-v1", limit: 1 }),
+        body: JSON.stringify({ world: "world", dimension: "Overworld", dryRun: false, deleteRegions: true, confirm: "migrate-chunk-regions-v1", limit: 1, chunkLimit: 2, chunkCursor: firstBody.chunkCursor }),
       }),
       env,
       {},
     );
 
     expect(real.status).toBe(200);
-    expect(await real.json()).toMatchObject({ ok: true, dryRun: false, matched: 1, migrated: 1, skippedEmpty: 1, deletedRegions: 1 });
+    expect(await real.json()).toMatchObject({ ok: true, dryRun: false, matched: 1, migrated: 0, skippedEmpty: 1, deletedRegions: 1, cursor: null, chunkCursor: null });
     expect(env.MAP_DATA.objects.has(legacyRegionKey)).toBe(false);
     const direct = await env.MAP_DATA.objects.get("chunks/v1/world/Overworld/0/0.json").json();
     expect(direct.updatedAt).toBe(11);
-    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/1/0.json")).toBe(false);
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/1/0.json")).toBe(true);
+    expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/2/0.json")).toBe(false);
   });
 
   it("generates low zoom image tiles for negative-coordinate region chunk batches", async () => {
