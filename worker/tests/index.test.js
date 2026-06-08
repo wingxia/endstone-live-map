@@ -1269,6 +1269,29 @@ describe("worker routes", () => {
     expect(env.MAP_DATA.getCalls).toContain("chunk-regions/v1/world/Overworld/0/0.json");
   });
 
+  it("filters region chunks before normalizing small range fallbacks", async () => {
+    const env = createEnv();
+    const regionChunks = Array.from({ length: 256 }, (_, index) => ({
+      chunkX: index % 16,
+      chunkZ: Math.floor(index / 16),
+      blocks: "invalid",
+    }));
+    regionChunks[13 * 16 + 12] = createChunk({ chunkX: 12, chunkZ: 13, updatedAt: 42 });
+    await env.MAP_DATA.put(
+      "chunk-regions/v1/world/Overworld/0/0.json",
+      JSON.stringify({ version: 1, world: "world", dimension: "Overworld", chunks: regionChunks }),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+
+    const response = await backfillMapTile(env, { world: "world", dimension: "Overworld", zoom: 4, minChunkX: 12, maxChunkX: 12, minChunkZ: 13, maxChunkZ: 13, dryRun: false, force: true });
+    const body = await response.json();
+    const key = "map-tiles/v1/world/Overworld/z4/12/13.png";
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, written: 1, tiles: [expect.objectContaining({ chunks: 1, sourceVersion: 42 })] });
+    expect(PNG.sync.read(Buffer.from(await env.MAP_DATA.objects.get(key).arrayBuffer())).width).toBe(256);
+  });
+
   it("returns compact chunk summaries when requested", async () => {
     const env = createEnv();
     await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ chunkX: 0, chunkZ: 0 })), {
@@ -1988,6 +2011,27 @@ describe("worker routes", () => {
     expect(body).toMatchObject({ ok: true, written: 1, worldMetaTouched: false });
     expect(body.worldMetaError).toContain("JSON");
     expect(env.MAP_DATA.objects.has(key)).toBe(true);
+  });
+
+  it("returns structured failures for map tile backfill rebuild errors", async () => {
+    const env = createEnv();
+    const originalGet = env.MAP_DATA.get.bind(env.MAP_DATA);
+    env.MAP_DATA.get = async (key) => {
+      if (key === "chunks/v1/world/Overworld/0/0.json") {
+        throw new Error("r2_get_failed");
+      }
+      return originalGet(key);
+    };
+
+    const response = await backfillMapTile(env, { world: "world", dimension: "Overworld", zoom: 4, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true });
+    const body = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(body).toMatchObject({
+      error: "map_tile_backfill_failed",
+      message: "r2_get_failed",
+      tiles: [expect.objectContaining({ key: "map-tiles/v1/world/Overworld/z4/0/0.png" })],
+    });
   });
 
   it("skips stale low zoom rebuilds when existing source metadata is newer", async () => {

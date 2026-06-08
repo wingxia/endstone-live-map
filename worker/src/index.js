@@ -753,14 +753,26 @@ async function handleMapTileBackfill(request, env) {
     key: mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ),
   }));
 
-  const results = payload.dryRun
-    ? []
-    : await rebuildMapTiles(bucket, selected, {
-        force: payload.force,
-        rebuildVersion,
-        concurrency: MAP_TILE_BACKFILL_WRITE_CONCURRENCY,
-        readConcurrency: MAP_TILE_BACKFILL_READ_CONCURRENCY,
-      });
+  let results = [];
+  try {
+    results = payload.dryRun
+      ? []
+      : await rebuildMapTiles(bucket, selected, {
+          force: payload.force,
+          rebuildVersion,
+          concurrency: MAP_TILE_BACKFILL_WRITE_CONCURRENCY,
+          readConcurrency: MAP_TILE_BACKFILL_READ_CONCURRENCY,
+        });
+  } catch (error) {
+    return json(
+      {
+        error: "map_tile_backfill_failed",
+        message: error instanceof Error ? error.message : String(error),
+        tiles: tileRefs,
+      },
+      503,
+    );
+  }
   let worldMetaTouched = false;
   let worldMetaError = "";
   if (!payload.dryRun && rebuildVersion > 0 && results.some((tile) => !tile.skipped)) {
@@ -1694,8 +1706,13 @@ async function readChunkRegions(bucket, query, chunksByCoord) {
     keys.map(async (key) => {
       const region = await readR2Json(await bucket.get(key));
       for (const chunk of Array.isArray(region?.chunks) ? region.chunks : []) {
+        const chunkX = Number(chunk?.chunkX);
+        const chunkZ = Number(chunk?.chunkZ);
+        if (!Number.isFinite(chunkX) || !Number.isFinite(chunkZ) || chunkX < query.minChunkX || chunkX > query.maxChunkX || chunkZ < query.minChunkZ || chunkZ > query.maxChunkZ) {
+          continue;
+        }
         const normalized = normalizeOptionalChunkSnapshot(chunk);
-        if (!normalized || normalized.chunkX < query.minChunkX || normalized.chunkX > query.maxChunkX || normalized.chunkZ < query.minChunkZ || normalized.chunkZ > query.maxChunkZ) {
+        if (!normalized) {
           continue;
         }
         chunksByCoord.set(coordKey(normalized.chunkX, normalized.chunkZ), normalized);
