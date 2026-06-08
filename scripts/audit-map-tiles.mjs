@@ -8,6 +8,7 @@ const MAP_TILE_MIN_ZOOM = -1;
 const MAP_TILE_BASE_ZOOM = 4;
 const MAP_TILE_MAX_ZOOM = MAP_TILE_BASE_ZOOM;
 const MIN_COLUMN_HEIGHT = -64;
+const MAX_MATERIALIZE_CHUNKS = 128;
 
 class HttpError extends Error {
   constructor(status, url, body) {
@@ -171,6 +172,7 @@ async function auditWorld(options, meta) {
 
 async function collectExpectedMapTiles(options, meta) {
   const tileRefs = new Map();
+  const chunkRefs = new Map();
   const ranges = chunkScanRanges(meta.bounds, meta.sampleChunks || [], options.sampleOnly);
   const stats = {
     world: meta.world,
@@ -195,6 +197,12 @@ async function collectExpectedMapTiles(options, meta) {
         continue;
       }
       stats.nonAirChunks += 1;
+      chunkRefs.set(`${chunk.world || meta.world}/${chunk.dimension || meta.dimension}/${chunk.chunkX}/${chunk.chunkZ}`, {
+        world: chunk.world || meta.world,
+        dimension: chunk.dimension || meta.dimension,
+        chunkX: chunk.chunkX,
+        chunkZ: chunk.chunkZ,
+      });
       for (const zoom of zoomRange()) {
         const tile = mapTileForChunk(chunk.world || meta.world, chunk.dimension || meta.dimension, chunk.chunkX, chunk.chunkZ, zoom);
         const key = mapTileRefKey(tile);
@@ -212,7 +220,7 @@ async function collectExpectedMapTiles(options, meta) {
 
   const tiles = [...tileRefs.values()].sort((a, b) => a.zoom - b.zoom || a.tileZ - b.tileZ || a.tileX - b.tileX);
   stats.uniqueTiles = tiles.length;
-  return { stats, tiles };
+  return { stats, tiles, chunks: [...chunkRefs.values()].sort((a, b) => a.world.localeCompare(b.world) || a.dimension.localeCompare(b.dimension) || a.chunkZ - b.chunkZ || a.chunkX - b.chunkX) };
 }
 
 async function fetchChunksForAuditRange(options, meta, range, stats) {
@@ -288,8 +296,10 @@ async function rebuildMapTilesAndAudit(options) {
   const cleanup = options.deleteExisting ? await deleteMapTileObjects(options) : null;
   const rebuilds = [];
   for (const meta of metas) {
-    const { stats, tiles } = await collectExpectedMapTiles(options, meta);
+    const { stats, tiles, chunks } = await collectExpectedMapTiles(options, meta);
     console.error(`Rebuilding ${meta.world}/${meta.dimension}: ${tiles.length} expected image tiles from ${stats.nonAirChunks} non-air chunks`);
+    const materialized = await materializeChunks(options, chunks);
+    console.error(`Materialized ${meta.world}/${meta.dimension}: ${JSON.stringify(materialized)}`);
     const byZoom = {};
     for (let zoom = MAP_TILE_BASE_ZOOM; zoom >= MAP_TILE_MIN_ZOOM; zoom -= 1) {
       byZoom[`z${zoom}`] = { calls: 0, matched: 0, written: 0, deleted: 0 };
@@ -302,7 +312,7 @@ async function rebuildMapTilesAndAudit(options) {
       }
       console.error(`Rebuilt ${meta.world}/${meta.dimension} z${zoom}: ${JSON.stringify(byZoom[`z${zoom}`])}`);
     }
-    rebuilds.push({ world: meta.world, dimension: meta.dimension, scannedRanges: stats.scannedRanges, nonAirChunks: stats.nonAirChunks, uniqueTiles: tiles.length, byZoom });
+    rebuilds.push({ world: meta.world, dimension: meta.dimension, scannedRanges: stats.scannedRanges, nonAirChunks: stats.nonAirChunks, uniqueTiles: tiles.length, materialized, byZoom });
   }
 
   const audit = await auditMapTiles(options);
@@ -374,6 +384,42 @@ async function backfillOneMapTilePage(options, meta, range, zoom, { cursor = "",
     throw new Error(`backfill failed for ${meta.world}/${meta.dimension}/z${zoom} ${formatChunkRange(range)} cursor ${cursor || "0"}: HTTP ${response.status} ${JSON.stringify(body)}`);
   }
   return body;
+}
+
+async function materializeChunks(options, chunks) {
+  const stats = { calls: 0, requested: 0, materialized: 0, direct: 0, missing: 0 };
+  const uniqueChunks = [];
+  const seen = new Set();
+  for (const chunk of chunks) {
+    const ref = { world: chunk.world, dimension: chunk.dimension, chunkX: chunk.chunkX, chunkZ: chunk.chunkZ };
+    const key = `${ref.world}/${ref.dimension}/${ref.chunkX}/${ref.chunkZ}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    uniqueChunks.push(ref);
+  }
+  for (let index = 0; index < uniqueChunks.length; index += MAX_MATERIALIZE_CHUNKS) {
+    const selected = uniqueChunks.slice(index, index + MAX_MATERIALIZE_CHUNKS);
+    const response = await fetchWithRetry(`${options.workerUrl}/api/plugin/chunks/materialize`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${options.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ chunks: selected }),
+    }, options);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(`chunk materialize failed at ${index}: HTTP ${response.status} ${JSON.stringify(body)}`);
+    }
+    stats.calls += 1;
+    stats.requested += body.requested || 0;
+    stats.materialized += body.materialized || 0;
+    stats.direct += body.direct || 0;
+    stats.missing += body.missing || 0;
+  }
+  return stats;
 }
 
 async function deleteMapTileObjects(options) {
