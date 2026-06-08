@@ -43,6 +43,8 @@ const MAP_TILE_BACKFILL_BASE_WRITE_LIMIT = 1;
 const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
 const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
 const EMPTY_CHUNK_PRUNE_WRITE_LIMIT = 8;
+const CHUNK_REGION_MIGRATION_DEFAULT_LIMIT = 2;
+const CHUNK_REGION_MIGRATION_MAX_LIMIT = 10;
 const CHUNK_DIRECT_READ_LIMIT = REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS;
 const MIN_COLUMN_HEIGHT = -64;
 const SEA_LEVEL = 63;
@@ -178,6 +180,14 @@ export default {
           return auth;
         }
         return handleEmptyChunkPrune(request, env);
+      }
+
+      if (url.pathname === "/api/plugin/chunks/migrate-regions") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleChunkRegionMigration(request, env);
       }
 
       if (url.pathname === "/api/plugin/world-meta") {
@@ -1149,6 +1159,42 @@ async function handleEmptyChunkPrune(request, env) {
   });
 }
 
+async function handleChunkRegionMigration(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
+  const options = normalizeChunkRegionMigrationPayload(await request.json().catch(() => ({})));
+  if (!options.dryRun && options.deleteRegions && options.confirm !== "migrate-chunk-regions-v1") {
+    return json({ error: "migration_confirmation_required", confirm: "migrate-chunk-regions-v1" }, 400);
+  }
+
+  const page = await bucket.list({
+    prefix: options.prefix,
+    cursor: options.cursor || undefined,
+    limit: options.limit,
+  });
+  const objects = page.objects || [];
+  const results = [];
+  for (const object of objects) {
+    results.push(await migrateChunkRegionObject(bucket, object.key, options));
+  }
+
+  return json({
+    ok: true,
+    dryRun: options.dryRun,
+    prefix: options.prefix,
+    matched: objects.length,
+    migrated: results.reduce((sum, result) => sum + result.migrated, 0),
+    skippedEmpty: results.reduce((sum, result) => sum + result.skippedEmpty, 0),
+    invalidChunks: results.reduce((sum, result) => sum + result.invalidChunks, 0),
+    deletedRegions: results.filter((result) => result.deletedRegion).length,
+    cursor: page.truncated ? page.cursor || "" : null,
+    results,
+  });
+}
+
 async function handleMarkers(request, env, url) {
   const id = url.pathname.startsWith("/api/markers/") ? decodeURIComponent(url.pathname.slice("/api/markers/".length)) : "";
 
@@ -1530,6 +1576,25 @@ export function normalizeEmptyChunkPrunePayload(payload) {
   };
 }
 
+export function normalizeChunkRegionMigrationPayload(payload) {
+  const world = payload.world ? cleanSegment(payload.world) : "";
+  const dimension = payload.dimension ? cleanSegment(payload.dimension) : "";
+  const prefix =
+    world && dimension
+      ? `${CHUNK_REGION_PREFIX}${world}/${dimension}/`
+      : world
+        ? `${CHUNK_REGION_PREFIX}${world}/`
+        : CHUNK_REGION_PREFIX;
+  return {
+    prefix,
+    limit: Math.min(CHUNK_REGION_MIGRATION_MAX_LIMIT, Math.max(1, numberOrThrow(payload.limit ?? CHUNK_REGION_MIGRATION_DEFAULT_LIMIT, "limit"))),
+    cursor: typeof payload.cursor === "string" && payload.cursor.length > 0 ? payload.cursor : "",
+    dryRun: payload.dryRun !== false,
+    deleteRegions: payload.deleteRegions === true,
+    confirm: String(payload.confirm || ""),
+  };
+}
+
 export function normalizeMarkerPayload(payload) {
   const title = String(payload.title || "").trim();
   if (title.length < 1 || title.length > 80) {
@@ -1704,6 +1769,30 @@ async function readChunkRegions(bucket, query, chunksByCoord) {
   );
 }
 
+async function readChunkRegionsForMissingCoords(bucket, query, missingCoords, chunksByCoord) {
+  const groups = new Map();
+  for (const coord of missingCoords) {
+    const regionX = floorDiv(coord.chunkX, REGION_SIZE_CHUNKS);
+    const regionZ = floorDiv(coord.chunkZ, REGION_SIZE_CHUNKS);
+    const key = chunkRegionKey(query.world, query.dimension, regionX, regionZ);
+    if (!groups.has(key)) {
+      groups.set(key, new Set());
+    }
+    groups.get(key).add(coordKey(coord.chunkX, coord.chunkZ));
+  }
+
+  await mapWithConcurrency([...groups.entries()], 1, async ([key, wanted]) => {
+    const region = await readR2Json(await bucket.get(key));
+    for (const chunk of Array.isArray(region?.chunks) ? region.chunks : []) {
+      const normalized = normalizeOptionalChunkSnapshot(chunk);
+      if (!normalized || !wanted.has(coordKey(normalized.chunkX, normalized.chunkZ))) {
+        continue;
+      }
+      chunksByCoord.set(coordKey(normalized.chunkX, normalized.chunkZ), normalized);
+    }
+  });
+}
+
 async function readChunkSummariesForRange(bucket, query) {
   const chunkCount = chunkCountForRange(query);
   if (chunkCount < CHUNK_DIRECT_READ_LIMIT) {
@@ -1774,16 +1863,16 @@ async function readChunksForRange(bucket, query, options = {}) {
     await readChunkRegions(bucket, query, chunksByCoord);
   }
 
-  const missingKeys = [];
+  const coords = [];
   for (let chunkZ = query.minChunkZ; chunkZ <= query.maxChunkZ; chunkZ += 1) {
     for (let chunkX = query.minChunkX; chunkX <= query.maxChunkX; chunkX += 1) {
       if (!chunksByCoord.has(coordKey(chunkX, chunkZ))) {
-        missingKeys.push(chunkKey(query.world, query.dimension, chunkX, chunkZ));
+        coords.push({ chunkX, chunkZ });
       }
     }
   }
 
-  const readKeys = chunkCount < CHUNK_DIRECT_READ_LIMIT ? missingKeys : await listChunkKeysForRange(bucket, query);
+  const readKeys = chunkCount < CHUNK_DIRECT_READ_LIMIT ? coords.map((coord) => chunkKey(query.world, query.dimension, coord.chunkX, coord.chunkZ)) : await listChunkKeysForRange(bucket, query);
   await mapWithConcurrency(readKeys, options.readConcurrency || BATCH_WRITE_CONCURRENCY, async (key) => {
     const chunk = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(key)));
     if (chunk) {
@@ -1792,10 +1881,54 @@ async function readChunksForRange(bucket, query, options = {}) {
   });
 
   if (chunkCount < CHUNK_DIRECT_READ_LIMIT) {
-    await readChunkRegions(bucket, query, chunksByCoord);
+    const missingCoords = coords.filter((coord) => !chunksByCoord.has(coordKey(coord.chunkX, coord.chunkZ)));
+    if (missingCoords.length > 0) {
+      await readChunkRegionsForMissingCoords(bucket, query, missingCoords, chunksByCoord);
+    }
   }
 
   return chunksByCoord;
+}
+
+async function migrateChunkRegionObject(bucket, key, options) {
+  const region = await readR2Json(await bucket.get(key));
+  if (!region || !Array.isArray(region.chunks)) {
+    return { key, migrated: 0, skippedEmpty: 0, invalidChunks: 0, deletedRegion: false, invalidRegion: true };
+  }
+
+  let migrated = 0;
+  let skippedEmpty = 0;
+  let invalidChunks = 0;
+  const directKeys = [];
+  for (const chunk of region.chunks) {
+    const normalized = normalizeOptionalChunkSnapshot(chunk);
+    if (!normalized) {
+      invalidChunks += 1;
+      continue;
+    }
+    if (isEmptyChunkSnapshot(normalized)) {
+      skippedEmpty += 1;
+      continue;
+    }
+
+    const directKey = chunkKey(normalized.world, normalized.dimension, normalized.chunkX, normalized.chunkZ);
+    directKeys.push(directKey);
+    if (!options.dryRun) {
+      await bucket.put(directKey, JSON.stringify(normalized), {
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        customMetadata: { world: normalized.world, dimension: normalized.dimension },
+      });
+    }
+    migrated += 1;
+  }
+
+  let deletedRegion = false;
+  if (!options.dryRun && options.deleteRegions) {
+    await bucket.delete(key);
+    deletedRegion = true;
+  }
+
+  return { key, migrated, skippedEmpty, invalidChunks, deletedRegion, directKeys };
 }
 
 async function findEmptyChunksForRange(bucket, query) {
