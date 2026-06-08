@@ -26,12 +26,13 @@ const EMPTY_PNG = Uint8Array.from([
   73, 68, 65, 84, 120, 1, 99, 0, 1, 0, 0, 5, 0, 1, 54, 208, 136, 221, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
 ]);
 const MAP_TILE_MIN_ZOOM = -1;
-const MAP_TILE_MAX_ZOOM = 3;
 const MAP_TILE_BASE_ZOOM = 4;
+const MAP_TILE_MAX_ZOOM = MAP_TILE_BASE_ZOOM;
 const MAP_TILE_WRITE_CONCURRENCY = 8;
 const MAP_TILE_BACKFILL_WRITE_CONCURRENCY = 1;
 const MAP_TILE_BACKFILL_READ_CONCURRENCY = 4;
 const MAP_TILE_BACKFILL_WRITE_LIMIT = 1;
+const MAP_TILE_BACKFILL_BASE_WRITE_LIMIT = 50;
 const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
 const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
 const EMPTY_CHUNK_PRUNE_WRITE_LIMIT = 8;
@@ -685,7 +686,7 @@ async function handleMapTileBackfill(request, env) {
   const payload = normalizeMapTileBackfillPayload(await request.json());
   const tiles = mapTilesForChunkRange(payload);
   const start = payload.cursor ? Math.max(0, Math.min(tiles.length, Number(payload.cursor) || 0)) : 0;
-  const effectiveLimit = payload.dryRun ? payload.limit : Math.min(payload.limit, MAP_TILE_BACKFILL_WRITE_LIMIT);
+  const effectiveLimit = payload.dryRun ? payload.limit : mapTileBackfillWriteLimit(tiles, start, payload.limit);
   const selected = tiles.slice(start, start + effectiveLimit);
   const nextCursor = start + selected.length < tiles.length ? String(start + selected.length) : null;
   const rebuildVersion = payload.force ? Date.now() : 0;
@@ -1408,15 +1409,17 @@ export function normalizeMapTileBackfillPayload(payload) {
   if (maxChunkX < minChunkX || maxChunkZ < minChunkZ) {
     throw new Error("invalid chunk range");
   }
-  const zooms =
+  const requestedZoom =
     payload.zoom === undefined || payload.zoom === null
-      ? range(MAP_TILE_MIN_ZOOM, MAP_TILE_MAX_ZOOM)
-      : [normalizeMapTileZoom(payload.zoom)];
+      ? null
+      : normalizeMapTileZoom(payload.zoom);
+  const zooms = requestedZoom === null ? range(MAP_TILE_MIN_ZOOM, MAP_TILE_MAX_ZOOM) : [requestedZoom];
   const limit = Math.min(MAP_TILE_BACKFILL_MAX_LIMIT, Math.max(1, numberOrThrow(payload.limit ?? MAP_TILE_BACKFILL_DEFAULT_LIMIT, "limit")));
   return {
     world: cleanSegment(payload.world || "world"),
     dimension: cleanSegment(payload.dimension || "Overworld"),
     zooms,
+    requestedZoom,
     minChunkX,
     maxChunkX,
     minChunkZ,
@@ -1818,36 +1821,126 @@ async function rebuildMapTilesForChunks(bucket, chunks) {
 
 async function rebuildMapTiles(bucket, tiles, options = {}) {
   const textureColors = options.textureColors || (await loadTextureColorIndex(bucket));
-  return mapWithConcurrency(tiles, options.concurrency || MAP_TILE_WRITE_CONCURRENCY, (tile) => rebuildMapTile(bucket, tile, { ...options, textureColors }));
+  const indexedTiles = tiles.map((tile, index) => ({ tile, index }));
+  indexedTiles.sort((a, b) => b.tile.zoom - a.tile.zoom || a.tile.tileZ - b.tile.tileZ || a.tile.tileX - b.tile.tileX);
+  const results = new Array(tiles.length);
+  for (const zoom of [...new Set(indexedTiles.map(({ tile }) => tile.zoom))]) {
+    const group = indexedTiles.filter(({ tile }) => tile.zoom === zoom);
+    await mapWithConcurrency(group, options.concurrency || MAP_TILE_WRITE_CONCURRENCY, async ({ tile, index }) => {
+      results[index] = await rebuildMapTile(bucket, tile, { ...options, textureColors });
+    });
+  }
+  return results;
 }
 
 async function rebuildMapTile(bucket, tile, options = {}) {
+  if (normalizeMapTileZoom(tile.zoom) < MAP_TILE_BASE_ZOOM) {
+    return rebuildDerivedMapTile(bucket, tile, options);
+  }
+  return rebuildBaseMapTile(bucket, tile, options);
+}
+
+async function rebuildBaseMapTile(bucket, tile, options = {}) {
   const range = chunkRangeForMapTile(tile);
   const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range }, { readConcurrency: options.readConcurrency });
   const textureColors = options.textureColors || (await loadTextureColorIndex(bucket));
   const { png, hasPixels, tileVersion: sourceVersion, missingColors, missingColorReason } = renderMapTilePng(tile, chunksByCoord, textureColors);
   const nextTileVersion = Math.max(sourceVersion, options.rebuildVersion || 0);
   const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
-  if (!options.force) {
+  if (!options.force && sourceVersion > 0) {
     const existingSourceVersion = await mapTileObjectSourceVersion(bucket, key);
     if (existingSourceVersion > sourceVersion) {
       return { ...tile, key, skipped: true, deleted: false, tileVersion: nextTileVersion, sourceVersion, existingSourceVersion, chunks: chunksByCoord.size };
     }
   }
-  if (missingColors.length > 0) {
-    await bucket.delete(key);
-    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, missingColors, missingColorReason, chunks: chunksByCoord.size };
-  }
   if (!hasPixels) {
     await bucket.delete(key);
-    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, chunks: chunksByCoord.size };
+    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, missingColors, missingColorReason, chunks: chunksByCoord.size };
   }
   const buffer = PNG.sync.write(png, { colorType: 6, inputColorType: 6 });
   await bucket.put(key, buffer, {
     httpMetadata: { contentType: "image/png" },
     customMetadata: { world: tile.world, dimension: tile.dimension, zoom: String(tile.zoom), tileVersion: String(nextTileVersion), sourceVersion: String(sourceVersion) },
   });
-  return { ...tile, key, deleted: false, tileVersion: nextTileVersion, sourceVersion, chunks: chunksByCoord.size };
+  return { ...tile, key, deleted: false, tileVersion: nextTileVersion, sourceVersion, missingColors, missingColorReason, chunks: chunksByCoord.size };
+}
+
+async function rebuildDerivedMapTile(bucket, tile, options = {}) {
+  const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
+  const sourceZoom = tile.zoom + 1;
+  const sourceTiles = sourceMapTilesForDerivedTile(tile);
+  const sourceFactor = 2;
+  const sourceTileSize = MAP_TILE_SIZE / sourceFactor;
+  const minSourceTileX = tile.tileX * sourceFactor;
+  const minSourceTileZ = tile.tileZ * sourceFactor;
+  const png = new PNG({ width: MAP_TILE_SIZE, height: MAP_TILE_SIZE, colorType: 6 });
+  png.data.fill(0);
+
+  let hasPixels = false;
+  let sourceVersion = 0;
+  let sourceTileCount = 0;
+  const missingSourceTiles = [];
+  const invalidSourceTiles = [];
+
+  await mapWithConcurrency(sourceTiles, options.readConcurrency || MAP_TILE_BACKFILL_READ_CONCURRENCY, async (sourceTile) => {
+    const sourceKey = mapTileKey(sourceTile.world, sourceTile.dimension, sourceTile.zoom, sourceTile.tileX, sourceTile.tileZ);
+    const object = await bucket.get(sourceKey);
+    if (!object) {
+      missingSourceTiles.push(sourceKey);
+      return;
+    }
+    let sourcePng;
+    try {
+      sourcePng = PNG.sync.read(Buffer.from(await object.arrayBuffer()));
+    } catch (error) {
+      invalidSourceTiles.push({ key: sourceKey, error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    if (sourcePng.width !== MAP_TILE_SIZE || sourcePng.height !== MAP_TILE_SIZE) {
+      invalidSourceTiles.push({ key: sourceKey, error: `expected_${MAP_TILE_SIZE}x${MAP_TILE_SIZE}` });
+      return;
+    }
+    sourceTileCount += 1;
+    sourceVersion = Math.max(sourceVersion, mapTileObjectMetadataVersion(object));
+    const destX = (sourceTile.tileX - minSourceTileX) * sourceTileSize;
+    const destY = (sourceTile.tileZ - minSourceTileZ) * sourceTileSize;
+    if (downsampleBaseTileIntoPng(png, sourcePng, destX, destY, sourceTileSize)) {
+      hasPixels = true;
+    }
+  });
+
+  const nextTileVersion = Math.max(sourceVersion, options.rebuildVersion || 0);
+  if (invalidSourceTiles.length > 0) {
+    await bucket.delete(key);
+    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length, invalidSourceTiles };
+  }
+  if (!options.force && sourceVersion > 0) {
+    const existingSourceVersion = await mapTileObjectSourceVersion(bucket, key);
+    if (existingSourceVersion > sourceVersion) {
+      return { ...tile, key, skipped: true, deleted: false, tileVersion: nextTileVersion, sourceVersion, existingSourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length };
+    }
+  }
+  if (!hasPixels) {
+    await bucket.delete(key);
+    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length };
+  }
+  fillTransparentMapTileHoles(png, transparentFillPixelLimit(2 ** tile.zoom));
+  const buffer = PNG.sync.write(png, { colorType: 6, inputColorType: 6 });
+  await bucket.put(key, buffer, {
+    httpMetadata: { contentType: "image/png" },
+    customMetadata: {
+      world: tile.world,
+      dimension: tile.dimension,
+      zoom: String(tile.zoom),
+      tileVersion: String(nextTileVersion),
+      sourceVersion: String(sourceVersion),
+      sourceZoom: String(sourceZoom),
+      rootSourceZoom: String(MAP_TILE_BASE_ZOOM),
+      sourceTiles: String(sourceTileCount),
+      missingSourceTiles: String(missingSourceTiles.length),
+    },
+  });
+  return { ...tile, key, deleted: false, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length };
 }
 
 function renderMapTilePng(tile, chunksByCoord, textureColors) {
@@ -1856,9 +1949,6 @@ function renderMapTilePng(tile, chunksByCoord, textureColors) {
 
   const tileRange = chunkRangeForMapTile(tile);
   const blockScale = 2 ** tile.zoom;
-  if (blockScale < 1) {
-    return renderSubPixelMapTilePng(png, tileRange, blockScale, chunksByCoord, textureColors);
-  }
   let hasPixels = false;
   let tileVersion = 0;
   const missingColors = new Set();
@@ -1904,102 +1994,75 @@ function renderMapTilePng(tile, chunksByCoord, textureColors) {
   };
 }
 
-function renderSubPixelMapTilePng(png, tileRange, blockScale, chunksByCoord, textureColors) {
-  const blocksPerPixel = Math.round(1 / blockScale);
-  let hasPixels = false;
-  let tileVersion = 0;
-  const missingColors = new Set();
-
-  for (const chunk of chunksByCoord.values()) {
-    tileVersion = Math.max(tileVersion, chunk.updatedAt || 0);
-  }
-
-  for (let pixelY = 0; pixelY < MAP_TILE_SIZE; pixelY += 1) {
-    for (let pixelX = 0; pixelX < MAP_TILE_SIZE; pixelX += 1) {
-      const color = aggregateMapTilePixelColor(
-        tileRange.minBlockX + pixelX * blocksPerPixel,
-        tileRange.minBlockZ + pixelY * blocksPerPixel,
-        blocksPerPixel,
-        chunksByCoord,
-        textureColors,
-        missingColors,
-      );
-      if (!color) {
-        continue;
-      }
-      const offset = (pixelY * MAP_TILE_SIZE + pixelX) * 4;
-      png.data[offset] = color[0];
-      png.data[offset + 1] = color[1];
-      png.data[offset + 2] = color[2];
-      png.data[offset + 3] = color[3];
-      hasPixels = true;
-    }
-  }
-
-  if (hasPixels) {
-    fillTransparentMapTileHoles(png, transparentFillPixelLimit(blockScale));
-  }
-  return {
-    png,
-    hasPixels,
-    tileVersion,
-    missingColors: [...missingColors].sort(),
-    missingColorReason: missingColors.size > 0 ? textureColors.reason || "texture_color_missing" : "",
-  };
-}
-
-function aggregateMapTilePixelColor(startWorldX, startWorldZ, blocksPerPixel, chunksByCoord, textureColors, missingColors) {
-  const colors = [];
-  for (let offsetZ = 0; offsetZ < blocksPerPixel; offsetZ += 1) {
-    for (let offsetX = 0; offsetX < blocksPerPixel; offsetX += 1) {
-      const worldX = startWorldX + offsetX;
-      const worldZ = startWorldZ + offsetZ;
-      const chunk = chunksByCoord.get(coordKey(floorDiv(worldX, 16), floorDiv(worldZ, 16)));
-      if (!chunk) {
-        continue;
-      }
-      const localX = mod(worldX, 16);
-      const localZ = mod(worldZ, 16);
-      const index = localZ * 16 + localX;
-      const height = chunk.heights[index] ?? MIN_COLUMN_HEIGHT;
-      const blockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
-      const blockState = chunk.blockStates[index] || {};
-      const overlayHeight = chunk.overlayHeights[index] ?? MIN_COLUMN_HEIGHT;
-      const overlayBlockId = overlayHeight > MIN_COLUMN_HEIGHT ? chunk.palette[chunk.overlayBlocks[index]] || "minecraft:air" : "minecraft:air";
-      const overlayState = chunk.overlayStates[index] || {};
-      if (isAirBlock(blockId) && (isAirBlock(overlayBlockId) || overlayHeight <= MIN_COLUMN_HEIGHT)) {
-        continue;
-      }
-      const color = mapTileColumnColor(blockId, blockState, overlayBlockId, overlayState, Math.max(height, overlayHeight), worldX, worldZ, chunksByCoord, textureColors, missingColors);
-      if (color) {
-        colors.push(color);
-      }
-    }
-  }
-  return averageRgbaColors(colors);
-}
-
-function averageRgbaColors(colors) {
-  if (colors.length < 1) {
-    return null;
-  }
-  let red = 0;
-  let green = 0;
-  let blue = 0;
-  let alpha = 0;
-  for (const color of colors) {
-    red += color[0];
-    green += color[1];
-    blue += color[2];
-    alpha += color[3];
-  }
-  return [clampByte(red / colors.length), clampByte(green / colors.length), clampByte(blue / colors.length), clampByte(alpha / colors.length)];
-}
-
 async function mapTileObjectSourceVersion(bucket, key) {
   const existing = await bucket.get(key);
   const version = Number(existing?.customMetadata?.sourceVersion || 0);
   return Number.isFinite(version) ? version : 0;
+}
+
+function mapTileObjectMetadataVersion(object) {
+  const version = Number(object?.customMetadata?.sourceVersion || object?.customMetadata?.tileVersion || 0);
+  return Number.isFinite(version) ? version : 0;
+}
+
+function sourceMapTilesForDerivedTile(tile) {
+  const sourceZoom = normalizeMapTileZoom(tile.zoom + 1);
+  const factor = 2;
+  const minTileX = tile.tileX * factor;
+  const minTileZ = tile.tileZ * factor;
+  const tiles = [];
+  for (const tileZ of range(minTileZ, minTileZ + factor - 1)) {
+    for (const tileX of range(minTileX, minTileX + factor - 1)) {
+      tiles.push({ world: tile.world, dimension: tile.dimension, zoom: sourceZoom, tileX, tileZ });
+    }
+  }
+  return tiles;
+}
+
+function downsampleBaseTileIntoPng(target, source, destX, destY, destSize) {
+  const scale = MAP_TILE_SIZE / destSize;
+  let hasPixels = false;
+  for (let y = 0; y < destSize; y += 1) {
+    for (let x = 0; x < destSize; x += 1) {
+      const color = averagePngRect(source, x * scale, y * scale, scale, scale);
+      if (!color) {
+        continue;
+      }
+      const offset = ((destY + y) * MAP_TILE_SIZE + destX + x) * 4;
+      target.data[offset] = color[0];
+      target.data[offset + 1] = color[1];
+      target.data[offset + 2] = color[2];
+      target.data[offset + 3] = color[3];
+      hasPixels = true;
+    }
+  }
+  return hasPixels;
+}
+
+function averagePngRect(png, x, y, width, height) {
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  let alpha = 0;
+  let samples = 0;
+  for (let pixelY = y; pixelY < y + height; pixelY += 1) {
+    for (let pixelX = x; pixelX < x + width; pixelX += 1) {
+      const offset = (pixelY * png.width + pixelX) * 4;
+      const pixelAlpha = png.data[offset + 3];
+      if (pixelAlpha < 1) {
+        continue;
+      }
+      red += png.data[offset] * pixelAlpha;
+      green += png.data[offset + 1] * pixelAlpha;
+      blue += png.data[offset + 2] * pixelAlpha;
+      alpha += pixelAlpha;
+      samples += 1;
+    }
+  }
+  if (samples < 1 || alpha < 1) {
+    return null;
+  }
+  return [clampByte(red / alpha), clampByte(green / alpha), clampByte(blue / alpha), clampByte(alpha / samples)];
 }
 
 async function loadTextureColorIndex(bucket) {
@@ -2397,7 +2460,20 @@ function mapTilesForChunkRange(payload) {
       }
     }
   }
-  return tiles.sort((a, b) => a.zoom - b.zoom || a.tileZ - b.tileZ || a.tileX - b.tileX);
+  return tiles.sort((a, b) => b.zoom - a.zoom || a.tileZ - b.tileZ || a.tileX - b.tileX);
+}
+
+function mapTileBackfillWriteLimit(tiles, start, limit) {
+  const first = tiles[start];
+  if (!first) {
+    return 0;
+  }
+  const maxLimit = first.zoom === MAP_TILE_BASE_ZOOM ? MAP_TILE_BACKFILL_BASE_WRITE_LIMIT : MAP_TILE_BACKFILL_WRITE_LIMIT;
+  let count = 0;
+  while (count < limit && count < maxLimit && tiles[start + count]?.zoom === first.zoom) {
+    count += 1;
+  }
+  return Math.max(1, count);
 }
 
 export function chunkRangeForMapTile(tile) {
