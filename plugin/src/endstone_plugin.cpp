@@ -1512,6 +1512,14 @@ private:
         return transport.curl_code != 0 || transport.response_code == 0 || transport.response_code >= 500;
     }
 
+    [[nodiscard]] static bool shouldSplitChunkBatchRetry(const livemap::TransportResult &transport,
+                                                         const std::size_t chunk_count)
+    {
+        return chunk_count > 1 && (transport.response_code == 500 || transport.response_code == 503) &&
+               (transport.body.find("1101") != std::string::npos ||
+                transport.body.find("1102") != std::string::npos);
+    }
+
     void processPlayerUploadResults()
     {
         if (player_dispatcher_ == nullptr) {
@@ -1638,9 +1646,18 @@ private:
                 if (active_ && shouldBackoffChunkBatchRetry(result.transport)) {
                     restorePendingChunkUploads(std::move(result.snapshots), std::move(result.chunks));
                     const auto retry_after_ms = delayChunkBatchRetry();
-                    background_log_.warning("Delayed retry for failed live map chunk batch by ",
-                                            retry_after_ms / 1000, "s; response=", responseSnippet(result.transport.body),
-                                            ".");
+                    if (shouldSplitChunkBatchRetry(result.transport, result.update_count)) {
+                        settings_.chunk_upload_batch_size = std::max(1, settings_.chunk_upload_batch_size / 2);
+                        background_log_.warning("Delayed retry for Worker resource-limited live map chunk batch by ",
+                                                retry_after_ms / 1000, "s; reduced chunkUploadBatchSize=",
+                                                settings_.chunk_upload_batch_size, " response=",
+                                                responseSnippet(result.transport.body), ".");
+                    }
+                    else {
+                        background_log_.warning("Delayed retry for failed live map chunk batch by ",
+                                                retry_after_ms / 1000, "s; response=",
+                                                responseSnippet(result.transport.body), ".");
+                    }
                     continue;
                 }
             }
