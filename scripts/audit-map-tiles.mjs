@@ -5,8 +5,8 @@ import { PNG } from "pngjs";
 const TILE_SIZE = 256;
 const REGION_SIZE_CHUNKS = 16;
 const MAP_TILE_MIN_ZOOM = -1;
-const MAP_TILE_MAX_ZOOM = 3;
 const MAP_TILE_BASE_ZOOM = 4;
+const MAP_TILE_MAX_ZOOM = MAP_TILE_BASE_ZOOM;
 const MIN_COLUMN_HEIGHT = -64;
 
 class HttpError extends Error {
@@ -23,11 +23,13 @@ const args = parseArgs(process.argv.slice(2));
 
 try {
   const summary =
-    args.mode === "repair"
-      ? await repairUntilClean(args)
-      : await auditMapTiles(args);
+    args.mode === "rebuild"
+      ? await rebuildMapTilesAndAudit(args)
+      : args.mode === "repair"
+        ? await repairUntilClean(args)
+        : await auditMapTiles(args);
   console.log(JSON.stringify(summary, null, 2));
-  if ((args.failOnMismatch || args.mode === "repair") && summary.mismatchCount > 0) {
+  if ((args.failOnMismatch || args.mode === "repair" || args.mode === "rebuild") && summary.mismatchCount > 0) {
     process.exitCode = 2;
   }
 } catch (error) {
@@ -47,8 +49,10 @@ function parseArgs(argv) {
     repairLimit: Number.POSITIVE_INFINITY,
     requestTimeoutMs: 45000,
     requestRetries: 3,
+    cleanupLimit: 500,
     world: "",
     dimension: "",
+    deleteExisting: false,
     failOnMismatch: false,
     sampleOnly: false,
   };
@@ -57,8 +61,8 @@ function parseArgs(argv) {
   if (values[0] && !values[0].startsWith("-")) {
     options.mode = values.shift();
   }
-  if (!["audit", "repair"].includes(options.mode)) {
-    throw new Error("Usage: node scripts/audit-map-tiles.mjs [audit|repair] [--worker-url <url>] [--token <token>] [--world <world>] [--dimension <dimension>]");
+  if (!["audit", "repair", "rebuild"].includes(options.mode)) {
+    throw new Error("Usage: node scripts/audit-map-tiles.mjs [audit|repair|rebuild] [--worker-url <url>] [--token <token>] [--world <world>] [--dimension <dimension>]");
   }
 
   for (let index = 0; index < values.length; index += 1) {
@@ -85,6 +89,10 @@ function parseArgs(argv) {
       options.requestTimeoutMs = Math.max(1000, numberValue(values, ++index, flag));
     } else if (flag === "--request-retries") {
       options.requestRetries = Math.max(0, numberValue(values, ++index, flag));
+    } else if (flag === "--cleanup-limit") {
+      options.cleanupLimit = Math.max(1, numberValue(values, ++index, flag));
+    } else if (flag === "--delete-existing") {
+      options.deleteExisting = true;
     } else if (flag === "--fail-on-mismatch") {
       options.failOnMismatch = true;
     } else if (flag === "--sample-only") {
@@ -97,6 +105,9 @@ function parseArgs(argv) {
   options.workerUrl = options.workerUrl.replace(/\/+$/, "");
   options.chunkConcurrency = options.chunkConcurrency || options.concurrency;
   options.tileConcurrency = options.tileConcurrency || options.concurrency;
+  if (options.deleteExisting && options.sampleOnly) {
+    throw new Error("--delete-existing cannot be combined with --sample-only");
+  }
   return options;
 }
 
@@ -249,8 +260,90 @@ async function repairUntilClean(options) {
   };
 }
 
+async function rebuildMapTilesAndAudit(options) {
+  if (!options.token) {
+    throw new Error("rebuild mode requires --token or PLUGIN_TOKEN");
+  }
+
+  const startedAt = new Date().toISOString();
+  const worlds = await fetchJson(`${options.workerUrl}/api/worlds`, {}, options);
+  const metas = (worlds.worlds || []).filter((meta) => {
+    if (options.world && meta.world !== options.world) {
+      return false;
+    }
+    if (options.dimension && meta.dimension !== options.dimension) {
+      return false;
+    }
+    return meta.bounds && meta.chunkCount > 0;
+  });
+  if (metas.length < 1) {
+    throw new Error("no matching worlds with map bounds found");
+  }
+
+  const cleanup = options.deleteExisting ? await deleteMapTileObjects(options) : null;
+  const rebuilds = [];
+  for (const meta of metas) {
+    const ranges = chunkScanRanges(meta.bounds, meta.sampleChunks || [], options.sampleOnly);
+    console.error(`Rebuilding ${meta.world}/${meta.dimension}: ${ranges.length} chunk ranges`);
+    const byZoom = {};
+    for (let zoom = MAP_TILE_BASE_ZOOM; zoom >= MAP_TILE_MIN_ZOOM; zoom -= 1) {
+      byZoom[`z${zoom}`] = { calls: 0, matched: 0, written: 0, deleted: 0 };
+      for (const range of ranges) {
+        const result = await backfillAllMapTilesForRange(options, meta, range, zoom);
+        byZoom[`z${zoom}`].calls += result.calls;
+        byZoom[`z${zoom}`].matched += result.matched;
+        byZoom[`z${zoom}`].written += result.written;
+        byZoom[`z${zoom}`].deleted += result.deleted;
+      }
+      console.error(`Rebuilt ${meta.world}/${meta.dimension} z${zoom}: ${JSON.stringify(byZoom[`z${zoom}`])}`);
+    }
+    rebuilds.push({ world: meta.world, dimension: meta.dimension, ranges: ranges.length, byZoom });
+  }
+
+  const audit = await auditMapTiles(options);
+  return {
+    ...audit,
+    mode: "rebuild",
+    startedAt,
+    cleanup,
+    rebuilds,
+  };
+}
+
 async function repairMapTile(options, issue) {
   const range = chunkRangeForMapTile(issue);
+  if (issue.zoom < MAP_TILE_BASE_ZOOM) {
+    await repairBaseTilesForRange(options, issue, range);
+  }
+  const body = await backfillOneMapTilePage(options, issue, range, issue.zoom, { limit: 1 });
+  return {
+    tile: mapTileRefKey(issue),
+    written: body.written || 0,
+    deleted: Boolean(body.tiles?.[0]?.deleted),
+  };
+}
+
+async function repairBaseTilesForRange(options, issue, range) {
+  for (let zoom = MAP_TILE_BASE_ZOOM; zoom > issue.zoom; zoom -= 1) {
+    await backfillAllMapTilesForRange(options, issue, range, zoom);
+  }
+}
+
+async function backfillAllMapTilesForRange(options, meta, range, zoom) {
+  const stats = { calls: 0, matched: 0, written: 0, deleted: 0 };
+  let cursor = "";
+  do {
+    const body = await backfillOneMapTilePage(options, meta, range, zoom, { cursor, limit: 100 });
+    stats.calls += 1;
+    stats.matched += body.matched || 0;
+    stats.written += body.written || 0;
+    stats.deleted += (body.tiles || []).filter((tile) => tile.deleted).length;
+    cursor = body.cursor || "";
+  } while (cursor);
+  return stats;
+}
+
+async function backfillOneMapTilePage(options, meta, range, zoom, { cursor = "", limit = 100 } = {}) {
   const response = await fetchWithRetry(`${options.workerUrl}/api/plugin/map-tiles/backfill`, {
     method: "POST",
     headers: {
@@ -258,28 +351,54 @@ async function repairMapTile(options, issue) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      world: issue.world,
-      dimension: issue.dimension,
-      zoom: issue.zoom,
+      world: meta.world,
+      dimension: meta.dimension,
+      zoom,
       minChunkX: range.minChunkX,
       maxChunkX: range.maxChunkX,
       minChunkZ: range.minChunkZ,
       maxChunkZ: range.maxChunkZ,
+      cursor,
       dryRun: false,
       force: true,
-      limit: 1,
+      limit,
     }),
   }, options);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(`backfill failed for ${mapTileRefKey(issue)}: HTTP ${response.status} ${JSON.stringify(body)}`);
+    throw new Error(`backfill failed for ${meta.world}/${meta.dimension}/z${zoom} ${formatChunkRange(range)} cursor ${cursor || "0"}: HTTP ${response.status} ${JSON.stringify(body)}`);
   }
-  return {
-    tile: mapTileRefKey(issue),
-    status: response.status,
-    written: body.written || 0,
-    deleted: Boolean(body.tiles?.[0]?.deleted),
-  };
+  return body;
+}
+
+async function deleteMapTileObjects(options) {
+  const stats = { prefix: "map-tiles/v1/", calls: 0, matched: 0, deleted: 0 };
+  let cursor = "";
+  do {
+    const response = await fetchWithRetry(`${options.workerUrl}/api/plugin/map-data/cleanup`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${options.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prefix: stats.prefix,
+        cursor,
+        limit: options.cleanupLimit,
+        dryRun: false,
+        confirm: "delete-map-data-v1",
+      }),
+    }, options);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(`map tile cleanup failed at cursor ${cursor || "0"}: HTTP ${response.status} ${JSON.stringify(body)}`);
+    }
+    stats.calls += 1;
+    stats.matched += body.matched || 0;
+    stats.deleted += body.deleted || 0;
+    cursor = body.cursor || "";
+  } while (cursor);
+  return stats;
 }
 
 async function inspectMapTile(options, tile) {
