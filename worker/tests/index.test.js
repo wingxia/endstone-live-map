@@ -265,9 +265,20 @@ async function backfillMapTile(env, payload) {
   );
 }
 
+async function backfillAllMapTiles(env, payload) {
+  let cursor = "";
+  let response;
+  do {
+    response = await backfillMapTile(env, { ...payload, cursor });
+    const body = await response.clone().json();
+    cursor = body.cursor || "";
+  } while (cursor);
+  return response;
+}
+
 async function backfillMapTileSourceChain(env, payload) {
   for (let zoom = 4; zoom > payload.zoom; zoom -= 1) {
-    await backfillMapTile(env, { ...payload, zoom, dryRun: false, force: true, limit: 100 });
+    await backfillAllMapTiles(env, { ...payload, zoom, dryRun: false, force: true, limit: 100 });
   }
   return backfillMapTile(env, payload);
 }

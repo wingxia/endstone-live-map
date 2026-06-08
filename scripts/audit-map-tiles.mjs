@@ -162,6 +162,14 @@ async function auditMapTiles(options) {
 }
 
 async function auditWorld(options, meta) {
+  const { stats, tiles } = await collectExpectedMapTiles(options, meta);
+  console.error(`Checking ${meta.world}/${meta.dimension}: ${tiles.length} image tiles`);
+  const checkedTiles = await mapWithConcurrency(tiles, options.tileConcurrency, (tile) => inspectMapTile(options, tile));
+  const issues = checkedTiles.filter((tile) => tile.issue);
+  return { ...stats, issues };
+}
+
+async function collectExpectedMapTiles(options, meta) {
   const tileRefs = new Map();
   const ranges = chunkScanRanges(meta.bounds, meta.sampleChunks || [], options.sampleOnly);
   const stats = {
@@ -204,10 +212,7 @@ async function auditWorld(options, meta) {
 
   const tiles = [...tileRefs.values()].sort((a, b) => a.zoom - b.zoom || a.tileZ - b.tileZ || a.tileX - b.tileX);
   stats.uniqueTiles = tiles.length;
-  console.error(`Checking ${meta.world}/${meta.dimension}: ${tiles.length} image tiles`);
-  const checkedTiles = await mapWithConcurrency(tiles, options.tileConcurrency, (tile) => inspectMapTile(options, tile));
-  const issues = checkedTiles.filter((tile) => tile.issue);
-  return { ...stats, issues };
+  return { stats, tiles };
 }
 
 async function fetchChunksForAuditRange(options, meta, range, stats) {
@@ -283,13 +288,13 @@ async function rebuildMapTilesAndAudit(options) {
   const cleanup = options.deleteExisting ? await deleteMapTileObjects(options) : null;
   const rebuilds = [];
   for (const meta of metas) {
-    const ranges = chunkScanRanges(meta.bounds, meta.sampleChunks || [], options.sampleOnly);
-    console.error(`Rebuilding ${meta.world}/${meta.dimension}: ${ranges.length} chunk ranges`);
+    const { stats, tiles } = await collectExpectedMapTiles(options, meta);
+    console.error(`Rebuilding ${meta.world}/${meta.dimension}: ${tiles.length} expected image tiles from ${stats.nonAirChunks} non-air chunks`);
     const byZoom = {};
     for (let zoom = MAP_TILE_BASE_ZOOM; zoom >= MAP_TILE_MIN_ZOOM; zoom -= 1) {
       byZoom[`z${zoom}`] = { calls: 0, matched: 0, written: 0, deleted: 0 };
-      for (const range of ranges) {
-        const result = await backfillAllMapTilesForRange(options, meta, range, zoom);
+      for (const tile of tiles.filter((candidate) => candidate.zoom === zoom)) {
+        const result = await backfillAllMapTilesForRange(options, tile, chunkRangeForMapTile(tile), zoom);
         byZoom[`z${zoom}`].calls += result.calls;
         byZoom[`z${zoom}`].matched += result.matched;
         byZoom[`z${zoom}`].written += result.written;
@@ -297,7 +302,7 @@ async function rebuildMapTilesAndAudit(options) {
       }
       console.error(`Rebuilt ${meta.world}/${meta.dimension} z${zoom}: ${JSON.stringify(byZoom[`z${zoom}`])}`);
     }
-    rebuilds.push({ world: meta.world, dimension: meta.dimension, ranges: ranges.length, byZoom });
+    rebuilds.push({ world: meta.world, dimension: meta.dimension, scannedRanges: stats.scannedRanges, nonAirChunks: stats.nonAirChunks, uniqueTiles: tiles.length, byZoom });
   }
 
   const audit = await auditMapTiles(options);
