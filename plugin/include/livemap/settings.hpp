@@ -25,12 +25,14 @@ struct LiveMapSettings {
     int player_seed_join_delay_seconds = 10;
     int chunk_upload_batch_size = 8;
     int chunk_upload_flush_seconds = 10;
+    int chunk_upload_cooldown_seconds = 60;
     int http_timeout_seconds = 30;
     int dirty_block_push_seconds = 60;
     int land_push_seconds = 60;
     int max_dirty_blocks_per_push = 2048;
     int max_dirty_chunks_per_push = 64;
     int max_upload_queue_size = 256;
+    int max_pending_chunk_uploads = 4096;
     bool upload_chunks = true;
     bool auto_seed_chunks = false;
     bool upload_dirty_blocks = true;

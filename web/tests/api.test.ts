@@ -2,7 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import { chunkUrl, landsUrl, mapImageTileUrl, segmentKey, textureAtlasUrl, type BlockUpdate, type ChunkSnapshot, type WorldMeta } from "../src/api";
 import { blockColumnIndex, blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "../src/ui/coords";
-import { chunkFetchRanges, chunkRangeForTile, fallbackTextureColor, isImageTileZoom, lowZoomTileCoverage, tileIntersectsChunkBounds, usesMapTint, usesTransparentTextureUnderlay } from "../src/ui/chunkLayer";
+import {
+  blockFacingEdgeForState,
+  chunkFetchRanges,
+  chunkRangeForTile,
+  fallbackTextureColor,
+  isImageTileZoom,
+  lowZoomTileCoverage,
+  slabHalfForState,
+  tileIntersectsChunkBounds,
+  usesMapTint,
+  usesTransparentTextureUnderlay,
+} from "../src/ui/chunkLayer";
 import { isMapDecorationBlock, isPlantBlock } from "../src/ui/mapBlocks";
 
 describe("api helpers", () => {
@@ -274,5 +285,34 @@ describe("api helpers", () => {
     expect(blockToChunk(0, 0)).toEqual({ chunkX: 0, chunkZ: 0, localX: 0, localZ: 0 });
     expect(blockToChunk(-1, -17)).toEqual({ chunkX: -1, chunkZ: -2, localX: 15, localZ: 15 });
     expect(blockColumnIndex(15, 2)).toBe(47);
+  });
+
+  it("maps Bedrock partial-block direction states to map edges", () => {
+    expect(blockFacingEdgeForState({ direction: 0 })).toBe("south");
+    expect(blockFacingEdgeForState({ direction: 1 })).toBe("west");
+    expect(blockFacingEdgeForState({ direction: 2 })).toBe("north");
+    expect(blockFacingEdgeForState({ direction: 3 })).toBe("east");
+    expect(blockFacingEdgeForState({ direction: 0 }, "minecraft:oak_trapdoor")).toBe("west");
+    expect(blockFacingEdgeForState({ direction: 1 }, "minecraft:oak_trapdoor")).toBe("east");
+    expect(blockFacingEdgeForState({ direction: 2 }, "minecraft:oak_trapdoor")).toBe("north");
+    expect(blockFacingEdgeForState({ direction: 3 }, "minecraft:oak_trapdoor")).toBe("south");
+    expect(blockFacingEdgeForState({ weirdo_direction: 0 }, "minecraft:oak_stairs")).toBe("east");
+    expect(blockFacingEdgeForState({ weirdo_direction: 1 }, "minecraft:oak_stairs")).toBe("west");
+    expect(blockFacingEdgeForState({ weirdo_direction: 2 }, "minecraft:oak_stairs")).toBe("south");
+    expect(blockFacingEdgeForState({ weirdo_direction: 3 }, "minecraft:oak_stairs")).toBe("north");
+    expect(blockFacingEdgeForState({ facing_direction: 2 })).toBe("north");
+    expect(blockFacingEdgeForState({ facing_direction: 3 })).toBe("south");
+    expect(blockFacingEdgeForState({ facing_direction: 4 })).toBe("west");
+    expect(blockFacingEdgeForState({ facing_direction: 5 })).toBe("east");
+    expect(blockFacingEdgeForState({ facing: "north" })).toBe("north");
+    expect(blockFacingEdgeForState({ facing: "3" })).toBe("east");
+  });
+
+  it("maps slab and trapdoor vertical-half states for fallback rendering", () => {
+    expect(slabHalfForState({ top_slot_bit: true }, "minecraft:oak_slab")).toBe("top");
+    expect(slabHalfForState({ upside_down_bit: true }, "minecraft:oak_slab")).toBe("top");
+    expect(slabHalfForState({ "minecraft:vertical_half": "bottom" }, "minecraft:oak_slab")).toBe("bottom");
+    expect(slabHalfForState({ stone_slab_type: "double" }, "minecraft:stone_slab")).toBe("double");
+    expect(slabHalfForState({}, "minecraft:double_stone_slab")).toBe("double");
   });
 });

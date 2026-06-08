@@ -19,7 +19,9 @@ const MAX_BLOCK_UPDATE_BATCH_UPDATES = 4096;
 const MAX_BLOCK_UPDATE_BATCH_CHUNKS = 256;
 const REGION_SIZE_CHUNKS = 16;
 const BATCH_WRITE_CONCURRENCY = 32;
+const LIVE_UPLOAD_WRITE_CONCURRENCY = 8;
 const MAP_TILE_PREFIX = "map-tiles/v1/";
+const MAP_TILE_DIRTY_PREFIX = "map-tile-dirty/v1/";
 const MAP_TILE_SIZE = 256;
 const EMPTY_PNG = Uint8Array.from([
   137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10,
@@ -29,6 +31,11 @@ const MAP_TILE_MIN_ZOOM = -1;
 const MAP_TILE_BASE_ZOOM = 4;
 const MAP_TILE_MAX_ZOOM = MAP_TILE_BASE_ZOOM;
 const MAP_TILE_WRITE_CONCURRENCY = 8;
+const LIVE_UPLOAD_MAP_TILE_WRITE_CONCURRENCY = 1;
+const LIVE_UPLOAD_MAP_TILE_READ_CONCURRENCY = 2;
+const MAP_TILE_DRAIN_DEFAULT_LIMIT = 25;
+const MAP_TILE_DRAIN_MAX_LIMIT = 100;
+const MAP_TILE_CRON_DRAIN_LIMIT = 50;
 const MAP_TILE_BACKFILL_WRITE_CONCURRENCY = 1;
 const MAP_TILE_BACKFILL_READ_CONCURRENCY = 4;
 const MAP_TILE_BACKFILL_WRITE_LIMIT = 1;
@@ -43,7 +50,7 @@ const WORLD_META_SAMPLE_LIMIT = 128;
 const CLEANUP_CONFIRMATION = "delete-map-data-v1";
 const CLEANUP_DEFAULT_LIMIT = 200;
 const CLEANUP_MAX_LIMIT = 500;
-const CLEANUP_PREFIXES = new Set(["chunks/v1/", "chunk-regions/v1/", MAP_TILE_PREFIX, "meta/v1/", "lands/v1/", "Bedrock_level/", "world/"]);
+const CLEANUP_PREFIXES = new Set(["chunks/v1/", "chunk-regions/v1/", MAP_TILE_PREFIX, MAP_TILE_DIRTY_PREFIX, "meta/v1/", "lands/v1/", "Bedrock_level/", "world/"]);
 const TEXTURE_MANIFEST_KEY = "textures/v1/manifest.json";
 const TEXTURE_ATLAS_KEY = "textures/v1/atlas.png";
 const TEXTURE_REPORT_KEY = "textures/v1/report.json";
@@ -186,7 +193,7 @@ export default {
         if (auth) {
           return auth;
         }
-        return handleLandUpload(request, env);
+        return handleLandUpload(request, env, ctx);
       }
 
       if (url.pathname === "/api/plugin/textures") {
@@ -211,6 +218,14 @@ export default {
           return auth;
         }
         return handleMapTileBackfill(request, env);
+      }
+
+      if (url.pathname === "/api/plugin/map-tiles/drain") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleMapTileDrain(request, env);
       }
 
       if (url.pathname.startsWith("/api/map-tiles/")) {
@@ -256,6 +271,17 @@ export default {
       return json({ error: "not_found" }, 404);
     } catch (error) {
       return json({ error: "internal_error", message: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  },
+
+  async scheduled(_event, env, ctx) {
+    const bucket = mapBucket(env);
+    if (!bucket) {
+      return;
+    }
+    const pending = scheduleBackgroundTask(ctx, "drain dirty map tiles", () => drainDirtyMapTiles(bucket, { limit: MAP_TILE_CRON_DRAIN_LIMIT }));
+    if (pending) {
+      await pending;
     }
   },
 };
@@ -328,9 +354,19 @@ async function handleChunkUpload(request, env, ctx) {
     return json({ ok: true, skippedEmpty: 1, rejected: emptySnapshots, updates: 0 });
   }
   const result = await putChunkSnapshot(bucket, snapshot, { env, broadcast: false, diffForViewers: true });
-  const tiles = await scheduleMapTilesForChunks(ctx, bucket, [snapshot]);
-  await broadcastChunkSnapshot(env, snapshot, result.blockUpdates);
-  await scheduleWorldMetaForChunks(ctx, bucket, [snapshot]);
+  const tileSchedule = scheduleMapTilesForChunks(ctx, bucket, [snapshot], { liveUpload: true });
+  const metaPending = scheduleWorldMetaForChunks(ctx, bucket, [snapshot]);
+  const broadcastPending = scheduleBackgroundTask(ctx, "broadcast chunk snapshot", () => broadcastChunkSnapshot(env, snapshot, result.blockUpdates));
+  if (tileSchedule.pending) {
+    await tileSchedule.pending;
+  }
+  if (metaPending) {
+    await metaPending;
+  }
+  if (broadcastPending) {
+    await broadcastPending;
+  }
+  const tiles = tileSchedule.tiles;
   return json({ ok: true, key: result.key, updates: result.updates, tiles });
 }
 
@@ -355,36 +391,27 @@ async function handleChunkBatchUpload(request, env, ctx) {
     return json({ ok: true, storage, chunks: 0, skippedEmpty: emptySnapshots.length, rejected: emptySnapshots, keys: [], updates: 0 });
   }
 
-  if (storage === "region") {
-    const results = await putChunkRegionSnapshots(bucket, writableSnapshots);
-    const tiles = await scheduleMapTilesForChunks(ctx, bucket, writableSnapshots);
-    if (broadcast) {
-      await broadcastChunksReady(env, writableSnapshots);
-    }
-    await scheduleWorldMetaForChunks(ctx, bucket, writableSnapshots);
-    return json({
-      ok: true,
-      storage,
-      chunks: writableSnapshots.length,
-      skippedEmpty: emptySnapshots.length,
-      rejected: emptySnapshots,
-      regions: results.length,
-      keys: results.map((result) => result.key),
-      updates: 0,
-      tiles,
-    });
+  const results = await mapWithConcurrency(writableSnapshots, LIVE_UPLOAD_WRITE_CONCURRENCY, (snapshot) =>
+    putChunkSnapshot(bucket, snapshot, { env, broadcast: false, diffForViewers: false }),
+  );
+  const tileSchedule = scheduleMapTilesForChunks(ctx, bucket, writableSnapshots, { liveUpload: true });
+  const metaPending = scheduleWorldMetaForChunks(ctx, bucket, writableSnapshots);
+  const broadcastPending = broadcast ? scheduleBackgroundTask(ctx, "broadcast chunk batch", () => broadcastChunksReady(env, writableSnapshots)) : null;
+  if (tileSchedule.pending) {
+    await tileSchedule.pending;
   }
-
-  const results = await mapWithConcurrency(writableSnapshots, BATCH_WRITE_CONCURRENCY, (snapshot) => putChunkSnapshot(bucket, snapshot, { env, broadcast: false, diffForViewers: broadcast }));
-  const tiles = await scheduleMapTilesForChunks(ctx, bucket, writableSnapshots);
-  if (broadcast) {
-    await mapWithConcurrency(results, MAP_TILE_WRITE_CONCURRENCY, (result, index) => broadcastChunkSnapshot(env, writableSnapshots[index], result.blockUpdates));
+  if (metaPending) {
+    await metaPending;
   }
-  await scheduleWorldMetaForChunks(ctx, bucket, writableSnapshots);
+  if (broadcastPending) {
+    await broadcastPending;
+  }
+  const tiles = tileSchedule.tiles;
 
   return json({
     ok: true,
-    storage,
+    storage: "chunk",
+    requestedStorage: storage,
     chunks: results.length,
     skippedEmpty: emptySnapshots.length,
     rejected: emptySnapshots,
@@ -405,14 +432,23 @@ async function handleBlockUpdatesUpload(request, env, ctx) {
   if (result.missingBase) {
     return json({ ok: true, missingBase: true, key: result.key, updates: 0 });
   }
-  const tiles = result.applied.length > 0 ? await scheduleMapTilesForChunks(ctx, bucket, [result.chunk]) : [];
+  const tileSchedule = result.applied.length > 0 ? scheduleMapTilesForChunks(ctx, bucket, [result.chunk], { liveUpload: true }) : { tiles: [], pending: null };
   const tileVersion = payload.updatedAt;
+  const metaPending = result.applied.length > 0 ? scheduleWorldMetaForChunks(ctx, bucket, [result.chunk]) : null;
+  const broadcastPending =
+    result.applied.length > 0 ? scheduleBackgroundTask(ctx, "broadcast block updates", () => broadcastBlockUpdates(env, result.chunk, result.applied, tileVersion)) : null;
 
-  if (result.applied.length > 0) {
-    await broadcastBlockUpdates(env, result.chunk, result.applied, tileVersion);
+  if (tileSchedule.pending) {
+    await tileSchedule.pending;
+  }
+  if (metaPending) {
+    await metaPending;
+  }
+  if (broadcastPending) {
+    await broadcastPending;
   }
 
-  return json({ ok: true, missingBase: false, key: result.key, updates: result.applied.length, tiles });
+  return json({ ok: true, missingBase: false, key: result.key, updates: result.applied.length, tiles: tileSchedule.tiles });
 }
 
 async function handleBlockUpdatesBatchUpload(request, env, ctx) {
@@ -430,11 +466,21 @@ async function handleBlockUpdatesBatchUpload(request, env, ctx) {
   const results = await mapWithConcurrency(payload.batches, BATCH_WRITE_CONCURRENCY, (batch) => applyBlockUpdateBatchToStorage(bucket, batch));
   const appliedResults = results.filter((result) => !result.missingBase && result.applied.length > 0);
   const updatedChunks = appliedResults.map((result) => result.chunk);
-  const tiles = updatedChunks.length > 0 ? await scheduleMapTilesForChunks(ctx, bucket, updatedChunks) : [];
-  if (updatedChunks.length > 0) {
-    await scheduleWorldMetaForChunks(ctx, bucket, updatedChunks);
+  const tileSchedule = updatedChunks.length > 0 ? scheduleMapTilesForChunks(ctx, bucket, updatedChunks, { liveUpload: true }) : { tiles: [], pending: null };
+  const metaPending = updatedChunks.length > 0 ? scheduleWorldMetaForChunks(ctx, bucket, updatedChunks) : null;
+  const broadcastPending = scheduleBackgroundTask(ctx, "broadcast block update batch", () =>
+    mapWithConcurrency(appliedResults, LIVE_UPLOAD_WRITE_CONCURRENCY, (result) => broadcastBlockUpdates(env, result.chunk, result.applied, result.chunk.updatedAt)),
+  );
+  if (tileSchedule.pending) {
+    await tileSchedule.pending;
   }
-  await mapWithConcurrency(appliedResults, MAP_TILE_WRITE_CONCURRENCY, (result) => broadcastBlockUpdates(env, result.chunk, result.applied, result.chunk.updatedAt));
+  if (metaPending) {
+    await metaPending;
+  }
+  if (broadcastPending) {
+    await broadcastPending;
+  }
+  const tiles = tileSchedule.tiles;
 
   const missingBase = results
     .filter((result) => result.missingBase)
@@ -458,7 +504,7 @@ async function handleBlockUpdatesBatchUpload(request, env, ctx) {
 
 async function applyBlockUpdateBatchToStorage(bucket, payload) {
   const key = chunkKey(payload.world, payload.dimension, payload.chunkX, payload.chunkZ);
-  const existing = await readR2Json(await bucket.get(key));
+  const existing = await readStoredChunkSnapshot(bucket, payload.world, payload.dimension, payload.chunkX, payload.chunkZ);
   if (!existing) {
     return { batch: payload, key, missingBase: true, applied: [], chunk: null };
   }
@@ -740,6 +786,15 @@ async function handleMapTileBackfill(request, env) {
   });
 }
 
+async function handleMapTileDrain(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  const payload = await request.json().catch(() => ({}));
+  return json(await drainDirtyMapTiles(bucket, normalizeMapTileDrainPayload(payload)));
+}
+
 async function handleTextureManifestGet(env) {
   const bucket = mapBucket(env);
   if (!bucket) {
@@ -818,7 +873,7 @@ async function handleWorldMetaUpload(request, env) {
   return json({ ok: true, key });
 }
 
-async function handleLandUpload(request, env) {
+async function handleLandUpload(request, env, ctx) {
   const bucket = mapBucket(env);
   if (!bucket) {
     return json({ error: "r2_not_configured" }, 503);
@@ -849,7 +904,12 @@ async function handleLandUpload(request, env) {
       customMetadata: { world: group.world, dimension: group.dimension },
     });
     writes.push({ key, world: group.world, dimension: group.dimension, claims: group.claims.length });
-    await broadcastLive(env, JSON.stringify({ type: "lands_updated", world: group.world, dimension: group.dimension, updatedAt: group.updatedAt }));
+    const broadcastPending = scheduleBackgroundTask(ctx, "broadcast land update", () =>
+      broadcastLive(env, JSON.stringify({ type: "lands_updated", world: group.world, dimension: group.dimension, updatedAt: group.updatedAt })),
+    );
+    if (broadcastPending) {
+      await broadcastPending;
+    }
   }
 
   return json({ ok: true, claims: payload.claims.length, groups: writes });
@@ -1554,6 +1614,10 @@ export function mapTileKey(world, dimension, zoom, tileX, tileZ) {
   return `${MAP_TILE_PREFIX}${cleanSegment(world)}/${cleanSegment(dimension)}/z${normalizeMapTileZoom(zoom)}/${numberOrThrow(tileX, "tileX")}/${numberOrThrow(tileZ, "tileZ")}.png`;
 }
 
+function dirtyMapTileKey(tile) {
+  return `${MAP_TILE_DIRTY_PREFIX}${cleanSegment(tile.world)}/${cleanSegment(tile.dimension)}/z${normalizeMapTileZoom(tile.zoom)}/${numberOrThrow(tile.tileX, "tileX")}/${numberOrThrow(tile.tileZ, "tileZ")}.json`;
+}
+
 function chunkPrefix(world, dimension, chunkX) {
   return `chunks/v1/${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(chunkX, "chunkX")}/`;
 }
@@ -1596,6 +1660,22 @@ async function putChunkRegionSnapshots(bucket, snapshots) {
     });
     return { key: group.key, chunks: region.chunks.length };
   });
+}
+
+async function readStoredChunkSnapshot(bucket, world, dimension, chunkX, chunkZ) {
+  const direct = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(chunkKey(world, dimension, chunkX, chunkZ))));
+  if (direct) {
+    return direct;
+  }
+
+  const region = await readR2Json(await bucket.get(chunkRegionKey(world, dimension, floorDiv(chunkX, REGION_SIZE_CHUNKS), floorDiv(chunkZ, REGION_SIZE_CHUNKS))));
+  for (const chunk of Array.isArray(region?.chunks) ? region.chunks : []) {
+    const normalized = normalizeOptionalChunkSnapshot(chunk);
+    if (normalized && normalized.chunkX === chunkX && normalized.chunkZ === chunkZ) {
+      return normalized;
+    }
+  }
+  return null;
 }
 
 async function readChunkRegions(bucket, query, chunksByCoord) {
@@ -1786,26 +1866,137 @@ function uniqueMapTilesForChunks(chunks) {
   return tiles;
 }
 
-async function scheduleMapTilesForChunks(ctx, bucket, chunks) {
+function scheduleMapTilesForChunks(ctx, bucket, chunks, options = {}) {
   const tiles = uniqueMapTilesForChunks(chunks);
   if (tiles.length < 1) {
-    return [];
+    return { tiles, pending: null };
   }
-  const rebuild = rebuildMapTiles(bucket, tiles);
-  if (ctx && typeof ctx.waitUntil === "function") {
-    ctx.waitUntil(rebuild);
+  let pending;
+  if (options.liveUpload) {
+    pending = scheduleBackgroundTask(ctx, "queue dirty map tiles", () => queueAndDrainMapTiles(bucket, tiles));
   } else {
-    await rebuild;
+    pending = scheduleBackgroundTask(ctx, "rebuild map tiles", () => rebuildMapTiles(bucket, tiles));
   }
-  return tiles;
+  return { tiles, pending };
 }
 
-async function scheduleWorldMetaForChunks(ctx, bucket, chunks) {
-  const update = updateWorldMetaForChunks(bucket, chunks);
-  if (ctx && typeof ctx.waitUntil === "function") {
-    ctx.waitUntil(update);
-  } else {
-    await update;
+function scheduleWorldMetaForChunks(ctx, bucket, chunks) {
+  return scheduleBackgroundTask(ctx, "update world metadata", () => updateWorldMetaForChunks(bucket, chunks));
+}
+
+function scheduleBackgroundTask(ctx, label, task) {
+  const run = Promise.resolve()
+    .then(task)
+    .catch((error) => {
+      console.error(`[LiveMap] ${label} failed`, error instanceof Error ? error.stack || error.message : error);
+    });
+  if (hasWaitUntil(ctx)) {
+    ctx.waitUntil(run);
+    return null;
+  }
+  return run;
+}
+
+function hasWaitUntil(ctx) {
+  return ctx && typeof ctx.waitUntil === "function";
+}
+
+function prioritizedMapTiles(tiles) {
+  return [...tiles].sort((a, b) => b.zoom - a.zoom || a.tileZ - b.tileZ || a.tileX - b.tileX);
+}
+
+async function queueAndDrainMapTiles(bucket, tiles) {
+  return markMapTilesDirty(bucket, tiles);
+}
+
+async function markMapTilesDirty(bucket, tiles) {
+  await mapWithConcurrency(prioritizedMapTiles(tiles), LIVE_UPLOAD_WRITE_CONCURRENCY, (tile) =>
+    bucket.put(dirtyMapTileKey(tile), JSON.stringify({ ...tile, queuedAt: Date.now() }), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: { world: cleanSegment(tile.world), dimension: cleanSegment(tile.dimension), zoom: String(normalizeMapTileZoom(tile.zoom)) },
+    }),
+  );
+}
+
+async function drainDirtyMapTiles(bucket, options = {}) {
+  const limit = Math.min(MAP_TILE_DRAIN_MAX_LIMIT, Math.max(1, Number(options.limit || MAP_TILE_DRAIN_DEFAULT_LIMIT)));
+  const textureColors = await loadTextureColorIndex(bucket);
+  const results = [];
+  let scanned = 0;
+  let truncated = false;
+
+  while (results.length < limit) {
+    const page = await bucket.list({ prefix: MAP_TILE_DIRTY_PREFIX, limit });
+    const objects = page.objects || [];
+    truncated = page.truncated === true;
+    if (objects.length < 1) {
+      break;
+    }
+    scanned += objects.length;
+    const entries = await mapWithConcurrency(objects, LIVE_UPLOAD_WRITE_CONCURRENCY, async (object) => {
+      const tile = normalizeDirtyMapTile(await readR2Json(await bucket.get(object.key)));
+      return { object, tile };
+    });
+    for (const { object, tile } of entries.filter((entry) => !entry.tile)) {
+      await bucket.delete(object.key);
+      results.push({ key: object.key, invalid: true, deleted: true });
+    }
+    const validEntries = prioritizedDirtyMapTileEntries(entries.filter((entry) => entry.tile)).slice(0, Math.max(0, limit - results.length));
+    for (const zoom of [...new Set(validEntries.map(({ tile }) => tile.zoom))]) {
+      const group = validEntries.filter(({ tile }) => tile.zoom === zoom);
+      await mapWithConcurrency(group, options.concurrency || LIVE_UPLOAD_MAP_TILE_WRITE_CONCURRENCY, async ({ object, tile }) => {
+        const result = await rebuildDirtyMapTile(bucket, object, tile, options, textureColors);
+        results.push(result);
+      });
+    }
+    if (entries.length === 0 || validEntries.length === 0 || (!truncated && results.length >= scanned)) {
+      break;
+    }
+  }
+  results.sort((a, b) => String(a.key).localeCompare(String(b.key)));
+  return { ok: true, matched: scanned, drained: results.filter((result) => !result.error).length, remaining: truncated || results.length >= limit ? "unknown" : 0, results };
+}
+
+function prioritizedDirtyMapTileEntries(entries) {
+  return [...entries].sort((a, b) => b.tile.zoom - a.tile.zoom || a.tile.tileZ - b.tile.tileZ || a.tile.tileX - b.tile.tileX);
+}
+
+async function rebuildDirtyMapTile(bucket, object, tile, options, textureColors) {
+  try {
+    const result = await rebuildMapTile(bucket, tile, {
+      force: options.force === true,
+      readConcurrency: options.readConcurrency || LIVE_UPLOAD_MAP_TILE_READ_CONCURRENCY,
+      textureColors,
+    });
+    await bucket.delete(object.key);
+    return result;
+  } catch (error) {
+    console.error(`[LiveMap] Dirty map tile rebuild failed for ${object.key}`, error instanceof Error ? error.stack || error.message : error);
+    return { key: object.key, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function normalizeMapTileDrainPayload(payload) {
+  return {
+    limit: Math.min(MAP_TILE_DRAIN_MAX_LIMIT, Math.max(1, numberOrThrow(payload.limit ?? MAP_TILE_DRAIN_DEFAULT_LIMIT, "limit"))),
+    force: payload.force === true,
+  };
+}
+
+function normalizeDirtyMapTile(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  try {
+    return {
+      world: cleanSegment(value.world || "world"),
+      dimension: cleanSegment(value.dimension || "Overworld"),
+      zoom: normalizeMapTileZoom(value.zoom),
+      tileX: numberOrThrow(value.tileX, "tileX"),
+      tileZ: numberOrThrow(value.tileZ, "tileZ"),
+    };
+  } catch {
+    return null;
   }
 }
 

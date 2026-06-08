@@ -838,6 +838,14 @@ function drawStatefulPartialBlock(
     drawTrapdoorBlock(ctx, atlas, blockId, state, x, y, size, layer);
     return true;
   }
+  if (isSlabBlockId(id)) {
+    drawSlabBlock(ctx, atlas, blockId, state, x, y, size, layer);
+    return true;
+  }
+  if (isStairBlockId(id)) {
+    drawStairBlock(ctx, atlas, blockId, state, x, y, size, layer);
+    return true;
+  }
   return false;
 }
 
@@ -903,21 +911,21 @@ function drawTrapdoorBlock(
   }
   const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
   const open = stateBool(state, "open_bit", stateBool(state, "open", false));
-  const half = String(stateValue(state, "upside_down_bit", stateValue(state, "half", "bottom"))).toLowerCase();
-  const facing = stateValue(state, "direction", stateValue(state, "facing_direction", stateValue(state, "facing", "south")));
+  const half = blockVerticalHalfForState(state);
   if (!open) {
     const inset = Math.max(0, Math.floor(size * 0.08));
-    const thickness = half === "top" || half === "true" || half === "1" ? Math.max(1, Math.floor(size * 0.72)) : Math.max(1, Math.floor(size * 0.82));
+    const thickness = Math.max(1, Math.floor(size * 0.72));
+    const drawY = half === "top" ? y + Math.max(0, size - thickness - inset) : y + inset;
     if (entry && atlas.image) {
       drawAtlasEntry(ctx, atlas.image, entry, x + inset, y + inset, Math.max(1, size - inset * 2));
     } else {
       ctx.fillStyle = fallbackTextureColor(blockId, state);
-      ctx.fillRect(x + inset, y + inset, Math.max(1, size - inset * 2), thickness);
+      ctx.fillRect(x + inset, drawY, Math.max(1, size - inset * 2), thickness);
     }
     return;
   }
 
-  const edge = facingEdge(facing);
+  const edge = blockFacingEdgeForState(state, blockId);
   const thickness = Math.max(1, Math.floor(size * 0.2));
   ctx.fillStyle = fallbackTextureColor(blockId, state);
   if (edge === "north") {
@@ -929,6 +937,88 @@ function drawTrapdoorBlock(
   } else {
     ctx.fillRect(x + size - thickness, y, thickness, size);
   }
+}
+
+function drawSlabBlock(
+  ctx: CanvasRenderingContext2D,
+  atlas: AtlasResource,
+  blockId: string,
+  state: BlockStateMap,
+  x: number,
+  y: number,
+  size: number,
+  layer: "base" | "overlay",
+) {
+  if (layer === "base") {
+    ctx.fillStyle = fallbackTextureColor(blockId, state);
+    ctx.fillRect(x, y, size, size);
+  }
+  const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
+  const half = slabHalfForState(state, blockId);
+  const color = fallbackTextureColor(blockId, state);
+  const inset = Math.max(0, Math.floor(size * 0.08));
+  const height = half === "double" ? Math.max(1, size - inset * 2) : Math.max(1, Math.ceil((size - inset * 2) / 2));
+  const drawY = half === "top" ? y + size - inset - height : y + inset;
+  if (entry && atlas.image && half === "double") {
+    drawAtlasEntry(ctx, atlas.image, entry, x + inset, y + inset, Math.max(1, size - inset * 2));
+    return;
+  }
+  ctx.fillStyle = layer === "overlay" ? adjustHexBrightness(color, 1.08) : color;
+  ctx.fillRect(x + inset, drawY, Math.max(1, size - inset * 2), height);
+}
+
+function drawStairBlock(
+  ctx: CanvasRenderingContext2D,
+  atlas: AtlasResource,
+  blockId: string,
+  state: BlockStateMap,
+  x: number,
+  y: number,
+  size: number,
+  layer: "base" | "overlay",
+) {
+  if (layer === "base") {
+    ctx.fillStyle = fallbackTextureColor(blockId, state);
+    ctx.fillRect(x, y, size, size);
+  }
+  const color = fallbackTextureColor(blockId, state);
+  const half = blockVerticalHalfForState(state);
+  const facing = blockFacingEdgeForState(state, blockId);
+  const entry = atlas.manifest.blocks[blockId] || atlas.manifest.blocks[stripNamespace(blockId)] || null;
+  if (entry && atlas.image) {
+    const inset = Math.max(0, Math.floor(size * 0.08));
+    drawAtlasEntry(ctx, atlas.image, entry, x + inset, y + inset, Math.max(1, size - inset * 2));
+  }
+  ctx.fillStyle = layer === "overlay" ? adjustHexBrightness(color, 1.1) : adjustHexBrightness(color, half === "top" ? 1.08 : 0.94);
+  fillStairShape(ctx, x, y, size, facing);
+}
+
+function fillStairShape(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, facing: "north" | "south" | "east" | "west") {
+  const inset = Math.max(0, Math.floor(size * 0.06));
+  const span = Math.max(1, size - inset * 2);
+  const half = Math.max(1, Math.ceil(span / 2));
+  const x0 = x + inset;
+  const y0 = y + inset;
+  const xMid = x0 + Math.floor(span / 2);
+  const yMid = y0 + Math.floor(span / 2);
+
+  if (facing === "north") {
+    ctx.fillRect(x0, y0, span, half);
+    ctx.fillRect(x0, yMid, half, Math.max(1, span - half));
+    return;
+  }
+  if (facing === "south") {
+    ctx.fillRect(x0, yMid, span, Math.max(1, span - half));
+    ctx.fillRect(xMid, y0, Math.max(1, span - half), half);
+    return;
+  }
+  if (facing === "west") {
+    ctx.fillRect(x0, y0, half, span);
+    ctx.fillRect(xMid, y0, Math.max(1, span - half), half);
+    return;
+  }
+  ctx.fillRect(xMid, y0, Math.max(1, span - half), span);
+  ctx.fillRect(x0, yMid, half, Math.max(1, span - half));
 }
 
 function drawPlantMarker(ctx: CanvasRenderingContext2D, atlas: AtlasResource, blockId: string, x: number, y: number, size: number, layer: "base" | "overlay") {
@@ -1091,23 +1181,204 @@ function stateBool(state: BlockStateMap, key: string, fallback: boolean) {
   return fallback;
 }
 
+function isSlabBlockId(id: string) {
+  return id.includes("slab") && !id.includes("double_slab") && !id.includes("double_stone_slab");
+}
+
+function isStairBlockId(id: string) {
+  return id.includes("stairs");
+}
+
 function isVerticalFacing(value: unknown) {
   const text = String(value).toLowerCase();
   return text === "0" || text === "1" || text === "up" || text === "down";
 }
 
-function facingEdge(value: unknown): "north" | "south" | "east" | "west" {
-  const text = String(value).toLowerCase();
-  if (text === "2" || text === "north") {
+export function blockFacingEdgeForState(state: BlockStateMap, blockId = ""): "north" | "south" | "east" | "west" {
+  const direction = stateNumberValue(state, ["direction", "minecraft:direction"]);
+  if (direction !== null) {
+    if (blockId.toLowerCase().includes("trapdoor")) {
+      return trapdoorDirectionToEdge(direction);
+    }
+    return directionToEdge(direction);
+  }
+
+  const facingDirection = stateNumberValue(state, ["facing_direction", "minecraft:facing_direction"]);
+  if (facingDirection !== null) {
+    return facingDirectionToEdge(facingDirection);
+  }
+
+  const weirdoDirection = stateNumberValue(state, ["weirdo_direction", "minecraft:weirdo_direction"]);
+  if (weirdoDirection !== null) {
+    return weirdoDirectionToEdge(weirdoDirection);
+  }
+
+  const numericFacing = stateNumberValue(state, ["facing", "minecraft:facing"]);
+  if (numericFacing !== null) {
+    return directionToEdge(numericFacing);
+  }
+
+  const namedFacing = stateToken(state, [
+    "facing",
+    "minecraft:facing",
+    "direction",
+    "minecraft:direction",
+    "facing_direction",
+    "minecraft:facing_direction",
+    "cardinal_direction",
+    "minecraft:cardinal_direction",
+  ]);
+  if (namedFacing) {
+    return namedFacingToEdge(namedFacing);
+  }
+
+  return "south";
+}
+
+export function slabHalfForState(state: BlockStateMap, blockId = ""): "top" | "bottom" | "double" {
+  const id = blockId.toLowerCase();
+  if (id.includes("double_slab") || id.includes("double_stone_slab")) {
+    return "double";
+  }
+  const slabType = stateToken(state, [
+    "stone_slab_type",
+    "minecraft:stone_slab_type",
+    "stone_slab_type_2",
+    "minecraft:stone_slab_type_2",
+    "stone_slab_type_3",
+    "minecraft:stone_slab_type_3",
+    "stone_slab_type_4",
+    "minecraft:stone_slab_type_4",
+    "slab_type",
+    "minecraft:slab_type",
+  ]);
+  if (slabType === "double") {
+    return "double";
+  }
+  return blockVerticalHalfForState(state);
+}
+
+function blockVerticalHalfForState(state: BlockStateMap): "top" | "bottom" {
+  const verticalHalf = stateToken(state, ["minecraft:vertical_half", "vertical_half", "half", "minecraft:half"]);
+  if (verticalHalf === "top" || verticalHalf === "upper" || verticalHalf === "up") {
+    return "top";
+  }
+  if (verticalHalf === "bottom" || verticalHalf === "lower" || verticalHalf === "down") {
+    return "bottom";
+  }
+  if (stateBool(state, "top_slot_bit", false) || stateBool(state, "upside_down_bit", false)) {
+    return "top";
+  }
+  if (stateBool(state, "bottom_slot_bit", false)) {
+    return "bottom";
+  }
+  return "bottom";
+}
+
+function stateToken(state: BlockStateMap, keys: string[]) {
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(state, key)) {
+      continue;
+    }
+    return stripNamespace(String(state[key]).toLowerCase());
+  }
+  return "";
+}
+
+function stateNumberValue(state: BlockStateMap, keys: string[]) {
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(state, key)) {
+      continue;
+    }
+    const numeric = Number(state[key]);
+    if (Number.isFinite(numeric)) {
+      return numeric;
+    }
+  }
+  return null;
+}
+
+function namedFacingToEdge(value: string): "north" | "south" | "east" | "west" {
+  if (value === "north") {
     return "north";
   }
-  if (text === "3" || text === "east") {
+  if (value === "east") {
     return "east";
   }
-  if (text === "1" || text === "west") {
+  if (value === "west") {
     return "west";
   }
   return "south";
+}
+
+function directionToEdge(value: number): "north" | "south" | "east" | "west" {
+  const normalized = mod(value, 4);
+  if (normalized === 1) {
+    return "west";
+  }
+  if (normalized === 2) {
+    return "north";
+  }
+  if (normalized === 3) {
+    return "east";
+  }
+  return "south";
+}
+
+function trapdoorDirectionToEdge(value: number): "north" | "south" | "east" | "west" {
+  const normalized = mod(value, 4);
+  if (normalized === 0) {
+    return "west";
+  }
+  if (normalized === 1) {
+    return "east";
+  }
+  if (normalized === 2) {
+    return "north";
+  }
+  return "south";
+}
+
+function weirdoDirectionToEdge(value: number): "north" | "south" | "east" | "west" {
+  const normalized = mod(value, 4);
+  if (normalized === 0) {
+    return "east";
+  }
+  if (normalized === 1) {
+    return "west";
+  }
+  if (normalized === 2) {
+    return "south";
+  }
+  return "north";
+}
+
+function facingDirectionToEdge(value: number): "north" | "south" | "east" | "west" {
+  if (value === 2) {
+    return "north";
+  }
+  if (value === 3) {
+    return "south";
+  }
+  if (value === 4) {
+    return "west";
+  }
+  if (value === 5) {
+    return "east";
+  }
+  return "south";
+}
+
+function adjustHexBrightness(hex: string, factor: number) {
+  const match = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!match) {
+    return hex;
+  }
+  const value = match[1];
+  const red = Math.max(0, Math.min(255, Math.round(Number.parseInt(value.slice(0, 2), 16) * factor)));
+  const green = Math.max(0, Math.min(255, Math.round(Number.parseInt(value.slice(2, 4), 16) * factor)));
+  const blue = Math.max(0, Math.min(255, Math.round(Number.parseInt(value.slice(4, 6), 16) * factor)));
+  return `#${red.toString(16).padStart(2, "0")}${green.toString(16).padStart(2, "0")}${blue.toString(16).padStart(2, "0")}`;
 }
 
 function drawDecorationGlyph(ctx: CanvasRenderingContext2D, blockId: string, x: number, y: number, size: number, layer: "base" | "overlay") {
