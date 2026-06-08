@@ -32,7 +32,7 @@ const MAP_TILE_WRITE_CONCURRENCY = 8;
 const MAP_TILE_BACKFILL_WRITE_CONCURRENCY = 1;
 const MAP_TILE_BACKFILL_READ_CONCURRENCY = 4;
 const MAP_TILE_BACKFILL_WRITE_LIMIT = 1;
-const MAP_TILE_BACKFILL_BASE_WRITE_LIMIT = 50;
+const MAP_TILE_BACKFILL_BASE_WRITE_LIMIT = 1;
 const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
 const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
 const EMPTY_CHUNK_PRUNE_WRITE_LIMIT = 8;
@@ -660,11 +660,21 @@ async function handleMapTileGet(url, env) {
   if (!object) {
     return pngResponse(EMPTY_PNG, { "Cache-Control": "public, max-age=60" });
   }
+  let body;
+  try {
+    body = Buffer.from(await object.arrayBuffer());
+    if (body.length < 1) {
+      throw new Error("empty_map_tile_object");
+    }
+  } catch {
+    await bucket.delete(mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ));
+    return pngResponse(EMPTY_PNG, { "Cache-Control": "public, max-age=60" });
+  }
   const headers = new Headers(CORS_HEADERS);
   object.writeHttpMetadata?.(headers);
   headers.set("Content-Type", headers.get("Content-Type") || "image/png");
   headers.set("Cache-Control", "public, max-age=31536000, immutable");
-  return new Response(object.body, { headers });
+  return new Response(body, { headers });
 }
 
 function pngResponse(body, extraHeaders = {}) {
@@ -705,8 +715,15 @@ async function handleMapTileBackfill(request, env) {
         concurrency: MAP_TILE_BACKFILL_WRITE_CONCURRENCY,
         readConcurrency: MAP_TILE_BACKFILL_READ_CONCURRENCY,
       });
+  let worldMetaTouched = false;
+  let worldMetaError = "";
   if (!payload.dryRun && rebuildVersion > 0 && results.some((tile) => !tile.skipped)) {
-    await touchWorldMetaTileVersion(bucket, payload.world, payload.dimension, rebuildVersion);
+    try {
+      await touchWorldMetaTileVersion(bucket, payload.world, payload.dimension, rebuildVersion);
+      worldMetaTouched = true;
+    } catch (error) {
+      worldMetaError = error instanceof Error ? error.message : String(error);
+    }
   }
 
   return json({
@@ -717,6 +734,8 @@ async function handleMapTileBackfill(request, env) {
     matched: selected.length,
     written: payload.dryRun ? 0 : results.filter((tile) => !tile.deleted).length,
     cursor: nextCursor,
+    worldMetaTouched,
+    worldMetaError,
     tiles: payload.dryRun ? tileRefs : results,
   });
 }

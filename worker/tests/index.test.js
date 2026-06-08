@@ -265,9 +265,20 @@ async function backfillMapTile(env, payload) {
   );
 }
 
+async function backfillAllMapTiles(env, payload) {
+  let cursor = "";
+  let response;
+  do {
+    response = await backfillMapTile(env, { ...payload, cursor });
+    const body = await response.clone().json();
+    cursor = body.cursor || "";
+  } while (cursor);
+  return response;
+}
+
 async function backfillMapTileSourceChain(env, payload) {
   for (let zoom = 4; zoom > payload.zoom; zoom -= 1) {
-    await backfillMapTile(env, { ...payload, zoom, dryRun: false, force: true, limit: 100 });
+    await backfillAllMapTiles(env, { ...payload, zoom, dryRun: false, force: true, limit: 100 });
   }
   return backfillMapTile(env, payload);
 }
@@ -1698,6 +1709,26 @@ describe("worker routes", () => {
     expect(pngPixel(png, 0, 0)[3]).toBe(0);
   });
 
+  it("deletes unreadable image tile objects instead of crashing tile requests", async () => {
+    const env = createEnv();
+    const key = "map-tiles/v1/world/Overworld/z4/0/0.png";
+    const pngObject = new PNG({ width: 1, height: 1, colorType: 6 });
+    await env.MAP_DATA.put(key, PNG.sync.write(pngObject, { colorType: 6, inputColorType: 6 }), {
+      httpMetadata: { contentType: "image/png" },
+    });
+    env.MAP_DATA.objects.get(key).arrayBuffer = async () => {
+      throw new Error("r2_body_error");
+    };
+
+    const response = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z4/0/0.png"), env, {});
+    const png = readPng(await response.arrayBuffer());
+
+    expect(response.status).toBe(200);
+    expect(png.width).toBe(1);
+    expect(png.height).toBe(1);
+    expect(env.MAP_DATA.objects.has(key)).toBe(false);
+  });
+
   it("rewrites legacy low zoom tiles when source metadata is missing", async () => {
     const env = createEnv();
     const key = "map-tiles/v1/world/Overworld/z3/0/0.png";
@@ -1716,6 +1747,25 @@ describe("worker routes", () => {
     expect(body.tiles[0]).not.toHaveProperty("skipped");
     expect(PNG.sync.read(Buffer.from(await env.MAP_DATA.objects.get(key).arrayBuffer())).width).toBe(256);
     expect(env.MAP_DATA.objects.get(key).customMetadata).toMatchObject({ tileVersion: "10", sourceVersion: "10" });
+  });
+
+  it("keeps successful backfill results when world metadata touch fails", async () => {
+    const env = createEnv();
+    const key = "map-tiles/v1/world/Overworld/z4/0/0.png";
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ updatedAt: 10 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put("meta/v1/world/Overworld.json", "{", {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const response = await backfillMapTile(env, { world: "world", dimension: "Overworld", zoom: 4, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, written: 1, worldMetaTouched: false });
+    expect(body.worldMetaError).toContain("JSON");
+    expect(env.MAP_DATA.objects.has(key)).toBe(true);
   });
 
   it("skips stale low zoom rebuilds when existing source metadata is newer", async () => {
