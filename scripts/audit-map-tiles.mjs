@@ -8,7 +8,7 @@ const MAP_TILE_MIN_ZOOM = -1;
 const MAP_TILE_BASE_ZOOM = 4;
 const MAP_TILE_MAX_ZOOM = MAP_TILE_BASE_ZOOM;
 const MIN_COLUMN_HEIGHT = -64;
-const MAX_MATERIALIZE_CHUNKS = 128;
+const MAX_MATERIALIZE_CHUNKS = 8;
 
 class HttpError extends Error {
   constructor(status, url, body) {
@@ -432,25 +432,48 @@ async function materializeChunks(options, chunks) {
   }
   for (let index = 0; index < uniqueChunks.length; index += MAX_MATERIALIZE_CHUNKS) {
     const selected = uniqueChunks.slice(index, index + MAX_MATERIALIZE_CHUNKS);
-    const response = await fetchWithRetry(`${options.workerUrl}/api/plugin/chunks/materialize`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${options.token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ chunks: selected }),
-    }, options);
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(`chunk materialize failed at ${index}: HTTP ${response.status} ${JSON.stringify(body)}`);
-    }
-    stats.calls += 1;
+    const body = await materializeChunkBatch(options, selected, index);
+    stats.calls += body.calls || 1;
     stats.requested += body.requested || 0;
     stats.materialized += body.materialized || 0;
     stats.direct += body.direct || 0;
     stats.missing += body.missing || 0;
   }
   return stats;
+}
+
+async function materializeChunkBatch(options, chunks, offset) {
+  try {
+    const response = await fetchWithRetry(`${options.workerUrl}/api/plugin/chunks/materialize`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${options.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ chunks }),
+    }, options);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(`chunk materialize failed at ${offset}: HTTP ${response.status} ${JSON.stringify(body)}`);
+    }
+    return { calls: 1, requested: body.requested || 0, materialized: body.materialized || 0, direct: body.direct || 0, missing: body.missing || 0 };
+  } catch (error) {
+    if (chunks.length <= 1) {
+      const chunk = chunks[0];
+      throw new Error(`chunk materialize failed at ${offset} (${chunk.world}/${chunk.dimension}/${chunk.chunkX},${chunk.chunkZ}): ${error instanceof Error ? error.message : String(error)}`);
+    }
+    console.error(`Splitting chunk materialize batch at ${offset} (${chunks.length} chunks) after ${error instanceof Error ? error.message : String(error)}`);
+    const mid = Math.ceil(chunks.length / 2);
+    const left = await materializeChunkBatch(options, chunks.slice(0, mid), offset);
+    const right = await materializeChunkBatch(options, chunks.slice(mid), offset + mid);
+    return {
+      calls: left.calls + right.calls,
+      requested: left.requested + right.requested,
+      materialized: left.materialized + right.materialized,
+      direct: left.direct + right.direct,
+      missing: left.missing + right.missing,
+    };
+  }
 }
 
 async function deleteMapTileObjects(options) {
