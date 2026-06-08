@@ -28,8 +28,8 @@ const EMPTY_PNG = Uint8Array.from([
   73, 68, 65, 84, 120, 1, 99, 0, 1, 0, 0, 5, 0, 1, 54, 208, 136, 221, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
 ]);
 const MAP_TILE_MIN_ZOOM = -1;
-const MAP_TILE_MAX_ZOOM = 3;
 const MAP_TILE_BASE_ZOOM = 4;
+const MAP_TILE_MAX_ZOOM = MAP_TILE_BASE_ZOOM;
 const MAP_TILE_WRITE_CONCURRENCY = 8;
 const LIVE_UPLOAD_MAP_TILE_WRITE_CONCURRENCY = 1;
 const LIVE_UPLOAD_MAP_TILE_READ_CONCURRENCY = 2;
@@ -39,6 +39,7 @@ const MAP_TILE_CRON_DRAIN_LIMIT = 50;
 const MAP_TILE_BACKFILL_WRITE_CONCURRENCY = 1;
 const MAP_TILE_BACKFILL_READ_CONCURRENCY = 4;
 const MAP_TILE_BACKFILL_WRITE_LIMIT = 1;
+const MAP_TILE_BACKFILL_BASE_WRITE_LIMIT = 50;
 const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
 const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
 const EMPTY_CHUNK_PRUNE_WRITE_LIMIT = 8;
@@ -731,7 +732,7 @@ async function handleMapTileBackfill(request, env) {
   const payload = normalizeMapTileBackfillPayload(await request.json());
   const tiles = mapTilesForChunkRange(payload);
   const start = payload.cursor ? Math.max(0, Math.min(tiles.length, Number(payload.cursor) || 0)) : 0;
-  const effectiveLimit = payload.dryRun ? payload.limit : Math.min(payload.limit, MAP_TILE_BACKFILL_WRITE_LIMIT);
+  const effectiveLimit = payload.dryRun ? payload.limit : mapTileBackfillWriteLimit(tiles, start, payload.limit);
   const selected = tiles.slice(start, start + effectiveLimit);
   const nextCursor = start + selected.length < tiles.length ? String(start + selected.length) : null;
   const rebuildVersion = payload.force ? Date.now() : 0;
@@ -1468,15 +1469,17 @@ export function normalizeMapTileBackfillPayload(payload) {
   if (maxChunkX < minChunkX || maxChunkZ < minChunkZ) {
     throw new Error("invalid chunk range");
   }
-  const zooms =
+  const requestedZoom =
     payload.zoom === undefined || payload.zoom === null
-      ? range(MAP_TILE_MIN_ZOOM, MAP_TILE_MAX_ZOOM)
-      : [normalizeMapTileZoom(payload.zoom)];
+      ? null
+      : normalizeMapTileZoom(payload.zoom);
+  const zooms = requestedZoom === null ? range(MAP_TILE_MIN_ZOOM, MAP_TILE_MAX_ZOOM) : [requestedZoom];
   const limit = Math.min(MAP_TILE_BACKFILL_MAX_LIMIT, Math.max(1, numberOrThrow(payload.limit ?? MAP_TILE_BACKFILL_DEFAULT_LIMIT, "limit")));
   return {
     world: cleanSegment(payload.world || "world"),
     dimension: cleanSegment(payload.dimension || "Overworld"),
     zooms,
+    requestedZoom,
     minChunkX,
     maxChunkX,
     minChunkZ,
@@ -1898,32 +1901,60 @@ async function markMapTilesDirty(bucket, tiles) {
 
 async function drainDirtyMapTiles(bucket, options = {}) {
   const limit = Math.min(MAP_TILE_DRAIN_MAX_LIMIT, Math.max(1, Number(options.limit || MAP_TILE_DRAIN_DEFAULT_LIMIT)));
-  const page = await bucket.list({ prefix: MAP_TILE_DIRTY_PREFIX, limit });
-  const objects = page.objects || [];
   const textureColors = await loadTextureColorIndex(bucket);
   const results = [];
-  await mapWithConcurrency(objects, options.concurrency || LIVE_UPLOAD_MAP_TILE_WRITE_CONCURRENCY, async (object) => {
-    const tile = normalizeDirtyMapTile(await readR2Json(await bucket.get(object.key)));
-    if (!tile) {
+  let scanned = 0;
+  let truncated = false;
+
+  while (results.length < limit) {
+    const page = await bucket.list({ prefix: MAP_TILE_DIRTY_PREFIX, limit });
+    const objects = page.objects || [];
+    truncated = page.truncated === true;
+    if (objects.length < 1) {
+      break;
+    }
+    scanned += objects.length;
+    const entries = await mapWithConcurrency(objects, LIVE_UPLOAD_WRITE_CONCURRENCY, async (object) => {
+      const tile = normalizeDirtyMapTile(await readR2Json(await bucket.get(object.key)));
+      return { object, tile };
+    });
+    for (const { object, tile } of entries.filter((entry) => !entry.tile)) {
       await bucket.delete(object.key);
       results.push({ key: object.key, invalid: true, deleted: true });
-      return;
     }
-    try {
-      const result = await rebuildMapTile(bucket, tile, {
-        force: options.force === true,
-        readConcurrency: options.readConcurrency || LIVE_UPLOAD_MAP_TILE_READ_CONCURRENCY,
-        textureColors,
+    const validEntries = prioritizedDirtyMapTileEntries(entries.filter((entry) => entry.tile)).slice(0, Math.max(0, limit - results.length));
+    for (const zoom of [...new Set(validEntries.map(({ tile }) => tile.zoom))]) {
+      const group = validEntries.filter(({ tile }) => tile.zoom === zoom);
+      await mapWithConcurrency(group, options.concurrency || LIVE_UPLOAD_MAP_TILE_WRITE_CONCURRENCY, async ({ object, tile }) => {
+        const result = await rebuildDirtyMapTile(bucket, object, tile, options, textureColors);
+        results.push(result);
       });
-      await bucket.delete(object.key);
-      results.push(result);
-    } catch (error) {
-      console.error(`[LiveMap] Dirty map tile rebuild failed for ${object.key}`, error instanceof Error ? error.stack || error.message : error);
-      results.push({ key: object.key, error: error instanceof Error ? error.message : String(error) });
     }
-  });
+    if (entries.length === 0 || validEntries.length === 0 || (!truncated && results.length >= scanned)) {
+      break;
+    }
+  }
   results.sort((a, b) => String(a.key).localeCompare(String(b.key)));
-  return { ok: true, matched: objects.length, drained: results.filter((result) => !result.error).length, remaining: page.truncated ? "unknown" : 0, results };
+  return { ok: true, matched: scanned, drained: results.filter((result) => !result.error).length, remaining: truncated || results.length >= limit ? "unknown" : 0, results };
+}
+
+function prioritizedDirtyMapTileEntries(entries) {
+  return [...entries].sort((a, b) => b.tile.zoom - a.tile.zoom || a.tile.tileZ - b.tile.tileZ || a.tile.tileX - b.tile.tileX);
+}
+
+async function rebuildDirtyMapTile(bucket, object, tile, options, textureColors) {
+  try {
+    const result = await rebuildMapTile(bucket, tile, {
+      force: options.force === true,
+      readConcurrency: options.readConcurrency || LIVE_UPLOAD_MAP_TILE_READ_CONCURRENCY,
+      textureColors,
+    });
+    await bucket.delete(object.key);
+    return result;
+  } catch (error) {
+    console.error(`[LiveMap] Dirty map tile rebuild failed for ${object.key}`, error instanceof Error ? error.stack || error.message : error);
+    return { key: object.key, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 function normalizeMapTileDrainPayload(payload) {
@@ -1981,17 +2012,33 @@ async function rebuildMapTilesForChunks(bucket, chunks) {
 
 async function rebuildMapTiles(bucket, tiles, options = {}) {
   const textureColors = options.textureColors || (await loadTextureColorIndex(bucket));
-  return mapWithConcurrency(tiles, options.concurrency || MAP_TILE_WRITE_CONCURRENCY, (tile) => rebuildMapTile(bucket, tile, { ...options, textureColors }));
+  const indexedTiles = tiles.map((tile, index) => ({ tile, index }));
+  indexedTiles.sort((a, b) => b.tile.zoom - a.tile.zoom || a.tile.tileZ - b.tile.tileZ || a.tile.tileX - b.tile.tileX);
+  const results = new Array(tiles.length);
+  for (const zoom of [...new Set(indexedTiles.map(({ tile }) => tile.zoom))]) {
+    const group = indexedTiles.filter(({ tile }) => tile.zoom === zoom);
+    await mapWithConcurrency(group, options.concurrency || MAP_TILE_WRITE_CONCURRENCY, async ({ tile, index }) => {
+      results[index] = await rebuildMapTile(bucket, tile, { ...options, textureColors });
+    });
+  }
+  return results;
 }
 
 async function rebuildMapTile(bucket, tile, options = {}) {
+  if (normalizeMapTileZoom(tile.zoom) < MAP_TILE_BASE_ZOOM) {
+    return rebuildDerivedMapTile(bucket, tile, options);
+  }
+  return rebuildBaseMapTile(bucket, tile, options);
+}
+
+async function rebuildBaseMapTile(bucket, tile, options = {}) {
   const range = chunkRangeForMapTile(tile);
   const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range }, { readConcurrency: options.readConcurrency });
   const textureColors = options.textureColors || (await loadTextureColorIndex(bucket));
   const { png, hasPixels, tileVersion: sourceVersion, missingColors, missingColorReason } = renderMapTilePng(tile, chunksByCoord, textureColors);
   const nextTileVersion = Math.max(sourceVersion, options.rebuildVersion || 0);
   const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
-  if (!options.force) {
+  if (!options.force && sourceVersion > 0) {
     const existingSourceVersion = await mapTileObjectSourceVersion(bucket, key);
     if (existingSourceVersion > sourceVersion) {
       return { ...tile, key, skipped: true, deleted: false, tileVersion: nextTileVersion, sourceVersion, existingSourceVersion, chunks: chunksByCoord.size };
@@ -2009,15 +2056,90 @@ async function rebuildMapTile(bucket, tile, options = {}) {
   return { ...tile, key, deleted: false, tileVersion: nextTileVersion, sourceVersion, missingColors, missingColorReason, chunks: chunksByCoord.size };
 }
 
+async function rebuildDerivedMapTile(bucket, tile, options = {}) {
+  const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
+  const sourceZoom = tile.zoom + 1;
+  const sourceTiles = sourceMapTilesForDerivedTile(tile);
+  const sourceFactor = 2;
+  const sourceTileSize = MAP_TILE_SIZE / sourceFactor;
+  const minSourceTileX = tile.tileX * sourceFactor;
+  const minSourceTileZ = tile.tileZ * sourceFactor;
+  const png = new PNG({ width: MAP_TILE_SIZE, height: MAP_TILE_SIZE, colorType: 6 });
+  png.data.fill(0);
+
+  let hasPixels = false;
+  let sourceVersion = 0;
+  let sourceTileCount = 0;
+  const missingSourceTiles = [];
+  const invalidSourceTiles = [];
+
+  await mapWithConcurrency(sourceTiles, options.readConcurrency || MAP_TILE_BACKFILL_READ_CONCURRENCY, async (sourceTile) => {
+    const sourceKey = mapTileKey(sourceTile.world, sourceTile.dimension, sourceTile.zoom, sourceTile.tileX, sourceTile.tileZ);
+    const object = await bucket.get(sourceKey);
+    if (!object) {
+      missingSourceTiles.push(sourceKey);
+      return;
+    }
+    let sourcePng;
+    try {
+      sourcePng = PNG.sync.read(Buffer.from(await object.arrayBuffer()));
+    } catch (error) {
+      invalidSourceTiles.push({ key: sourceKey, error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    if (sourcePng.width !== MAP_TILE_SIZE || sourcePng.height !== MAP_TILE_SIZE) {
+      invalidSourceTiles.push({ key: sourceKey, error: `expected_${MAP_TILE_SIZE}x${MAP_TILE_SIZE}` });
+      return;
+    }
+    sourceTileCount += 1;
+    sourceVersion = Math.max(sourceVersion, mapTileObjectMetadataVersion(object));
+    const destX = (sourceTile.tileX - minSourceTileX) * sourceTileSize;
+    const destY = (sourceTile.tileZ - minSourceTileZ) * sourceTileSize;
+    if (downsampleBaseTileIntoPng(png, sourcePng, destX, destY, sourceTileSize)) {
+      hasPixels = true;
+    }
+  });
+
+  const nextTileVersion = Math.max(sourceVersion, options.rebuildVersion || 0);
+  if (invalidSourceTiles.length > 0) {
+    await bucket.delete(key);
+    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length, invalidSourceTiles };
+  }
+  if (!options.force && sourceVersion > 0) {
+    const existingSourceVersion = await mapTileObjectSourceVersion(bucket, key);
+    if (existingSourceVersion > sourceVersion) {
+      return { ...tile, key, skipped: true, deleted: false, tileVersion: nextTileVersion, sourceVersion, existingSourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length };
+    }
+  }
+  if (!hasPixels) {
+    await bucket.delete(key);
+    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length };
+  }
+  fillTransparentMapTileHoles(png, transparentFillPixelLimit(2 ** tile.zoom));
+  const buffer = PNG.sync.write(png, { colorType: 6, inputColorType: 6 });
+  await bucket.put(key, buffer, {
+    httpMetadata: { contentType: "image/png" },
+    customMetadata: {
+      world: tile.world,
+      dimension: tile.dimension,
+      zoom: String(tile.zoom),
+      tileVersion: String(nextTileVersion),
+      sourceVersion: String(sourceVersion),
+      sourceZoom: String(sourceZoom),
+      rootSourceZoom: String(MAP_TILE_BASE_ZOOM),
+      sourceTiles: String(sourceTileCount),
+      missingSourceTiles: String(missingSourceTiles.length),
+    },
+  });
+  return { ...tile, key, deleted: false, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length };
+}
+
 function renderMapTilePng(tile, chunksByCoord, textureColors) {
   const png = new PNG({ width: MAP_TILE_SIZE, height: MAP_TILE_SIZE, colorType: 6 });
   png.data.fill(0);
 
   const tileRange = chunkRangeForMapTile(tile);
   const blockScale = 2 ** tile.zoom;
-  if (blockScale < 1) {
-    return renderSubPixelMapTilePng(png, tileRange, blockScale, chunksByCoord, textureColors);
-  }
   let hasPixels = false;
   let tileVersion = 0;
   const missingColors = new Set();
@@ -2063,85 +2185,75 @@ function renderMapTilePng(tile, chunksByCoord, textureColors) {
   };
 }
 
-function renderSubPixelMapTilePng(png, tileRange, blockScale, chunksByCoord, textureColors) {
-  const blocksPerPixel = Math.round(1 / blockScale);
-  let hasPixels = false;
-  let tileVersion = 0;
-  const missingColors = new Set();
-  const pixelCount = MAP_TILE_SIZE * MAP_TILE_SIZE;
-  const red = new Uint32Array(pixelCount);
-  const green = new Uint32Array(pixelCount);
-  const blue = new Uint32Array(pixelCount);
-  const alpha = new Uint32Array(pixelCount);
-  const samples = new Uint16Array(pixelCount);
-
-  for (const chunk of chunksByCoord.values()) {
-    tileVersion = Math.max(tileVersion, chunk.updatedAt || 0);
-    for (let localZ = 0; localZ < 16; localZ += 1) {
-      for (let localX = 0; localX < 16; localX += 1) {
-        const worldX = chunk.chunkX * 16 + localX;
-        const worldZ = chunk.chunkZ * 16 + localZ;
-        if (worldX < tileRange.minBlockX || worldX > tileRange.maxBlockX || worldZ < tileRange.minBlockZ || worldZ > tileRange.maxBlockZ) {
-          continue;
-        }
-        const index = localZ * 16 + localX;
-        const height = chunk.heights[index] ?? MIN_COLUMN_HEIGHT;
-        const blockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
-        const blockState = chunk.blockStates[index] || {};
-        const overlayHeight = chunk.overlayHeights[index] ?? MIN_COLUMN_HEIGHT;
-        const overlayBlockId = overlayHeight > MIN_COLUMN_HEIGHT ? chunk.palette[chunk.overlayBlocks[index]] || "minecraft:air" : "minecraft:air";
-        const overlayState = chunk.overlayStates[index] || {};
-        if (isAirBlock(blockId) && (isAirBlock(overlayBlockId) || overlayHeight <= MIN_COLUMN_HEIGHT)) {
-          continue;
-        }
-        const color = mapTileColumnColor(blockId, blockState, overlayBlockId, overlayState, Math.max(height, overlayHeight), worldX, worldZ, chunksByCoord, textureColors, missingColors);
-        if (!color) {
-          continue;
-        }
-        const pixelX = Math.floor((worldX - tileRange.minBlockX) / blocksPerPixel);
-        const pixelY = Math.floor((worldZ - tileRange.minBlockZ) / blocksPerPixel);
-        if (pixelX < 0 || pixelX >= MAP_TILE_SIZE || pixelY < 0 || pixelY >= MAP_TILE_SIZE) {
-          continue;
-        }
-        const pixelIndex = pixelY * MAP_TILE_SIZE + pixelX;
-        red[pixelIndex] += color[0];
-        green[pixelIndex] += color[1];
-        blue[pixelIndex] += color[2];
-        alpha[pixelIndex] += color[3];
-        samples[pixelIndex] += 1;
-      }
-    }
-  }
-
-  for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
-    const count = samples[pixelIndex];
-    if (count < 1) {
-      continue;
-    }
-    const offset = pixelIndex * 4;
-    png.data[offset] = clampByte(red[pixelIndex] / count);
-    png.data[offset + 1] = clampByte(green[pixelIndex] / count);
-    png.data[offset + 2] = clampByte(blue[pixelIndex] / count);
-    png.data[offset + 3] = clampByte(alpha[pixelIndex] / count);
-    hasPixels = true;
-  }
-
-  if (hasPixels) {
-    fillTransparentMapTileHoles(png, transparentFillPixelLimit(blockScale));
-  }
-  return {
-    png,
-    hasPixels,
-    tileVersion,
-    missingColors: [...missingColors].sort(),
-    missingColorReason: missingColors.size > 0 ? textureColors.reason || "texture_color_missing" : "",
-  };
-}
-
 async function mapTileObjectSourceVersion(bucket, key) {
   const existing = await bucket.get(key);
   const version = Number(existing?.customMetadata?.sourceVersion || 0);
   return Number.isFinite(version) ? version : 0;
+}
+
+function mapTileObjectMetadataVersion(object) {
+  const version = Number(object?.customMetadata?.sourceVersion || object?.customMetadata?.tileVersion || 0);
+  return Number.isFinite(version) ? version : 0;
+}
+
+function sourceMapTilesForDerivedTile(tile) {
+  const sourceZoom = normalizeMapTileZoom(tile.zoom + 1);
+  const factor = 2;
+  const minTileX = tile.tileX * factor;
+  const minTileZ = tile.tileZ * factor;
+  const tiles = [];
+  for (const tileZ of range(minTileZ, minTileZ + factor - 1)) {
+    for (const tileX of range(minTileX, minTileX + factor - 1)) {
+      tiles.push({ world: tile.world, dimension: tile.dimension, zoom: sourceZoom, tileX, tileZ });
+    }
+  }
+  return tiles;
+}
+
+function downsampleBaseTileIntoPng(target, source, destX, destY, destSize) {
+  const scale = MAP_TILE_SIZE / destSize;
+  let hasPixels = false;
+  for (let y = 0; y < destSize; y += 1) {
+    for (let x = 0; x < destSize; x += 1) {
+      const color = averagePngRect(source, x * scale, y * scale, scale, scale);
+      if (!color) {
+        continue;
+      }
+      const offset = ((destY + y) * MAP_TILE_SIZE + destX + x) * 4;
+      target.data[offset] = color[0];
+      target.data[offset + 1] = color[1];
+      target.data[offset + 2] = color[2];
+      target.data[offset + 3] = color[3];
+      hasPixels = true;
+    }
+  }
+  return hasPixels;
+}
+
+function averagePngRect(png, x, y, width, height) {
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  let alpha = 0;
+  let samples = 0;
+  for (let pixelY = y; pixelY < y + height; pixelY += 1) {
+    for (let pixelX = x; pixelX < x + width; pixelX += 1) {
+      const offset = (pixelY * png.width + pixelX) * 4;
+      const pixelAlpha = png.data[offset + 3];
+      if (pixelAlpha < 1) {
+        continue;
+      }
+      red += png.data[offset] * pixelAlpha;
+      green += png.data[offset + 1] * pixelAlpha;
+      blue += png.data[offset + 2] * pixelAlpha;
+      alpha += pixelAlpha;
+      samples += 1;
+    }
+  }
+  if (samples < 1 || alpha < 1) {
+    return null;
+  }
+  return [clampByte(red / alpha), clampByte(green / alpha), clampByte(blue / alpha), clampByte(alpha / samples)];
 }
 
 async function loadTextureColorIndex(bucket) {
@@ -2539,7 +2651,20 @@ function mapTilesForChunkRange(payload) {
       }
     }
   }
-  return tiles.sort((a, b) => a.zoom - b.zoom || a.tileZ - b.tileZ || a.tileX - b.tileX);
+  return tiles.sort((a, b) => b.zoom - a.zoom || a.tileZ - b.tileZ || a.tileX - b.tileX);
+}
+
+function mapTileBackfillWriteLimit(tiles, start, limit) {
+  const first = tiles[start];
+  if (!first) {
+    return 0;
+  }
+  const maxLimit = first.zoom === MAP_TILE_BASE_ZOOM ? MAP_TILE_BACKFILL_BASE_WRITE_LIMIT : MAP_TILE_BACKFILL_WRITE_LIMIT;
+  let count = 0;
+  while (count < limit && count < maxLimit && tiles[start + count]?.zoom === first.zoom) {
+    count += 1;
+  }
+  return Math.max(1, count);
 }
 
 export function chunkRangeForMapTile(tile) {
