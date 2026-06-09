@@ -2296,6 +2296,40 @@ async function readChunksForRange(bucket, query, options = {}) {
   return chunksByCoord;
 }
 
+async function readChunksForCoords(bucket, query, coords, options = {}) {
+  const chunksByCoord = new Map();
+  const uniqueCoords = [];
+  const seen = new Set();
+  for (const coord of coords) {
+    const chunkX = numberOrThrow(coord.chunkX, "chunkX");
+    const chunkZ = numberOrThrow(coord.chunkZ, "chunkZ");
+    if (chunkX < query.minChunkX || chunkX > query.maxChunkX || chunkZ < query.minChunkZ || chunkZ > query.maxChunkZ) {
+      continue;
+    }
+    const key = coordKey(chunkX, chunkZ);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    uniqueCoords.push({ chunkX, chunkZ });
+  }
+
+  const readKeys = uniqueCoords.map((coord) => chunkKey(query.world, query.dimension, coord.chunkX, coord.chunkZ));
+  await mapWithConcurrency(readKeys, options.readConcurrency || BATCH_WRITE_CONCURRENCY, async (key) => {
+    const chunk = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(key)));
+    if (chunk) {
+      chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
+    }
+  });
+
+  const missingCoords = uniqueCoords.filter((coord) => !chunksByCoord.has(coordKey(coord.chunkX, coord.chunkZ)));
+  if (missingCoords.length > 0) {
+    await readChunkRegionsForMissingCoords(bucket, query, missingCoords, chunksByCoord);
+  }
+
+  return chunksByCoord;
+}
+
 async function migrateChunkRegionObject(bucket, key, options) {
   const region = await readR2Json(await bucket.get(key));
   if (!region || !Array.isArray(region.chunks)) {
@@ -2711,15 +2745,28 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
 async function renderDerivedMapTileFromChunks(bucket, tile, options = {}) {
   const range = chunkRangeForMapTile(tile);
   const chunkCount = chunkCountForRange(range);
+  const query = { world: tile.world, dimension: tile.dimension, ...range };
+  let sparse = false;
+  let chunksByCoord;
+  let sourceChunkCount = chunkCount;
   if (chunkCount > DERIVED_TILE_DIRECT_FALLBACK_MAX_CHUNKS) {
-    return { attempted: false, reason: "chunk_range_too_large", chunkCount, hasPixels: false, sourceVersion: 0 };
+    sparse = true;
+    const summaries = await readChunkSummariesForRange(bucket, query);
+    sourceChunkCount = summaries.size;
+    if (sourceChunkCount > DERIVED_TILE_DIRECT_FALLBACK_MAX_CHUNKS) {
+      return { attempted: false, reason: "chunk_range_too_large", chunkCount, sourceChunkCount, hasPixels: false, sourceVersion: 0 };
+    }
+    chunksByCoord = await readChunksForCoords(bucket, query, summaries.values(), { readConcurrency: options.readConcurrency });
+  } else {
+    chunksByCoord = await readChunksForRange(bucket, query, { readConcurrency: options.readConcurrency });
   }
-  const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range }, { readConcurrency: options.readConcurrency });
   const textureColors = options.textureColors || (await loadTextureColorIndex(bucket));
   const result = renderMapTilePng(tile, chunksByCoord, textureColors);
   return {
     attempted: true,
     chunkCount,
+    sourceChunkCount,
+    sparse,
     chunks: chunksByCoord.size,
     hasPixels: result.hasPixels,
     sourceVersion: result.tileVersion,
