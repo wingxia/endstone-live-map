@@ -279,6 +279,16 @@ function createEmptyChunk(overrides = {}) {
   });
 }
 
+function createChunkRange({ world = "world", dimension = "Overworld", minChunkX, maxChunkX, minChunkZ, maxChunkZ, updatedAt = 10 }) {
+  const chunks = [];
+  for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
+    for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
+      chunks.push(createChunk({ world, dimension, chunkX, chunkZ, updatedAt: updatedAt + chunks.length }));
+    }
+  }
+  return chunks;
+}
+
 function readPng(bytes) {
   return PNG.sync.read(Buffer.from(bytes));
 }
@@ -2751,7 +2761,7 @@ describe("worker routes", () => {
           deleted: false,
           sourceTiles: 0,
           missingSourceTiles: 0,
-          directFallback: expect.objectContaining({ preferred: true, attempted: true, sparse: true, hasPixels: true, chunks: 2, sourceVersion: 30 }),
+          directFallback: expect.objectContaining({ preferred: true, attempted: true, sparse: false, hasPixels: true, chunks: 2, sourceVersion: 30 }),
         }),
       ],
     });
@@ -2760,6 +2770,133 @@ describe("worker routes", () => {
     expect(png.width).toBe(256);
     expect(pngPixel(png, 0, 0)[3]).toBe(255);
     expect(pngPixel(png, 255, 255)[3]).toBe(255);
+  });
+
+  it("renders forced z0 backfills directly from a full production-sized chunk tile", async () => {
+    const env = createEnv();
+    const key = "map-tiles/v1/Bedrock_level/Nether/z0/10/-4.png";
+    await env.MAP_DATA.put("chunk-regions/v1/Bedrock_level/Nether/10/-4.json", JSON.stringify({
+      version: 1,
+      world: "Bedrock_level",
+      dimension: "Nether",
+      chunks: createChunkRange({
+        world: "Bedrock_level",
+        dimension: "Nether",
+        minChunkX: 160,
+        maxChunkX: 175,
+        minChunkZ: -64,
+        maxChunkZ: -49,
+        updatedAt: 100,
+      }),
+    }), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    const sourceKeys = [
+      "map-tiles/v1/Bedrock_level/Nether/z1/20/-8.png",
+      "map-tiles/v1/Bedrock_level/Nether/z1/21/-8.png",
+      "map-tiles/v1/Bedrock_level/Nether/z1/20/-7.png",
+      "map-tiles/v1/Bedrock_level/Nether/z1/21/-7.png",
+    ];
+    for (const sourceKey of sourceKeys) {
+      await env.MAP_DATA.put(sourceKey, new Uint8Array([1, 2, 3]), {
+        httpMetadata: { contentType: "image/png" },
+        customMetadata: { tileVersion: "5", sourceVersion: "5" },
+      });
+      env.MAP_DATA.objects.get(sourceKey).arrayBuffer = async () => {
+        throw new Error(`unexpected z1 source read: ${sourceKey}`);
+      };
+    }
+    env.MAP_DATA.getCalls = [];
+
+    const response = await backfillMapTile(env, { world: "Bedrock_level", dimension: "Nether", zoom: 0, minChunkX: 160, maxChunkX: 175, minChunkZ: -64, maxChunkZ: -49, dryRun: false, force: true });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      force: true,
+      written: 1,
+      tiles: [
+        expect.objectContaining({
+          deleted: false,
+          directFallback: expect.objectContaining({ preferred: true, attempted: true, sparse: false, hasPixels: true, chunks: 256, sourceVersion: 355 }),
+        }),
+      ],
+    });
+    expect(env.MAP_DATA.getCalls.filter((sourceKey) => sourceKeys.includes(sourceKey))).toHaveLength(0);
+    const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
+    expect(png.width).toBe(256);
+    expect(pngPixel(png, 0, 0)[3]).toBeGreaterThan(0);
+    expect(pngPixel(png, 255, 255)[3]).toBeGreaterThan(0);
+  });
+
+  it("renders forced z-1 backfills directly from four production-sized chunk regions", async () => {
+    const env = createEnv();
+    const key = "map-tiles/v1/Bedrock_level/Nether/z-1/5/-2.png";
+    const regionChunks = [
+      { regionX: 10, regionZ: -4, minChunkX: 160, maxChunkX: 175, minChunkZ: -64, maxChunkZ: -49 },
+      { regionX: 11, regionZ: -4, minChunkX: 176, maxChunkX: 191, minChunkZ: -64, maxChunkZ: -49 },
+      { regionX: 10, regionZ: -3, minChunkX: 160, maxChunkX: 175, minChunkZ: -48, maxChunkZ: -33 },
+      { regionX: 11, regionZ: -3, minChunkX: 176, maxChunkX: 191, minChunkZ: -48, maxChunkZ: -33 },
+    ];
+    let updatedAt = 1000;
+    for (const region of regionChunks) {
+      const chunks = createChunkRange({
+        world: "Bedrock_level",
+        dimension: "Nether",
+        minChunkX: region.minChunkX,
+        maxChunkX: region.maxChunkX,
+        minChunkZ: region.minChunkZ,
+        maxChunkZ: region.maxChunkZ,
+        updatedAt,
+      });
+      updatedAt += chunks.length;
+      await env.MAP_DATA.put(`chunk-regions/v1/Bedrock_level/Nether/${region.regionX}/${region.regionZ}.json`, JSON.stringify({
+        version: 1,
+        world: "Bedrock_level",
+        dimension: "Nether",
+        chunks,
+      }), {
+        httpMetadata: { contentType: "application/json" },
+      });
+    }
+    const sourceKeys = [
+      "map-tiles/v1/Bedrock_level/Nether/z0/10/-4.png",
+      "map-tiles/v1/Bedrock_level/Nether/z0/11/-4.png",
+      "map-tiles/v1/Bedrock_level/Nether/z0/10/-3.png",
+      "map-tiles/v1/Bedrock_level/Nether/z0/11/-3.png",
+    ];
+    for (const sourceKey of sourceKeys) {
+      await env.MAP_DATA.put(sourceKey, new Uint8Array([1, 2, 3]), {
+        httpMetadata: { contentType: "image/png" },
+        customMetadata: { tileVersion: "5", sourceVersion: "5" },
+      });
+      env.MAP_DATA.objects.get(sourceKey).arrayBuffer = async () => {
+        throw new Error(`unexpected z0 source read: ${sourceKey}`);
+      };
+    }
+    env.MAP_DATA.getCalls = [];
+
+    const response = await backfillMapTile(env, { world: "Bedrock_level", dimension: "Nether", zoom: -1, minChunkX: 160, maxChunkX: 191, minChunkZ: -64, maxChunkZ: -33, dryRun: false, force: true });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      force: true,
+      written: 1,
+      tiles: [
+        expect.objectContaining({
+          deleted: false,
+          directFallback: expect.objectContaining({ preferred: true, attempted: true, sparse: true, hasPixels: true, chunks: 1024, sourceVersion: 2023 }),
+        }),
+      ],
+    });
+    expect(env.MAP_DATA.getCalls.filter((sourceKey) => sourceKeys.includes(sourceKey))).toHaveLength(0);
+    const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
+    expect(png.width).toBe(256);
+    expect(pngPixel(png, 0, 0)[3]).toBeGreaterThan(0);
+    expect(pngPixel(png, 255, 255)[3]).toBeGreaterThan(0);
   });
 
   it("deletes empty low zoom image tiles during rebuild", async () => {
