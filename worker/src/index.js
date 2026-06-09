@@ -552,6 +552,7 @@ async function chunkCatalogDirectPage(bucket, options) {
   let skippedEmpty = 0;
   let metadataHits = 0;
   let bodyReads = 0;
+  let keyOnly = 0;
 
   await mapWithConcurrency(objects, CHUNK_CATALOG_DIRECT_READ_CONCURRENCY, async (object) => {
     const parsed = parseChunkKey(object.key);
@@ -570,17 +571,8 @@ async function chunkCatalogDirectPage(bucket, options) {
       return;
     }
 
-    bodyReads += 1;
-    const snapshot = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(object.key)));
-    if (!snapshot) {
-      invalidChunks += 1;
-      return;
-    }
-    if (isEmptyChunkSnapshot(snapshot)) {
-      skippedEmpty += 1;
-      return;
-    }
-    chunks.push(chunkCatalogEntry(snapshot, { source: "direct", key: object.key }));
+    keyOnly += 1;
+    chunks.push(chunkCatalogEntryFromKey(object, parsed));
   });
 
   chunks.sort(compareChunkRefs);
@@ -596,6 +588,7 @@ async function chunkCatalogDirectPage(bucket, options) {
     invalidChunks,
     metadataHits,
     bodyReads,
+    keyOnly,
     chunks,
     cursor: page.truncated ? page.cursor || "" : "",
     chunkCursor: null,
@@ -696,6 +689,19 @@ function chunkCatalogEntry(snapshot, metadata) {
     hasNonAir: !isEmptyChunkSnapshot(snapshot),
     source: metadata.source,
     key: metadata.key,
+  };
+}
+
+function chunkCatalogEntryFromKey(object, parsed) {
+  return {
+    world: cleanSegment(parsed.world),
+    dimension: cleanSegment(parsed.dimension),
+    chunkX: parsed.chunkX,
+    chunkZ: parsed.chunkZ,
+    hasNonAir: true,
+    source: "direct",
+    key: object.key,
+    keyOnly: true,
   };
 }
 

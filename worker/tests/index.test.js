@@ -1393,7 +1393,7 @@ describe("worker routes", () => {
     expect((await env.MAP_DATA.objects.get("chunks/v1/world/Overworld/12/13.json").json()).updatedAt).toBe(42);
   });
 
-  it("catalogs non-empty direct chunks for rebuilds", async () => {
+  it("catalogs historical direct chunk keys for rebuilds without body reads", async () => {
     const env = createEnv();
     await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ chunkX: 0, chunkZ: 0, updatedAt: 10 })), {
       httpMetadata: { contentType: "application/json" },
@@ -1404,6 +1404,7 @@ describe("worker routes", () => {
     await env.MAP_DATA.put("chunks/v1/world/Overworld/2/0.json", JSON.stringify(createChunk({ chunkX: 2, chunkZ: 0, updatedAt: 12 })), {
       httpMetadata: { contentType: "application/json" },
     });
+    env.MAP_DATA.getCalls = [];
 
     const response = await worker.fetch(
       new Request("https://map.buhe.li/api/plugin/chunks/catalog", {
@@ -1417,8 +1418,12 @@ describe("worker routes", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body).toMatchObject({ ok: true, source: "direct", matched: 2, skippedEmpty: 1, cursor: "2", done: false });
-    expect(body.chunks).toEqual([expect.objectContaining({ chunkX: 0, chunkZ: 0, source: "direct" })]);
+    expect(body).toMatchObject({ ok: true, source: "direct", matched: 2, keyOnly: 2, bodyReads: 0, cursor: "2", done: false });
+    expect(body.chunks).toEqual([
+      expect.objectContaining({ chunkX: 0, chunkZ: 0, source: "direct", keyOnly: true }),
+      expect.objectContaining({ chunkX: 1, chunkZ: 0, source: "direct", keyOnly: true }),
+    ]);
+    expect(env.MAP_DATA.getCalls).toHaveLength(0);
 
     const next = await worker.fetch(
       new Request("https://map.buhe.li/api/plugin/chunks/catalog", {
@@ -1431,7 +1436,7 @@ describe("worker routes", () => {
     );
     const nextBody = await next.json();
     expect(nextBody).toMatchObject({ ok: true, source: "direct", nextSource: "region", cursor: "", done: false });
-    expect(nextBody.chunks).toEqual([expect.objectContaining({ chunkX: 2, chunkZ: 0, source: "direct" })]);
+    expect(nextBody.chunks).toEqual([expect.objectContaining({ chunkX: 2, chunkZ: 0, source: "direct", keyOnly: true })]);
   });
 
   it("caps direct chunk catalog pages to avoid Worker overload", async () => {
@@ -1454,9 +1459,9 @@ describe("worker routes", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body).toMatchObject({ ok: true, source: "direct", matched: 16, cursor: "16", done: false });
+    expect(body).toMatchObject({ ok: true, source: "direct", matched: 16, keyOnly: 16, bodyReads: 0, cursor: "16", done: false });
     expect(body.chunks).toHaveLength(16);
-    expect(env.MAP_DATA.getCalls.filter((key) => key.startsWith("chunks/v1/world/Overworld/"))).toHaveLength(16);
+    expect(env.MAP_DATA.getCalls.filter((key) => key.startsWith("chunks/v1/world/Overworld/"))).toHaveLength(0);
   });
 
   it("catalogs direct chunks from object metadata without body reads", async () => {
