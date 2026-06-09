@@ -1,6 +1,8 @@
 name: map-tile-backfill-job
 
 on:
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       worker_url:
@@ -52,14 +54,14 @@ jobs:
       - name: Call Worker
         env:
           PLUGIN_TOKEN: ${{ secrets.PLUGIN_TOKEN }}
-          WORKER_URL: ${{ inputs.worker_url }}
-          ACTION: ${{ inputs.action }}
-          WORLD: ${{ inputs.world }}
-          DIMENSION: ${{ inputs.dimension }}
-          ZOOMS: ${{ inputs.zooms }}
-          INCLUDE_REGIONS: ${{ inputs.include_regions }}
-          INCLUDE_DIRECT: ${{ inputs.include_direct }}
-          REPLACE: ${{ inputs.replace }}
+          WORKER_URL: ${{ github.event_name == 'schedule' && 'https://map.buhe.li' || inputs.worker_url }}
+          ACTION: ${{ github.event_name == 'schedule' && 'step' || inputs.action }}
+          WORLD: ${{ github.event_name == 'schedule' && '' || inputs.world }}
+          DIMENSION: ${{ github.event_name == 'schedule' && '' || inputs.dimension }}
+          ZOOMS: ${{ github.event_name == 'schedule' && '-1,0,1,2,3' || inputs.zooms }}
+          INCLUDE_REGIONS: ${{ github.event_name == 'schedule' && 'true' || inputs.include_regions }}
+          INCLUDE_DIRECT: ${{ github.event_name == 'schedule' && 'true' || inputs.include_direct }}
+          REPLACE: ${{ github.event_name == 'schedule' && 'false' || inputs.replace }}
         run: |
           node <<'NODE'
           const workerUrl = process.env.WORKER_URL.replace(/\/+$/, "");
