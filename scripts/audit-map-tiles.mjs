@@ -171,6 +171,10 @@ async function auditWorld(options, meta) {
 }
 
 async function collectExpectedMapTiles(options, meta) {
+  if (options.token && !options.sampleOnly) {
+    return collectExpectedMapTilesFromCatalog(options, meta);
+  }
+
   const tileRefs = new Map();
   const chunkRefs = new Map();
   const ranges = chunkScanRanges(meta.bounds, meta.sampleChunks || [], options.sampleOnly);
@@ -221,6 +225,124 @@ async function collectExpectedMapTiles(options, meta) {
   const tiles = [...tileRefs.values()].sort((a, b) => a.zoom - b.zoom || a.tileZ - b.tileZ || a.tileX - b.tileX);
   stats.uniqueTiles = tiles.length;
   return { stats, tiles, chunks: [...chunkRefs.values()].sort((a, b) => a.world.localeCompare(b.world) || a.dimension.localeCompare(b.dimension) || a.chunkZ - b.chunkZ || a.chunkX - b.chunkX) };
+}
+
+async function collectExpectedMapTilesFromCatalog(options, meta) {
+  const stats = {
+    world: meta.world,
+    dimension: meta.dimension,
+    bounds: meta.bounds,
+    chunkCount: meta.chunkCount,
+    scannedRanges: 0,
+    rangeRequests: 0,
+    splitRanges: 0,
+    chunksRead: 0,
+    nonAirChunks: 0,
+    uniqueTiles: 0,
+    catalogPages: 0,
+    directChunks: 0,
+    regionChunks: 0,
+    skippedEmptyChunks: 0,
+    invalidChunks: 0,
+  };
+  const chunks = await fetchChunkCatalog(options, meta, stats);
+  console.error(`Cataloged ${meta.world}/${meta.dimension}: ${chunks.length} non-air chunks from ${stats.catalogPages} pages`);
+  return expectedMapTilesFromChunks(meta, chunks, stats);
+}
+
+function expectedMapTilesFromChunks(meta, chunks, stats) {
+  const tileRefs = new Map();
+  const chunkRefs = new Map();
+  for (const chunk of chunks) {
+    if (!chunkHasNonAirPixels(chunk)) {
+      continue;
+    }
+    stats.nonAirChunks += 1;
+    const ref = {
+      world: chunk.world || meta.world,
+      dimension: chunk.dimension || meta.dimension,
+      chunkX: chunk.chunkX,
+      chunkZ: chunk.chunkZ,
+    };
+    chunkRefs.set(`${ref.world}/${ref.dimension}/${ref.chunkX}/${ref.chunkZ}`, ref);
+    for (const zoom of zoomRange()) {
+      const tile = mapTileForChunk(ref.world, ref.dimension, ref.chunkX, ref.chunkZ, zoom);
+      const key = mapTileRefKey(tile);
+      if (!tileRefs.has(key)) {
+        tileRefs.set(key, { ...tile, sourceChunks: 0 });
+      }
+      tileRefs.get(key).sourceChunks += 1;
+    }
+  }
+
+  const tiles = [...tileRefs.values()].sort((a, b) => a.zoom - b.zoom || a.tileZ - b.tileZ || a.tileX - b.tileX);
+  stats.uniqueTiles = tiles.length;
+  return { stats, tiles, chunks: [...chunkRefs.values()].sort((a, b) => a.world.localeCompare(b.world) || a.dimension.localeCompare(b.dimension) || a.chunkZ - b.chunkZ || a.chunkX - b.chunkX) };
+}
+
+async function fetchChunkCatalog(options, meta, stats) {
+  const chunksByKey = new Map();
+  let source = "direct";
+  let cursor = "";
+  let chunkCursor = null;
+  while (source) {
+    const body = await fetchChunkCatalogPage(options, meta, { source, cursor, chunkCursor });
+    stats.catalogPages += 1;
+    stats.chunksRead += Array.isArray(body.chunks) ? body.chunks.length : 0;
+    stats.skippedEmptyChunks += body.skippedEmpty || 0;
+    stats.invalidChunks += body.invalidChunks || 0;
+    for (const chunk of Array.isArray(body.chunks) ? body.chunks : []) {
+      const key = `${chunk.world || meta.world}/${chunk.dimension || meta.dimension}/${chunk.chunkX}/${chunk.chunkZ}`;
+      if (!chunksByKey.has(key)) {
+        chunksByKey.set(key, {
+          world: chunk.world || meta.world,
+          dimension: chunk.dimension || meta.dimension,
+          chunkX: chunk.chunkX,
+          chunkZ: chunk.chunkZ,
+          hasNonAir: true,
+        });
+      }
+      if (chunk.source === "region") {
+        stats.regionChunks += 1;
+      } else {
+        stats.directChunks += 1;
+      }
+    }
+
+    if (body.done) {
+      source = body.nextSource || "";
+      cursor = "";
+      chunkCursor = null;
+    } else {
+      source = body.nextSource || source;
+      cursor = body.cursor || "";
+      chunkCursor = body.chunkCursor || null;
+    }
+  }
+  return [...chunksByKey.values()].sort((a, b) => a.world.localeCompare(b.world) || a.dimension.localeCompare(b.dimension) || a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
+}
+
+async function fetchChunkCatalogPage(options, meta, page) {
+  const response = await fetchWithRetry(`${options.workerUrl}/api/plugin/chunks/catalog`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${options.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      world: meta.world,
+      dimension: meta.dimension,
+      source: page.source,
+      cursor: page.cursor || "",
+      chunkCursor: page.chunkCursor || 0,
+      limit: 100,
+    }),
+  }, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`chunk catalog failed for ${meta.world}/${meta.dimension}/${page.source} cursor ${page.cursor || "0"} chunk ${page.chunkCursor || "0"}: HTTP ${response.status} ${JSON.stringify(body)}`);
+  }
+  return body;
 }
 
 async function fetchChunksForAuditRange(options, meta, range, stats) {

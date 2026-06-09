@@ -47,6 +47,8 @@ const CHUNK_REGION_MIGRATION_DEFAULT_LIMIT = 2;
 const CHUNK_REGION_MIGRATION_MAX_LIMIT = 10;
 const CHUNK_REGION_MIGRATION_CHUNK_DEFAULT_LIMIT = 24;
 const CHUNK_REGION_MIGRATION_CHUNK_MAX_LIMIT = 64;
+const CHUNK_CATALOG_DEFAULT_LIMIT = 25;
+const CHUNK_CATALOG_MAX_LIMIT = 100;
 const CHUNK_DIRECT_READ_LIMIT = REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS;
 const MIN_COLUMN_HEIGHT = -64;
 const SEA_LEVEL = 63;
@@ -166,6 +168,14 @@ export default {
           return auth;
         }
         return handleChunkMaterialize(request, env);
+      }
+
+      if (url.pathname === "/api/plugin/chunks/catalog") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleChunkCatalog(request, env);
       }
 
       if (url.pathname === "/api/plugin/block-updates") {
@@ -505,6 +515,162 @@ async function handleChunkMaterialize(request, env) {
     missing: results.filter((result) => result.source === "missing").length,
     chunks: results,
   });
+}
+
+async function handleChunkCatalog(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
+  const options = normalizeChunkCatalogPayload(await request.json().catch(() => ({})));
+  if (options.source === "region") {
+    return json(await chunkCatalogRegionPage(bucket, options));
+  }
+  return json(await chunkCatalogDirectPage(bucket, options));
+}
+
+async function chunkCatalogDirectPage(bucket, options) {
+  const prefix = `chunks/v1/${cleanSegment(options.world)}/${cleanSegment(options.dimension)}/`;
+  const page = await bucket.list({ prefix, cursor: options.cursor || undefined, limit: options.limit });
+  const objects = page.objects || [];
+  const chunks = [];
+  let invalidChunks = 0;
+  let skippedEmpty = 0;
+
+  await mapWithConcurrency(objects, MAP_TILE_BACKFILL_READ_CONCURRENCY, async (object) => {
+    const parsed = parseChunkKey(object.key);
+    if (!parsed) {
+      invalidChunks += 1;
+      return;
+    }
+    const snapshot = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(object.key)));
+    if (!snapshot) {
+      invalidChunks += 1;
+      return;
+    }
+    if (isEmptyChunkSnapshot(snapshot)) {
+      skippedEmpty += 1;
+      return;
+    }
+    chunks.push(chunkCatalogEntry(snapshot, { source: "direct", key: object.key }));
+  });
+
+  chunks.sort(compareChunkRefs);
+  return {
+    ok: true,
+    source: "direct",
+    nextSource: page.truncated ? "direct" : "region",
+    world: options.world,
+    dimension: options.dimension,
+    matched: objects.length,
+    scanned: objects.length,
+    skippedEmpty,
+    invalidChunks,
+    chunks,
+    cursor: page.truncated ? page.cursor || "" : "",
+    chunkCursor: null,
+    done: false,
+  };
+}
+
+async function chunkCatalogRegionPage(bucket, options) {
+  const prefix = `${CHUNK_REGION_PREFIX}${cleanSegment(options.world)}/${cleanSegment(options.dimension)}/`;
+  const page = await bucket.list({ prefix, cursor: options.cursor || undefined, limit: 1 });
+  const object = (page.objects || [])[0];
+  if (!object) {
+    return {
+      ok: true,
+      source: "region",
+      nextSource: null,
+      world: options.world,
+      dimension: options.dimension,
+      matched: 0,
+      scanned: 0,
+      skippedEmpty: 0,
+      invalidChunks: 0,
+      invalidRegions: 0,
+      chunks: [],
+      cursor: "",
+      chunkCursor: null,
+      done: true,
+    };
+  }
+
+  const region = await readR2Json(await bucket.get(object.key));
+  if (!region || !Array.isArray(region.chunks)) {
+    return {
+      ok: true,
+      source: "region",
+      nextSource: page.truncated ? "region" : null,
+      world: options.world,
+      dimension: options.dimension,
+      matched: 1,
+      scanned: 0,
+      skippedEmpty: 0,
+      invalidChunks: 0,
+      invalidRegions: 1,
+      chunks: [],
+      cursor: page.truncated ? page.cursor || "" : "",
+      chunkCursor: null,
+      done: page.truncated !== true,
+    };
+  }
+
+  const chunks = [];
+  let invalidChunks = 0;
+  let skippedEmpty = 0;
+  let scanned = 0;
+  let index = Math.max(0, Math.min(region.chunks.length, options.chunkCursor));
+  for (; index < region.chunks.length && chunks.length < options.limit; index += 1) {
+    scanned += 1;
+    const snapshot = normalizeOptionalChunkSnapshot(region.chunks[index]);
+    if (!snapshot) {
+      invalidChunks += 1;
+      continue;
+    }
+    if (isEmptyChunkSnapshot(snapshot)) {
+      skippedEmpty += 1;
+      continue;
+    }
+    chunks.push(chunkCatalogEntry(snapshot, { source: "region", key: object.key }));
+  }
+
+  chunks.sort(compareChunkRefs);
+  const nextChunkCursor = index < region.chunks.length ? String(index) : null;
+  const nextCursor = nextChunkCursor ? options.cursor : page.truncated ? page.cursor || "" : "";
+  return {
+    ok: true,
+    source: "region",
+    nextSource: nextChunkCursor || page.truncated ? "region" : null,
+    world: options.world,
+    dimension: options.dimension,
+    matched: 1,
+    scanned,
+    skippedEmpty,
+    invalidChunks,
+    invalidRegions: 0,
+    chunks,
+    cursor: nextCursor,
+    chunkCursor: nextChunkCursor,
+    done: !nextChunkCursor && page.truncated !== true,
+  };
+}
+
+function chunkCatalogEntry(snapshot, metadata) {
+  return {
+    world: snapshot.world,
+    dimension: snapshot.dimension,
+    chunkX: snapshot.chunkX,
+    chunkZ: snapshot.chunkZ,
+    updatedAt: snapshot.updatedAt,
+    source: metadata.source,
+    key: metadata.key,
+  };
+}
+
+function compareChunkRefs(a, b) {
+  return a.world.localeCompare(b.world) || a.dimension.localeCompare(b.dimension) || a.chunkZ - b.chunkZ || a.chunkX - b.chunkX;
 }
 
 function withoutIndex(value) {
@@ -1505,6 +1671,18 @@ function normalizeChunkMaterializePayload(payload) {
     chunkX: numberOrThrow(chunk.chunkX, `chunks[${index}].chunkX`),
     chunkZ: numberOrThrow(chunk.chunkZ, `chunks[${index}].chunkZ`),
   }));
+}
+
+export function normalizeChunkCatalogPayload(payload) {
+  const source = payload?.source === "region" ? "region" : "direct";
+  return {
+    source,
+    world: cleanSegment(payload?.world || "world"),
+    dimension: cleanSegment(payload?.dimension || "Overworld"),
+    cursor: typeof payload?.cursor === "string" && payload.cursor.length > 0 ? payload.cursor : "",
+    chunkCursor: Math.max(0, numberOrThrow(payload?.chunkCursor ?? 0, "chunkCursor")),
+    limit: Math.min(CHUNK_CATALOG_MAX_LIMIT, Math.max(1, numberOrThrow(payload?.limit ?? CHUNK_CATALOG_DEFAULT_LIMIT, "limit"))),
+  };
 }
 
 function normalizeBlockUpdate(update) {

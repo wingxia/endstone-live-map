@@ -11,6 +11,7 @@ import worker, {
   normalizeBlockUpdateBatch,
   normalizeBlockUpdateBatches,
   normalizeCleanupPayload,
+  normalizeChunkCatalogPayload,
   normalizeChunkRegionMigrationPayload,
   normalizeEmptyChunkPrunePayload,
   normalizeChunkBatchPayload,
@@ -83,11 +84,12 @@ class MockR2Bucket {
     this.listCalls.push(prefix);
     const keys = [...this.objects.keys()].filter((key) => key.startsWith(prefix)).sort();
     const limit = Number.isFinite(Number(options.limit)) ? Math.max(1, Number(options.limit)) : keys.length;
-    const selected = keys.slice(0, limit);
+    const start = Number.isFinite(Number(options.cursor)) ? Math.max(0, Number(options.cursor)) : 0;
+    const selected = keys.slice(start, start + limit);
     return {
       objects: selected.map((key) => ({ key })),
-      truncated: keys.length > selected.length,
-      cursor: keys.length > selected.length ? String(selected.length) : undefined,
+      truncated: keys.length > start + selected.length,
+      cursor: keys.length > start + selected.length ? String(start + selected.length) : undefined,
     };
   }
 }
@@ -515,6 +517,17 @@ describe("worker helpers", () => {
       dryRun: false,
       deleteRegions: true,
     });
+  });
+
+  it("normalizes chunk catalog payloads", () => {
+    expect(normalizeChunkCatalogPayload({ world: "Bedrock level", dimension: "The End", source: "region", limit: 999, chunkCursor: 2 })).toMatchObject({
+      source: "region",
+      world: "Bedrock_level",
+      dimension: "The_End",
+      limit: 100,
+      chunkCursor: 2,
+    });
+    expect(normalizeChunkCatalogPayload({ source: "invalid", chunkCursor: -1 })).toMatchObject({ source: "direct", chunkCursor: 0 });
   });
 
   it("normalizes empty chunk prune payloads", () => {
@@ -1342,6 +1355,89 @@ describe("worker routes", () => {
     expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/12/13.json")).toBe(true);
     expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/11/13.json")).toBe(false);
     expect((await env.MAP_DATA.objects.get("chunks/v1/world/Overworld/12/13.json").json()).updatedAt).toBe(42);
+  });
+
+  it("catalogs non-empty direct chunks for rebuilds", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ chunkX: 0, chunkZ: 0, updatedAt: 10 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/1/0.json", JSON.stringify(createEmptyChunk({ chunkX: 1, chunkZ: 0, updatedAt: 11 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/2/0.json", JSON.stringify(createChunk({ chunkX: 2, chunkZ: 0, updatedAt: 12 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/catalog", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", source: "direct", limit: 2 }),
+      }),
+      env,
+      {},
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, source: "direct", matched: 2, skippedEmpty: 1, cursor: "2", done: false });
+    expect(body.chunks).toEqual([expect.objectContaining({ chunkX: 0, chunkZ: 0, source: "direct" })]);
+
+    const next = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/catalog", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", source: "direct", limit: 2, cursor: body.cursor }),
+      }),
+      env,
+      {},
+    );
+    const nextBody = await next.json();
+    expect(nextBody).toMatchObject({ ok: true, source: "direct", nextSource: "region", cursor: "", done: false });
+    expect(nextBody.chunks).toEqual([expect.objectContaining({ chunkX: 2, chunkZ: 0, source: "direct" })]);
+  });
+
+  it("catalogs legacy region chunks for rebuilds with chunk cursors", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put(
+      "chunk-regions/v1/world/Overworld/0/0.json",
+      JSON.stringify({
+        version: 1,
+        world: "world",
+        dimension: "Overworld",
+        chunks: [createChunk({ chunkX: 0, chunkZ: 0, updatedAt: 10 }), createEmptyChunk({ chunkX: 1, chunkZ: 0, updatedAt: 11 }), createChunk({ chunkX: 2, chunkZ: 0, updatedAt: 12 })],
+      }),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/catalog", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", source: "region", limit: 1 }),
+      }),
+      env,
+      {},
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, source: "region", matched: 1, scanned: 1, chunkCursor: "1", done: false });
+    expect(body.chunks).toEqual([expect.objectContaining({ chunkX: 0, source: "region" })]);
+
+    const next = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/catalog", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", source: "region", limit: 1, chunkCursor: body.chunkCursor }),
+      }),
+      env,
+      {},
+    );
+    const nextBody = await next.json();
+    expect(nextBody).toMatchObject({ ok: true, source: "region", skippedEmpty: 1, scanned: 2, chunkCursor: null, done: true });
+    expect(nextBody.chunks).toEqual([expect.objectContaining({ chunkX: 2, source: "region" })]);
   });
 
   it("returns compact chunk summaries when requested", async () => {
