@@ -2158,46 +2158,6 @@ function chunkPrefix(world, dimension, chunkX) {
   return `chunks/v1/${cleanSegment(world)}/${cleanSegment(dimension)}/${numberOrThrow(chunkX, "chunkX")}/`;
 }
 
-async function putChunkRegionSnapshots(bucket, snapshots) {
-  const groups = new Map();
-  for (const snapshot of snapshots) {
-    const regionX = floorDiv(snapshot.chunkX, REGION_SIZE_CHUNKS);
-    const regionZ = floorDiv(snapshot.chunkZ, REGION_SIZE_CHUNKS);
-    const key = chunkRegionKey(snapshot.world, snapshot.dimension, regionX, regionZ);
-    if (!groups.has(key)) {
-      groups.set(key, { key, world: snapshot.world, dimension: snapshot.dimension, regionX, regionZ, chunks: [] });
-    }
-    groups.get(key).chunks.push(snapshot);
-  }
-
-  return mapWithConcurrency([...groups.values()], BATCH_WRITE_CONCURRENCY, async (group) => {
-    const existing = await readR2Json(await bucket.get(group.key));
-    const chunks = new Map();
-    for (const chunk of Array.isArray(existing?.chunks) ? existing.chunks : []) {
-      chunks.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
-    }
-    for (const chunk of group.chunks) {
-      chunks.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
-    }
-
-    const region = {
-      version: 1,
-      world: group.world,
-      dimension: group.dimension,
-      regionSize: REGION_SIZE_CHUNKS,
-      regionX: group.regionX,
-      regionZ: group.regionZ,
-      updatedAt: Math.max(...[...chunks.values()].map((chunk) => chunk.updatedAt || 0)),
-      chunks: [...chunks.values()].sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX),
-    };
-    await bucket.put(group.key, JSON.stringify(region), {
-      httpMetadata: { contentType: "application/json; charset=utf-8" },
-      customMetadata: { world: group.world, dimension: group.dimension },
-    });
-    return { key: group.key, chunks: region.chunks.length };
-  });
-}
-
 async function readStoredChunkSnapshot(bucket, world, dimension, chunkX, chunkZ) {
   const direct = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(chunkKey(world, dimension, chunkX, chunkZ))));
   if (direct) {

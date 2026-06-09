@@ -541,11 +541,6 @@ async function rebuildMapTilesAndAudit(options) {
   for (const meta of metas) {
     const { stats, tiles, chunks } = await collectExpectedMapTiles(options, meta);
     const rebuildTiles = tiles.filter((candidate) => zooms.includes(candidate.zoom));
-    if (options.deleteExisting) {
-      const cleanup = await deleteMapTileObjects(options, meta, rebuildTiles);
-      console.error(`Deleted existing ${meta.world}/${meta.dimension} map tiles: ${JSON.stringify(cleanup)}`);
-      cleanups.push(cleanup);
-    }
     console.error(`Rebuilding ${meta.world}/${meta.dimension}: ${rebuildTiles.length} expected image tiles from ${stats.nonAirChunks} non-air chunks`);
     const materialized = zooms.includes(MAP_TILE_BASE_ZOOM) ? await materializeChunks(options, chunks) : { skipped: true, calls: 0, requested: 0, materialized: 0, direct: 0, missing: 0 };
     console.error(`Materialized ${meta.world}/${meta.dimension}: ${JSON.stringify(materialized)}`);
@@ -560,6 +555,11 @@ async function rebuildMapTilesAndAudit(options) {
         byZoom[`z${zoom}`].deleted += result.deleted;
       }
       console.error(`Rebuilt ${meta.world}/${meta.dimension} z${zoom}: ${JSON.stringify(byZoom[`z${zoom}`])}`);
+    }
+    if (options.deleteExisting) {
+      const cleanup = await deleteMapTileObjects(options, meta, rebuildTiles);
+      console.error(`Cleaned stale ${meta.world}/${meta.dimension} map tiles after rebuild: ${JSON.stringify(cleanup)}`);
+      cleanups.push(cleanup);
     }
     const worldMeta = options.skipAudit ? { skipped: true } : await touchWorldMetaTileVersion(options, meta);
     console.error(`Touched ${meta.world}/${meta.dimension} world metadata: ${JSON.stringify(worldMeta)}`);
@@ -771,45 +771,14 @@ async function deleteMapTileObjects(options, meta, tiles) {
   if (!options.world || !options.dimension) {
     throw new Error("--delete-existing for map tiles requires --world and --dimension");
   }
-  if (shouldDeleteExactMapTileObjects(options)) {
-    return deleteExactMapTileObjects(options, meta, tiles);
-  }
-  const stats = { prefix: mapTileCleanupPrefix(options.world, options.dimension), calls: 0, matched: 0, deleted: 0 };
-  let cursor = "";
-  do {
-    const response = await fetchWithRetry(`${options.workerUrl}/api/plugin/map-data/cleanup`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${options.token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        prefix: stats.prefix,
-        cursor,
-        limit: options.cleanupLimit,
-        dryRun: false,
-        confirm: "delete-map-data-v1",
-      }),
-    }, options);
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(`map tile cleanup failed at cursor ${cursor || "0"}: HTTP ${response.status} ${JSON.stringify(body)}`);
-    }
-    stats.calls += 1;
-    stats.matched += body.matched || 0;
-    stats.deleted += body.deleted || 0;
-    cursor = body.cursor || "";
-  } while (cursor);
-  return stats;
+  return deleteStaleMapTileObjects(options, meta, tiles);
 }
 
-function shouldDeleteExactMapTileObjects(options) {
-  return options.chunkRange !== null || options.zoom !== null;
-}
-
-async function deleteExactMapTileObjects(options, meta, tiles) {
-  const stats = { mode: "exact", world: meta.world, dimension: meta.dimension, calls: 0, matched: 0, deleted: 0 };
-  const keys = [...new Set(tiles.map((tile) => mapTileCleanupKey(tile)))];
+async function deleteStaleMapTileObjects(options, meta, tiles) {
+  const expectedKeys = new Set(tiles.map((tile) => mapTileCleanupKey(tile)));
+  const existingKeys = await listMapTileKeys(options, meta);
+  const keys = staleExactMapTileCleanupKeys(existingKeys, expectedKeys, options);
+  const stats = { mode: "stale", world: meta.world, dimension: meta.dimension, stale: keys.length, calls: 0, matched: 0, deleted: 0 };
   for (let index = 0; index < keys.length; index += options.cleanupLimit) {
     const selected = keys.slice(index, index + options.cleanupLimit);
     const response = await fetchWithRetry(`${options.workerUrl}/api/plugin/map-data/cleanup`, {
@@ -833,6 +802,77 @@ async function deleteExactMapTileObjects(options, meta, tiles) {
     stats.deleted += body.deleted || 0;
   }
   return stats;
+}
+
+async function listMapTileKeys(options, meta) {
+  const prefix = mapTileCleanupPrefix(meta.world, meta.dimension);
+  const keys = [];
+  let cursor = "";
+  do {
+    const url = new URL(`${options.workerUrl}/api/plugin/map-data/cleanup`);
+    const response = await fetchWithRetry(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${options.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prefix,
+        cursor,
+        limit: options.cleanupLimit,
+        dryRun: true,
+      }),
+    }, options);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(`map tile cleanup scan failed at cursor ${cursor || "0"}: HTTP ${response.status} ${JSON.stringify(body)}`);
+    }
+    for (const key of Array.isArray(body.keys) ? body.keys : []) {
+      if (typeof key === "string") {
+        keys.push(key);
+      }
+    }
+    for (const object of Array.isArray(body.objects) ? body.objects : []) {
+      if (typeof object?.key === "string") {
+        keys.push(object.key);
+      }
+    }
+    cursor = body.cursor || "";
+  } while (cursor);
+  return keys;
+}
+
+export function staleExactMapTileCleanupKeys(existingKeys, expectedKeys, options) {
+  const allowedPrefix = mapTileCleanupPrefix(options.world, options.dimension);
+  const scopeKeys = staleCleanupScopeKeys(options);
+  const zoomPrefix = options.zoom === null ? "" : `${allowedPrefix}z${options.zoom}/`;
+  return [...new Set(existingKeys)]
+    .filter((key) => key.startsWith(allowedPrefix))
+    .filter((key) => !zoomPrefix || key.startsWith(zoomPrefix))
+    .filter((key) => !scopeKeys || scopeKeys.has(key))
+    .filter((key) => !expectedKeys.has(key))
+    .sort();
+}
+
+function staleCleanupScopeKeys(options) {
+  if (!options.chunkRange) {
+    return null;
+  }
+  const keys = new Set();
+  const zooms = options.zoom === null ? zoomRange() : [options.zoom];
+  for (const zoom of zooms) {
+    const chunksPerTile = chunksPerMapTile(zoom);
+    const minTileX = floorDiv(options.chunkRange.minChunkX, chunksPerTile);
+    const maxTileX = floorDiv(options.chunkRange.maxChunkX, chunksPerTile);
+    const minTileZ = floorDiv(options.chunkRange.minChunkZ, chunksPerTile);
+    const maxTileZ = floorDiv(options.chunkRange.maxChunkZ, chunksPerTile);
+    for (let tileZ = minTileZ; tileZ <= maxTileZ; tileZ += 1) {
+      for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+        keys.add(mapTileCleanupKey({ world: options.world, dimension: options.dimension, zoom, tileX, tileZ }));
+      }
+    }
+  }
+  return keys;
 }
 
 export function mapTileCleanupPrefix(world, dimension) {
