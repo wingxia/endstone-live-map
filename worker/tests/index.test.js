@@ -362,7 +362,9 @@ describe("worker helpers", () => {
       zooms: [-1, 0, 1, 2, 3, 4],
       limit: 100,
       dryRun: true,
+      touchMeta: true,
     });
+    expect(normalizeMapTileBackfillPayload({ minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, touchMeta: false })).toMatchObject({ touchMeta: false });
     expect(() => normalizeChunkBatchPayload({ chunks: [] })).toThrow(/chunks/);
     expect(
       normalizeBlockUpdateBatch({
@@ -2222,6 +2224,78 @@ describe("worker routes", () => {
     expect(body).toMatchObject({ ok: true, written: 1, worldMetaTouched: false });
     expect(body.worldMetaError).toContain("JSON");
     expect(env.MAP_DATA.objects.has(key)).toBe(true);
+  });
+
+  it("can skip world metadata touches during forced map tile backfill", async () => {
+    const env = createEnv();
+    const metaKey = "meta/v1/world/Overworld.json";
+    const tileKey = "map-tiles/v1/world/Overworld/z4/0/0.png";
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ updatedAt: 10 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put(
+      metaKey,
+      JSON.stringify(
+        normalizeWorldMeta({
+          world: "world",
+          dimension: "Overworld",
+          status: "live",
+          chunkCount: 1,
+          bounds: { minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0 },
+          topBlocks: { "minecraft:grass_block": 256 },
+          importedAt: 10,
+          updatedAt: 10,
+        }),
+      ),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+    env.MAP_DATA.getCalls = [];
+    env.MAP_DATA.putCalls = [];
+
+    const response = await backfillMapTile(env, { world: "world", dimension: "Overworld", zoom: 4, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true, touchMeta: false });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, touchMeta: false, worldMetaTouched: false, worldMetaError: "", written: 1 });
+    expect(env.MAP_DATA.objects.has(tileKey)).toBe(true);
+    expect(env.MAP_DATA.getCalls).not.toContain(metaKey);
+    expect(env.MAP_DATA.putCalls).not.toContain(metaKey);
+    expect(await env.MAP_DATA.objects.get(metaKey).json()).toMatchObject({ updatedAt: 10 });
+  });
+
+  it("touches world metadata through the plugin touch endpoint", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put(
+      "meta/v1/world/Overworld.json",
+      JSON.stringify(
+        normalizeWorldMeta({
+          world: "world",
+          dimension: "Overworld",
+          status: "live",
+          chunkCount: 1,
+          bounds: { minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0 },
+          topBlocks: { "minecraft:grass_block": 256 },
+          importedAt: 10,
+          updatedAt: 10,
+        }),
+      ),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/world-meta/touch", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", updatedAt: 123 }),
+      }),
+      env,
+      {},
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, key: "meta/v1/world/Overworld.json", touched: true, updatedAt: 123 });
+    expect(await env.MAP_DATA.objects.get("meta/v1/world/Overworld.json").json()).toMatchObject({ updatedAt: 123 });
   });
 
   it("returns structured failures for map tile backfill rebuild errors", async () => {

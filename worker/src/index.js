@@ -218,6 +218,14 @@ export default {
         return handleWorldMetaUpload(request, env);
       }
 
+      if (url.pathname === "/api/plugin/world-meta/touch") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleWorldMetaTouch(request, env);
+      }
+
       if (url.pathname === "/api/plugin/lands") {
         const auth = requirePluginAuth(request, env);
         if (auth) {
@@ -1032,10 +1040,9 @@ async function handleMapTileBackfill(request, env) {
   }
   let worldMetaTouched = false;
   let worldMetaError = "";
-  if (!payload.dryRun && rebuildVersion > 0 && results.some((tile) => !tile.skipped)) {
+  if (!payload.dryRun && payload.touchMeta && rebuildVersion > 0 && results.some((tile) => !tile.skipped)) {
     try {
-      await touchWorldMetaTileVersion(bucket, payload.world, payload.dimension, rebuildVersion);
-      worldMetaTouched = true;
+      worldMetaTouched = (await touchWorldMetaTileVersion(bucket, payload.world, payload.dimension, rebuildVersion)).touched;
     } catch (error) {
       worldMetaError = error instanceof Error ? error.message : String(error);
     }
@@ -1045,6 +1052,7 @@ async function handleMapTileBackfill(request, env) {
     ok: true,
     dryRun: payload.dryRun,
     force: payload.force,
+    touchMeta: payload.touchMeta,
     total: tiles.length,
     matched: selected.length,
     written: payload.dryRun ? 0 : results.filter((tile) => !tile.deleted).length,
@@ -1140,6 +1148,15 @@ async function handleWorldMetaUpload(request, env) {
     customMetadata: { world: meta.world, dimension: meta.dimension },
   });
   return json({ ok: true, key });
+}
+
+async function handleWorldMetaTouch(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  const payload = normalizeWorldMetaTouchPayload(await request.json());
+  return json({ ok: true, ...(await touchWorldMetaTileVersion(bucket, payload.world, payload.dimension, payload.updatedAt)) });
 }
 
 async function handleLandUpload(request, env, ctx) {
@@ -1238,7 +1255,7 @@ async function touchWorldMetaTileVersion(bucket, world, dimension, updatedAt) {
   const key = worldMetaKey(world, dimension);
   const existing = normalizeOptionalWorldMeta(await readR2Json(await bucket.get(key)));
   if (!existing) {
-    return;
+    return { key, touched: false, updatedAt };
   }
   const next = {
     ...existing,
@@ -1248,6 +1265,7 @@ async function touchWorldMetaTileVersion(bucket, world, dimension, updatedAt) {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
     customMetadata: { world: next.world, dimension: next.dimension },
   });
+  return { key, touched: true, updatedAt: next.updatedAt };
 }
 
 async function handleWorldsGet(env) {
@@ -1847,6 +1865,16 @@ export function normalizeMapTileBackfillPayload(payload) {
     cursor: typeof payload.cursor === "string" && payload.cursor.length > 0 ? payload.cursor : "",
     dryRun: payload.dryRun !== false,
     force: payload.force === true,
+    touchMeta: payload.touchMeta !== false,
+  };
+}
+
+function normalizeWorldMetaTouchPayload(payload) {
+  const updatedAt = payload.updatedAt === undefined || payload.updatedAt === null ? Date.now() : numberOrThrow(payload.updatedAt, "updatedAt");
+  return {
+    world: cleanSegment(payload.world || "world"),
+    dimension: cleanSegment(payload.dimension || "Overworld"),
+    updatedAt,
   };
 }
 
