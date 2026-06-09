@@ -1133,10 +1133,15 @@ describe("worker routes", () => {
   it("renders sparse very-low-zoom tiles from chunks without scanning the full range", async () => {
     const env = createEnv();
     const key = "map-tiles/v1/Bedrock_level/Nether/z-1/-1/-1.png";
-    await env.MAP_DATA.put("chunks/v1/Bedrock_level/Nether/-14/-4.json", JSON.stringify(createChunk({ world: "Bedrock_level", dimension: "Nether", chunkX: -14, chunkZ: -4 })), {
-      httpMetadata: { contentType: "application/json" },
-    });
-    await env.MAP_DATA.put("chunks/v1/Bedrock_level/Nether/-1/-1.json", JSON.stringify(createChunk({ world: "Bedrock_level", dimension: "Nether", chunkX: -1, chunkZ: -1 })), {
+    await env.MAP_DATA.put("chunk-regions/v1/Bedrock_level/Nether/-1/-1.json", JSON.stringify({
+      version: 1,
+      world: "Bedrock_level",
+      dimension: "Nether",
+      chunks: [
+        createChunk({ world: "Bedrock_level", dimension: "Nether", chunkX: -14, chunkZ: -4 }),
+        createChunk({ world: "Bedrock_level", dimension: "Nether", chunkX: -1, chunkZ: -1 }),
+      ],
+    }), {
       httpMetadata: { contentType: "application/json" },
     });
 

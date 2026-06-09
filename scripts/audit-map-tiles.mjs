@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { PNG } from "pngjs";
 
 const TILE_SIZE = 256;
+const MAX_CHUNKS_PER_AUDIT_REQUEST = 256;
 const REGION_SIZE_CHUNKS = 16;
 const MAP_TILE_MIN_ZOOM = -1;
 const MAP_TILE_BASE_ZOOM = 4;
@@ -860,7 +861,7 @@ function chunkRangeForMeta(meta, range) {
   if (clipped.maxChunkX < clipped.minChunkX || clipped.maxChunkZ < clipped.minChunkZ) {
     return [];
   }
-  return [clipped];
+  return splitChunkRangeToMaxArea(clipped, MAX_CHUNKS_PER_AUDIT_REQUEST);
 }
 
 function chunkUrl(workerUrl, world, dimension, range) {
@@ -929,6 +930,13 @@ function splitChunkRange(range) {
     }
   }
   return parts;
+}
+
+function splitChunkRangeToMaxArea(range, maxArea) {
+  if (chunkRangeArea(range) <= maxArea) {
+    return [range];
+  }
+  return splitChunkRange(range).flatMap((part) => splitChunkRangeToMaxArea(part, maxArea));
 }
 
 function chunkRangeArea(range) {
