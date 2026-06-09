@@ -395,6 +395,22 @@ async function repairUntilClean(options) {
   };
 }
 
+function mapTileBackfillRanges(tiles) {
+  const ranges = [];
+  for (const tile of [...tiles].sort((a, b) => a.tileZ - b.tileZ || a.tileX - b.tileX)) {
+    const range = chunkRangeForMapTile(tile);
+    const last = ranges[ranges.length - 1];
+    if (last && last.tile.zoom === tile.zoom && last.tile.tileZ === tile.tileZ && last.maxTileX + 1 === tile.tileX) {
+      last.maxTileX = tile.tileX;
+      last.chunkRange.maxChunkX = range.maxChunkX;
+      last.chunkRange.maxBlockX = range.maxBlockX;
+      continue;
+    }
+    ranges.push({ tile, maxTileX: tile.tileX, chunkRange: range });
+  }
+  return ranges;
+}
+
 async function rebuildMapTilesAndAudit(options) {
   if (!options.token) {
     throw new Error("rebuild mode requires --token or PLUGIN_TOKEN");
@@ -425,8 +441,8 @@ async function rebuildMapTilesAndAudit(options) {
     const byZoom = {};
     for (let zoom = MAP_TILE_BASE_ZOOM; zoom >= MAP_TILE_MIN_ZOOM; zoom -= 1) {
       byZoom[`z${zoom}`] = { calls: 0, matched: 0, written: 0, deleted: 0 };
-      for (const tile of tiles.filter((candidate) => candidate.zoom === zoom)) {
-        const result = await backfillAllMapTilesForRange(options, tile, chunkRangeForMapTile(tile), zoom);
+      for (const range of mapTileBackfillRanges(tiles.filter((candidate) => candidate.zoom === zoom))) {
+        const result = await backfillAllMapTilesForRange(options, range.tile, range.chunkRange, zoom);
         byZoom[`z${zoom}`].calls += result.calls;
         byZoom[`z${zoom}`].matched += result.matched;
         byZoom[`z${zoom}`].written += result.written;
