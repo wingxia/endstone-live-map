@@ -507,6 +507,10 @@ describe("worker helpers", () => {
       limit: 500,
       dryRun: false,
     });
+    expect(normalizeCleanupPayload({ prefix: "map-tiles/v1/Bedrock_level/Nether/" })).toMatchObject({
+      prefix: "map-tiles/v1/Bedrock_level/Nether/",
+    });
+    expect(() => normalizeCleanupPayload({ prefix: "map-tiles/v1/Bedrock_level/" })).toThrow(/cleanup prefix/);
     expect(() => normalizeCleanupPayload({ prefix: "textures/v1/" })).toThrow(/cleanup prefix/);
   });
 
@@ -2890,6 +2894,28 @@ describe("worker routes", () => {
     expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(false);
     expect(env.MAP_DATA.objects.has("chunk-regions/v1/world/Overworld/0/0.json")).toBe(true);
     expect(env.MAP_DATA.objects.has("textures/v1/manifest.json")).toBe(true);
+  });
+
+  it("cleans map tiles only within the requested world and dimension", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("map-tiles/v1/Bedrock_level/Nether/z4/0/0.png", new Uint8Array([1]));
+    await env.MAP_DATA.put("map-tiles/v1/Bedrock_level/Overworld/z4/0/0.png", new Uint8Array([1]));
+    await env.MAP_DATA.put("map-tiles/v1/Other/Nether/z4/0/0.png", new Uint8Array([1]));
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-data/cleanup", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ prefix: "map-tiles/v1/Bedrock_level/Nether/", dryRun: false, confirm: "delete-map-data-v1" }),
+      }),
+      env,
+      {},
+    );
+
+    expect(await response.json()).toMatchObject({ dryRun: false, matched: 1, deleted: 1 });
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/Bedrock_level/Nether/z4/0/0.png")).toBe(false);
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/Bedrock_level/Overworld/z4/0/0.png")).toBe(true);
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/Other/Nether/z4/0/0.png")).toBe(true);
   });
 
   it("rejects cleanup attempts for texture artifacts with a clear error", async () => {
