@@ -57,9 +57,16 @@ function parseArgs(argv) {
     cleanupLimit: 500,
     world: "",
     dimension: "",
+    zoom: null,
+    minChunkX: null,
+    maxChunkX: null,
+    minChunkZ: null,
+    maxChunkZ: null,
+    chunkRange: null,
     deleteExisting: false,
     skipAudit: false,
     failOnMismatch: false,
+    touchMeta: false,
     sampleOnly: false,
   };
 
@@ -81,6 +88,16 @@ function parseArgs(argv) {
       options.world = requiredValue(values, ++index, flag);
     } else if (flag === "--dimension") {
       options.dimension = requiredValue(values, ++index, flag);
+    } else if (flag === "--zoom") {
+      options.zoom = normalizeZoomArg(numberValue(values, ++index, flag));
+    } else if (flag === "--min-chunk-x") {
+      options.minChunkX = numberValue(values, ++index, flag);
+    } else if (flag === "--max-chunk-x") {
+      options.maxChunkX = numberValue(values, ++index, flag);
+    } else if (flag === "--min-chunk-z") {
+      options.minChunkZ = numberValue(values, ++index, flag);
+    } else if (flag === "--max-chunk-z") {
+      options.maxChunkZ = numberValue(values, ++index, flag);
     } else if (flag === "--concurrency") {
       options.concurrency = Math.max(1, numberValue(values, ++index, flag));
     } else if (flag === "--chunk-concurrency") {
@@ -105,6 +122,8 @@ function parseArgs(argv) {
       options.skipAudit = true;
     } else if (flag === "--fail-on-mismatch") {
       options.failOnMismatch = true;
+    } else if (flag === "--touch-meta") {
+      options.touchMeta = true;
     } else if (flag === "--sample-only") {
       options.sampleOnly = true;
     } else {
@@ -118,7 +137,40 @@ function parseArgs(argv) {
   if (options.deleteExisting && options.sampleOnly) {
     throw new Error("--delete-existing cannot be combined with --sample-only");
   }
+  options.chunkRange = normalizeChunkRangeOptions(options);
+  if (options.skipAudit && options.mode !== "rebuild") {
+    throw new Error("--skip-audit can only be used with rebuild mode");
+  }
+  if (options.touchMeta && !options.token) {
+    throw new Error("--touch-meta requires --token or PLUGIN_TOKEN");
+  }
   return options;
+}
+
+function normalizeZoomArg(zoom) {
+  if (zoom < MAP_TILE_MIN_ZOOM || zoom > MAP_TILE_MAX_ZOOM) {
+    throw new Error(`--zoom must be ${MAP_TILE_MIN_ZOOM}-${MAP_TILE_MAX_ZOOM}`);
+  }
+  return zoom;
+}
+
+function normalizeChunkRangeOptions(options) {
+  const values = [options.minChunkX, options.maxChunkX, options.minChunkZ, options.maxChunkZ];
+  if (values.every((value) => value === null)) {
+    return null;
+  }
+  if (values.some((value) => value === null)) {
+    throw new Error("--min-chunk-x, --max-chunk-x, --min-chunk-z, and --max-chunk-z must be provided together");
+  }
+  if (options.maxChunkX < options.minChunkX || options.maxChunkZ < options.minChunkZ) {
+    throw new Error("invalid chunk range");
+  }
+  return {
+    minChunkX: options.minChunkX,
+    maxChunkX: options.maxChunkX,
+    minChunkZ: options.minChunkZ,
+    maxChunkZ: options.maxChunkZ,
+  };
 }
 
 function requiredValue(values, index, flag) {
@@ -152,7 +204,13 @@ async function auditMapTiles(options) {
 
   const worldSummaries = [];
   const issues = [];
+  const touches = [];
   for (const meta of metas) {
+    if (options.touchMeta) {
+      const worldMeta = await touchWorldMetaTileVersion(options, meta);
+      console.error(`Touched ${meta.world}/${meta.dimension} world metadata: ${JSON.stringify(worldMeta)}`);
+      touches.push({ world: meta.world, dimension: meta.dimension, worldMeta });
+    }
     const worldSummary = await auditWorld(options, meta);
     worldSummaries.push(withoutIssues(worldSummary));
     issues.push(...worldSummary.issues);
@@ -166,6 +224,7 @@ async function auditMapTiles(options) {
     startedAt,
     finishedAt: new Date().toISOString(),
     worlds: worldSummaries,
+    touches,
     mismatchCount: issues.length,
     issues,
   };
@@ -180,13 +239,13 @@ async function auditWorld(options, meta) {
 }
 
 async function collectExpectedMapTiles(options, meta) {
-  if (options.token && !options.sampleOnly) {
+  if (options.token && !options.sampleOnly && !options.chunkRange) {
     return collectExpectedMapTilesFromCatalog(options, meta);
   }
 
   const tileRefs = new Map();
   const chunkRefs = new Map();
-  const ranges = chunkScanRanges(meta.bounds, meta.sampleChunks || [], options.sampleOnly);
+  const ranges = options.chunkRange ? chunkRangeForMeta(meta, options.chunkRange) : chunkScanRanges(meta.bounds, meta.sampleChunks || [], options.sampleOnly);
   const stats = {
     world: meta.world,
     dimension: meta.dimension,
@@ -438,6 +497,17 @@ function mapTileBackfillRanges(tiles) {
   return ranges;
 }
 
+function rebuildZooms(options) {
+  if (options.zoom !== null) {
+    return [options.zoom];
+  }
+  const zooms = [];
+  for (let zoom = MAP_TILE_BASE_ZOOM; zoom >= MAP_TILE_MIN_ZOOM; zoom -= 1) {
+    zooms.push(zoom);
+  }
+  return zooms;
+}
+
 async function rebuildMapTilesAndAudit(options) {
   if (!options.token) {
     throw new Error("rebuild mode requires --token or PLUGIN_TOKEN");
@@ -460,13 +530,14 @@ async function rebuildMapTilesAndAudit(options) {
 
   const cleanup = options.deleteExisting ? await deleteMapTileObjects(options) : null;
   const rebuilds = [];
+  const zooms = rebuildZooms(options);
   for (const meta of metas) {
     const { stats, tiles, chunks } = await collectExpectedMapTiles(options, meta);
     console.error(`Rebuilding ${meta.world}/${meta.dimension}: ${tiles.length} expected image tiles from ${stats.nonAirChunks} non-air chunks`);
-    const materialized = await materializeChunks(options, chunks);
+    const materialized = zooms.includes(MAP_TILE_BASE_ZOOM) ? await materializeChunks(options, chunks) : { skipped: true, calls: 0, requested: 0, materialized: 0, direct: 0, missing: 0 };
     console.error(`Materialized ${meta.world}/${meta.dimension}: ${JSON.stringify(materialized)}`);
     const byZoom = {};
-    for (let zoom = MAP_TILE_BASE_ZOOM; zoom >= MAP_TILE_MIN_ZOOM; zoom -= 1) {
+    for (const zoom of zooms) {
       byZoom[`z${zoom}`] = { calls: 0, matched: 0, written: 0, deleted: 0 };
       for (const range of mapTileBackfillRanges(tiles.filter((candidate) => candidate.zoom === zoom))) {
         const result = await backfillAllMapTilesForRange(options, range.tile, range.chunkRange, zoom);
@@ -477,24 +548,27 @@ async function rebuildMapTilesAndAudit(options) {
       }
       console.error(`Rebuilt ${meta.world}/${meta.dimension} z${zoom}: ${JSON.stringify(byZoom[`z${zoom}`])}`);
     }
-    const worldMeta = await touchWorldMetaTileVersion(options, meta);
+    const worldMeta = options.skipAudit ? { skipped: true } : await touchWorldMetaTileVersion(options, meta);
     console.error(`Touched ${meta.world}/${meta.dimension} world metadata: ${JSON.stringify(worldMeta)}`);
     rebuilds.push({ world: meta.world, dimension: meta.dimension, scannedRanges: stats.scannedRanges, nonAirChunks: stats.nonAirChunks, uniqueTiles: tiles.length, materialized, byZoom, worldMeta });
   }
 
-  const audit = options.skipAudit
-    ? {
-        ok: true,
-        mode: "audit",
-        workerUrl: options.workerUrl,
-        startedAt: new Date().toISOString(),
-        finishedAt: new Date().toISOString(),
-        worlds: [],
-        mismatchCount: 0,
-        issues: [],
-        skipped: true,
-      }
-    : await auditMapTiles(options);
+  if (options.skipAudit) {
+    return {
+      ok: true,
+      mode: "rebuild",
+      partial: true,
+      workerUrl: options.workerUrl,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      cleanup,
+      rebuilds,
+      mismatchCount: 0,
+      issues: [],
+    };
+  }
+
+  const audit = await auditMapTiles(options);
   return {
     ...audit,
     mode: "rebuild",
@@ -773,6 +847,19 @@ function chunkScanRanges(bounds, sampleChunks, sampleOnly) {
     }
   }
   return ranges;
+}
+
+function chunkRangeForMeta(meta, range) {
+  const clipped = {
+    minChunkX: Math.max(meta.bounds.minChunkX, range.minChunkX),
+    maxChunkX: Math.min(meta.bounds.maxChunkX, range.maxChunkX),
+    minChunkZ: Math.max(meta.bounds.minChunkZ, range.minChunkZ),
+    maxChunkZ: Math.min(meta.bounds.maxChunkZ, range.maxChunkZ),
+  };
+  if (clipped.maxChunkX < clipped.minChunkX || clipped.maxChunkZ < clipped.minChunkZ) {
+    return [];
+  }
+  return [clipped];
 }
 
 function chunkUrl(workerUrl, world, dimension, range) {
