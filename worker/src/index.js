@@ -22,6 +22,10 @@ const BATCH_WRITE_CONCURRENCY = 32;
 const LIVE_UPLOAD_WRITE_CONCURRENCY = 8;
 const MAP_TILE_PREFIX = "map-tiles/v1/";
 const MAP_TILE_DIRTY_PREFIX = "map-tile-dirty/v1/";
+const MAP_TILE_BACKFILL_JOB_PREFIX = "map-tile-backfill-jobs/v1/";
+const MAP_TILE_BACKFILL_QUEUE_PREFIX = "map-tile-backfill-queue/v1/";
+const MAP_TILE_BACKFILL_ERROR_PREFIX = "map-tile-backfill-errors/v1/";
+const MAP_TILE_BACKFILL_ACTIVE_JOB_KEY = `${MAP_TILE_BACKFILL_JOB_PREFIX}active.json`;
 const MAP_TILE_SIZE = 256;
 const EMPTY_PNG = Uint8Array.from([
   137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10,
@@ -43,6 +47,11 @@ const MAP_TILE_BACKFILL_WRITE_LIMIT = 1;
 const MAP_TILE_BACKFILL_BASE_WRITE_LIMIT = 4;
 const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
 const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
+const MAP_TILE_BACKFILL_JOB_DIRECT_CATALOG_LIMIT = 16;
+const MAP_TILE_BACKFILL_JOB_REGION_CHUNK_LIMIT = 16;
+const MAP_TILE_BACKFILL_JOB_QUEUE_WRITE_CONCURRENCY = 4;
+const MAP_TILE_BACKFILL_JOB_REBUILD_LIMIT = 1;
+const MAP_TILE_BACKFILL_JOB_MAX_TILE_RETRIES = 3;
 const EMPTY_CHUNK_PRUNE_WRITE_LIMIT = 8;
 const CHUNK_REGION_MIGRATION_DEFAULT_LIMIT = 2;
 const CHUNK_REGION_MIGRATION_MAX_LIMIT = 10;
@@ -60,7 +69,19 @@ const WORLD_META_SAMPLE_LIMIT = 128;
 const CLEANUP_CONFIRMATION = "delete-map-data-v1";
 const CLEANUP_DEFAULT_LIMIT = 200;
 const CLEANUP_MAX_LIMIT = 500;
-const CLEANUP_PREFIXES = new Set(["chunks/v1/", "chunk-regions/v1/", MAP_TILE_PREFIX, MAP_TILE_DIRTY_PREFIX, "meta/v1/", "lands/v1/", "Bedrock_level/", "world/"]);
+const CLEANUP_PREFIXES = new Set([
+  "chunks/v1/",
+  "chunk-regions/v1/",
+  MAP_TILE_PREFIX,
+  MAP_TILE_DIRTY_PREFIX,
+  MAP_TILE_BACKFILL_JOB_PREFIX,
+  MAP_TILE_BACKFILL_QUEUE_PREFIX,
+  MAP_TILE_BACKFILL_ERROR_PREFIX,
+  "meta/v1/",
+  "lands/v1/",
+  "Bedrock_level/",
+  "world/",
+]);
 const TEXTURE_MANIFEST_KEY = "textures/v1/manifest.json";
 const TEXTURE_ATLAS_KEY = "textures/v1/atlas.png";
 const TEXTURE_REPORT_KEY = "textures/v1/report.json";
@@ -264,6 +285,14 @@ export default {
         return handleMapTileBackfill(request, env);
       }
 
+      if (url.pathname === "/api/plugin/map-tiles/backfill-job") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleMapTileBackfillJob(request, env);
+      }
+
       if (url.pathname === "/api/plugin/map-tiles/drain") {
         const auth = requirePluginAuth(request, env);
         if (auth) {
@@ -323,7 +352,10 @@ export default {
     if (!bucket) {
       return;
     }
-    const pending = scheduleBackgroundTask(ctx, "drain dirty map tiles", () => drainDirtyMapTiles(bucket, { limit: MAP_TILE_CRON_DRAIN_LIMIT }));
+    const pending = scheduleBackgroundTask(ctx, "scheduled map tile maintenance", async () => {
+      await drainDirtyMapTiles(bucket, { limit: MAP_TILE_CRON_DRAIN_LIMIT });
+      await runMapTileBackfillJobStep(bucket, { source: "cron" });
+    });
     if (pending) {
       await pending;
     }
@@ -1125,6 +1157,527 @@ async function handleMapTileBackfill(request, env) {
     worldMetaError,
     tiles: payload.dryRun ? tileRefs : results,
   });
+}
+
+async function handleMapTileBackfillJob(request, env) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+  if (request.method === "GET") {
+    return json({ ok: true, job: await readActiveMapTileBackfillJob(bucket) });
+  }
+
+  const payload = await request.json().catch(() => ({}));
+  const action = String(payload.action || "status");
+  if (action === "status") {
+    return json({ ok: true, job: await readActiveMapTileBackfillJob(bucket) });
+  }
+  if (action === "start") {
+    return startMapTileBackfillJob(bucket, payload);
+  }
+  if (action === "step") {
+    return json(await runMapTileBackfillJobStep(bucket, { source: "manual" }));
+  }
+  if (action === "pause" || action === "resume" || action === "cancel") {
+    return json(await updateMapTileBackfillJobStatus(bucket, action));
+  }
+  return json({ error: "invalid_backfill_job_action", action }, 400);
+}
+
+async function startMapTileBackfillJob(bucket, payload) {
+  const options = await normalizeMapTileBackfillJobStartPayload(bucket, payload);
+  const existing = await readActiveMapTileBackfillJob(bucket);
+  if (existing && existing.status === "running" && !options.replace) {
+    return json({ error: "backfill_job_already_running", job: existing }, 409);
+  }
+
+  const now = Date.now();
+  const job = {
+    version: 1,
+    id: options.id || `low-zoom-${now}`,
+    status: "running",
+    phase: "catalog",
+    worlds: options.worlds,
+    zooms: options.zooms,
+    includeRegions: options.includeRegions,
+    includeDirect: options.includeDirect,
+    force: true,
+    directCatalogLimit: options.directCatalogLimit,
+    rebuildLimit: options.rebuildLimit,
+    maxTileRetries: options.maxTileRetries,
+    catalog: {
+      worldIndex: 0,
+      source: options.includeRegions ? "region" : "direct",
+      cursor: "",
+      chunkCursor: 0,
+    },
+    stats: {
+      catalogSteps: 0,
+      rebuildSteps: 0,
+      scannedRegions: 0,
+      invalidRegions: 0,
+      scannedDirectObjects: 0,
+      scannedChunks: 0,
+      skippedEmptyChunks: 0,
+      invalidChunks: 0,
+      queuedTileWrites: 0,
+      rebuiltTiles: 0,
+      writtenTiles: 0,
+      deletedTiles: 0,
+      skippedTiles: 0,
+      failedTiles: 0,
+    },
+    createdAt: now,
+    updatedAt: now,
+    completedAt: 0,
+    error: "",
+    lastStep: null,
+  };
+  await writeActiveMapTileBackfillJob(bucket, job);
+  return json({ ok: true, job });
+}
+
+async function updateMapTileBackfillJobStatus(bucket, action) {
+  const job = await readActiveMapTileBackfillJob(bucket);
+  if (!job) {
+    return { ok: true, job: null };
+  }
+  const now = Date.now();
+  if (action === "pause" && job.status === "running") {
+    job.status = "paused";
+  } else if (action === "resume" && job.status === "paused") {
+    job.status = "running";
+  } else if (action === "cancel") {
+    job.status = "cancelled";
+    job.completedAt = now;
+  }
+  job.updatedAt = now;
+  await writeActiveMapTileBackfillJob(bucket, job);
+  return { ok: true, job };
+}
+
+async function runMapTileBackfillJobStep(bucket, options = {}) {
+  const job = await readActiveMapTileBackfillJob(bucket);
+  if (!job) {
+    return { ok: true, active: false, source: options.source || "", job: null };
+  }
+  if (job.status !== "running") {
+    return { ok: true, active: true, source: options.source || "", skipped: true, reason: `job_${job.status}`, job };
+  }
+
+  try {
+    const result = job.phase === "catalog" ? await catalogMapTileBackfillJobStep(bucket, job) : await rebuildMapTileBackfillJobStep(bucket, job);
+    job.updatedAt = Date.now();
+    job.lastStep = { ...result, source: options.source || "", at: job.updatedAt };
+    await writeActiveMapTileBackfillJob(bucket, job);
+    return { ok: true, active: true, source: options.source || "", result, job };
+  } catch (error) {
+    job.status = "failed";
+    job.error = error instanceof Error ? error.message : String(error);
+    job.updatedAt = Date.now();
+    job.lastStep = { phase: job.phase, error: job.error, source: options.source || "", at: job.updatedAt };
+    await writeActiveMapTileBackfillJob(bucket, job);
+    return { ok: false, active: true, source: options.source || "", error: job.error, job };
+  }
+}
+
+async function catalogMapTileBackfillJobStep(bucket, job) {
+  const world = job.worlds[job.catalog.worldIndex];
+  if (!world) {
+    job.phase = "rebuild";
+    job.catalog = { ...job.catalog, source: "", cursor: "" };
+    return { phase: "catalog", done: true, nextPhase: "rebuild" };
+  }
+
+  if (job.catalog.source === "region") {
+    return catalogMapTileBackfillRegionStep(bucket, job, world);
+  }
+  if (job.catalog.source === "direct") {
+    return catalogMapTileBackfillDirectStep(bucket, job, world);
+  }
+  advanceMapTileBackfillCatalogWorld(job);
+  return { phase: "catalog", world, skipped: true, reason: "unknown_source" };
+}
+
+async function catalogMapTileBackfillRegionStep(bucket, job, world) {
+  job.stats.catalogSteps += 1;
+  const prefix = `${CHUNK_REGION_PREFIX}${cleanSegment(world.world)}/${cleanSegment(world.dimension)}/`;
+  const page = await bucket.list({ prefix, cursor: job.catalog.cursor || undefined, limit: 1 });
+  const object = (page.objects || [])[0];
+  if (!object) {
+    moveMapTileBackfillCatalogToNextSource(job);
+    return { phase: "catalog", source: "region", world, matched: 0, queued: 0, nextSource: job.catalog.source };
+  }
+
+  const result = await enqueueMapTileBackfillRegionObject(bucket, job, object.key, job.catalog.chunkCursor || 0);
+  job.catalog.cursor = result.nextChunkCursor === null && page.truncated ? page.cursor || "" : job.catalog.cursor || "";
+  job.catalog.chunkCursor = result.nextChunkCursor === null ? 0 : result.nextChunkCursor;
+  job.stats.scannedRegions += 1;
+  job.stats.invalidRegions += result.invalidRegion ? 1 : 0;
+  job.stats.scannedChunks += result.scannedChunks;
+  job.stats.skippedEmptyChunks += result.skippedEmptyChunks;
+  job.stats.invalidChunks += result.invalidChunks;
+  job.stats.queuedTileWrites += result.queued;
+  if (result.nextChunkCursor === null && !page.truncated) {
+    moveMapTileBackfillCatalogToNextSource(job);
+  }
+  return { phase: "catalog", source: "region", world, key: object.key, ...result, nextSource: job.catalog.source, cursor: job.catalog.cursor };
+}
+
+async function catalogMapTileBackfillDirectStep(bucket, job, world) {
+  job.stats.catalogSteps += 1;
+  const prefix = `chunks/v1/${cleanSegment(world.world)}/${cleanSegment(world.dimension)}/`;
+  const page = await bucket.list({ prefix, cursor: job.catalog.cursor || undefined, limit: job.directCatalogLimit, include: ["customMetadata"] });
+  const objects = page.objects || [];
+  let invalidChunks = 0;
+  let skippedEmptyChunks = 0;
+  const chunks = [];
+  for (const object of objects) {
+    const parsed = parseChunkKey(object.key);
+    if (!parsed) {
+      invalidChunks += 1;
+      continue;
+    }
+    const metadataEntry = chunkCatalogEntryFromObjectMetadata(object, parsed);
+    if (metadataEntry && !metadataEntry.hasNonAir) {
+      skippedEmptyChunks += 1;
+      continue;
+    }
+    chunks.push({
+      world: cleanSegment(parsed.world),
+      dimension: cleanSegment(parsed.dimension),
+      chunkX: parsed.chunkX,
+      chunkZ: parsed.chunkZ,
+    });
+  }
+  const queued = await enqueueMapTileBackfillTiles(bucket, job, lowZoomMapTilesForChunks(chunks));
+  job.catalog.cursor = page.truncated ? page.cursor || "" : "";
+  job.stats.scannedDirectObjects += objects.length;
+  job.stats.scannedChunks += chunks.length;
+  job.stats.skippedEmptyChunks += skippedEmptyChunks;
+  job.stats.invalidChunks += invalidChunks;
+  job.stats.queuedTileWrites += queued;
+  if (!page.truncated) {
+    advanceMapTileBackfillCatalogWorld(job);
+  }
+  return { phase: "catalog", source: "direct", world, matched: objects.length, scannedChunks: chunks.length, skippedEmptyChunks, invalidChunks, queued, cursor: job.catalog.cursor };
+}
+
+async function rebuildMapTileBackfillJobStep(bucket, job) {
+  job.stats.rebuildSteps += 1;
+  const prefix = mapTileBackfillQueuePrefix(job.id);
+  const page = await bucket.list({ prefix, limit: job.rebuildLimit });
+  const objects = page.objects || [];
+  if (objects.length < 1) {
+    job.status = "complete";
+    job.completedAt = Date.now();
+    return { phase: "rebuild", done: true, completed: true };
+  }
+
+  const textureColors = await loadTextureColorIndex(bucket);
+  const results = [];
+  for (const object of objects) {
+    results.push(await rebuildQueuedMapTileBackfillEntry(bucket, job, object.key, textureColors));
+  }
+  return {
+    phase: "rebuild",
+    matched: objects.length,
+    rebuilt: results.filter((result) => result.rebuilt).length,
+    failed: results.filter((result) => result.failed).length,
+    results,
+  };
+}
+
+async function enqueueMapTileBackfillRegionObject(bucket, job, key, chunkCursor = 0) {
+  const region = await readR2Json(await bucket.get(key));
+  if (!region || !Array.isArray(region.chunks)) {
+    return { invalidRegion: true, scannedChunks: 0, skippedEmptyChunks: 0, invalidChunks: 0, queued: 0, nextChunkCursor: null };
+  }
+  const chunks = [];
+  let invalidChunks = 0;
+  let skippedEmptyChunks = 0;
+  let scannedChunks = 0;
+  const start = Math.max(0, Math.min(region.chunks.length, numberOrThrow(chunkCursor, "chunkCursor")));
+  const end = Math.min(region.chunks.length, start + MAP_TILE_BACKFILL_JOB_REGION_CHUNK_LIMIT);
+  for (const rawChunk of region.chunks.slice(start, end)) {
+    scannedChunks += 1;
+    const chunk = normalizeOptionalChunkSnapshot(rawChunk);
+    if (!chunk) {
+      invalidChunks += 1;
+      continue;
+    }
+    if (isEmptyChunkSnapshot(chunk)) {
+      skippedEmptyChunks += 1;
+      continue;
+    }
+    chunks.push(chunk);
+  }
+  const queued = await enqueueMapTileBackfillTiles(bucket, job, lowZoomMapTilesForChunks(chunks));
+  return { invalidRegion: false, scannedChunks, skippedEmptyChunks, invalidChunks, queued, nextChunkCursor: end < region.chunks.length ? end : null };
+}
+
+async function enqueueMapTileBackfillTiles(bucket, job, tiles) {
+  const selected = tiles.filter((tile) => job.zooms.includes(tile.zoom));
+  await mapWithConcurrency(selected, MAP_TILE_BACKFILL_JOB_QUEUE_WRITE_CONCURRENCY, (tile) => {
+    const entry = { jobId: job.id, tile, attempts: 0, queuedAt: Date.now(), updatedAt: Date.now() };
+    return bucket.put(mapTileBackfillQueueKey(job.id, tile), JSON.stringify(entry), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: { jobId: job.id, world: tile.world, dimension: tile.dimension, zoom: String(tile.zoom) },
+    });
+  });
+  return selected.length;
+}
+
+async function rebuildQueuedMapTileBackfillEntry(bucket, job, key, textureColors) {
+  const entry = normalizeMapTileBackfillQueueEntry(await readR2Json(await bucket.get(key)));
+  if (!entry) {
+    await bucket.delete(key);
+    job.stats.failedTiles += 1;
+    return { key, failed: true, deletedQueue: true, error: "invalid_queue_entry" };
+  }
+  const rebuildVersion = Date.now();
+  try {
+    const tile = entry.tile;
+    const result = await rebuildMapTile(bucket, tile, {
+      force: true,
+      rebuildVersion,
+      concurrency: 1,
+      readConcurrency: MAP_TILE_BACKFILL_READ_CONCURRENCY,
+      textureColors,
+    });
+    if (result.tileVersion > 0) {
+      await touchWorldMetaTileVersion(bucket, tile.world, tile.dimension, result.tileVersion);
+    }
+    await bucket.delete(key);
+    job.stats.rebuiltTiles += 1;
+    if (result.skipped) {
+      job.stats.skippedTiles += 1;
+    } else if (result.deleted) {
+      job.stats.deletedTiles += 1;
+    } else {
+      job.stats.writtenTiles += 1;
+    }
+    return { key, rebuilt: true, tile, result };
+  } catch (error) {
+    const attempts = entry.attempts + 1;
+    const message = error instanceof Error ? error.message : String(error);
+    if (attempts >= job.maxTileRetries) {
+      await bucket.put(mapTileBackfillErrorKey(job.id, entry.tile), JSON.stringify({ ...entry, attempts, error: message, failedAt: Date.now() }), {
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        customMetadata: { jobId: job.id, world: entry.tile.world, dimension: entry.tile.dimension, zoom: String(entry.tile.zoom) },
+      });
+      await bucket.delete(key);
+      job.stats.failedTiles += 1;
+      return { key, failed: true, tile: entry.tile, attempts, error: message, movedToError: true };
+    }
+    await bucket.put(key, JSON.stringify({ ...entry, attempts, error: message, updatedAt: Date.now() }), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: { jobId: job.id, world: entry.tile.world, dimension: entry.tile.dimension, zoom: String(entry.tile.zoom) },
+    });
+    return { key, failed: true, tile: entry.tile, attempts, error: message, retrying: true };
+  }
+}
+
+function moveMapTileBackfillCatalogToNextSource(job) {
+  if (job.catalog.source === "region" && job.includeDirect) {
+    job.catalog = { ...job.catalog, source: "direct", cursor: "", chunkCursor: 0 };
+    return;
+  }
+  advanceMapTileBackfillCatalogWorld(job);
+}
+
+function advanceMapTileBackfillCatalogWorld(job) {
+  job.catalog = {
+    worldIndex: job.catalog.worldIndex + 1,
+    source: job.includeRegions ? "region" : "direct",
+    cursor: "",
+    chunkCursor: 0,
+  };
+}
+
+function lowZoomMapTilesForChunks(chunks) {
+  const seen = new Set();
+  const tiles = [];
+  for (const chunk of chunks) {
+    for (const tile of mapTilesForChunk(chunk.world, chunk.dimension, chunk.chunkX, chunk.chunkZ)) {
+      if (tile.zoom >= MAP_TILE_BASE_ZOOM) {
+        continue;
+      }
+      const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      tiles.push(tile);
+    }
+  }
+  return tiles.sort((a, b) => b.zoom - a.zoom || a.tileZ - b.tileZ || a.tileX - b.tileX);
+}
+
+async function normalizeMapTileBackfillJobStartPayload(bucket, payload) {
+  const requestedZooms = Array.isArray(payload.zooms)
+    ? payload.zooms.map((zoom) => normalizeMapTileZoom(zoom))
+    : payload.zoom === undefined || payload.zoom === null
+      ? range(MAP_TILE_MIN_ZOOM, MAP_TILE_BASE_ZOOM - 1)
+      : [normalizeMapTileZoom(payload.zoom)];
+  const zooms = [...new Set(requestedZooms)].filter((zoom) => zoom < MAP_TILE_BASE_ZOOM).sort((a, b) => b - a);
+  if (zooms.length < 1) {
+    throw new Error("backfill job must include at least one low zoom");
+  }
+
+  const worlds = await mapTileBackfillJobWorlds(bucket, payload);
+  if (worlds.length < 1) {
+    throw new Error("backfill job found no worlds to scan");
+  }
+
+  const includeRegions = payload.includeRegions !== false;
+  const includeDirect = payload.includeDirect !== false;
+  if (!includeRegions && !includeDirect) {
+    throw new Error("backfill job must include region or direct chunk sources");
+  }
+
+  return {
+    id: payload.id ? cleanSegment(payload.id) : "",
+    worlds,
+    zooms,
+    includeRegions,
+    includeDirect,
+    replace: payload.replace === true,
+    directCatalogLimit: Math.min(MAP_TILE_BACKFILL_JOB_DIRECT_CATALOG_LIMIT, Math.max(1, numberOrThrow(payload.directCatalogLimit ?? MAP_TILE_BACKFILL_JOB_DIRECT_CATALOG_LIMIT, "directCatalogLimit"))),
+    rebuildLimit: Math.min(MAP_TILE_BACKFILL_JOB_REBUILD_LIMIT, Math.max(1, numberOrThrow(payload.rebuildLimit ?? MAP_TILE_BACKFILL_JOB_REBUILD_LIMIT, "rebuildLimit"))),
+    maxTileRetries: Math.min(10, Math.max(1, numberOrThrow(payload.maxTileRetries ?? MAP_TILE_BACKFILL_JOB_MAX_TILE_RETRIES, "maxTileRetries"))),
+  };
+}
+
+async function mapTileBackfillJobWorlds(bucket, payload) {
+  if (payload.world || payload.dimension) {
+    if (!payload.world || !payload.dimension) {
+      throw new Error("backfill job world and dimension must be provided together");
+    }
+    return [{ world: cleanSegment(payload.world), dimension: cleanSegment(payload.dimension) }];
+  }
+  const objects = await listR2Objects(bucket, WORLD_META_PREFIX);
+  const worlds = [];
+  for (const object of objects.filter((item) => item.key.endsWith(".json"))) {
+    const meta = normalizeOptionalWorldMeta(await readR2Json(await bucket.get(object.key)));
+    if (!meta || meta.chunkCount < 1) {
+      continue;
+    }
+    worlds.push({ world: meta.world, dimension: meta.dimension });
+  }
+  return worlds.sort((a, b) => a.world.localeCompare(b.world) || a.dimension.localeCompare(b.dimension));
+}
+
+async function readActiveMapTileBackfillJob(bucket) {
+  return normalizeOptionalMapTileBackfillJob(await readR2Json(await bucket.get(MAP_TILE_BACKFILL_ACTIVE_JOB_KEY)));
+}
+
+async function writeActiveMapTileBackfillJob(bucket, job) {
+  await bucket.put(MAP_TILE_BACKFILL_ACTIVE_JOB_KEY, JSON.stringify(job), {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+    customMetadata: { id: job.id, status: job.status, phase: job.phase },
+  });
+}
+
+function normalizeOptionalMapTileBackfillJob(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  try {
+    const status = ["running", "paused", "complete", "cancelled", "failed"].includes(value.status) ? value.status : "paused";
+    const phase = value.phase === "rebuild" ? "rebuild" : "catalog";
+    const includeRegions = value.includeRegions !== false;
+    const includeDirect = value.includeDirect !== false;
+    const catalog = value.catalog && typeof value.catalog === "object" ? value.catalog : {};
+    return {
+      ...value,
+      version: numberOrThrow(value.version ?? 1, "version"),
+      id: cleanSegment(value.id || "low-zoom"),
+      status,
+      phase,
+      worlds: Array.isArray(value.worlds) ? value.worlds.map((world) => ({ world: cleanSegment(world.world), dimension: cleanSegment(world.dimension) })) : [],
+      zooms: Array.isArray(value.zooms) ? value.zooms.map((zoom) => normalizeMapTileZoom(zoom)).filter((zoom) => zoom < MAP_TILE_BASE_ZOOM) : range(MAP_TILE_MIN_ZOOM, MAP_TILE_BASE_ZOOM - 1),
+      includeRegions,
+      includeDirect,
+      force: true,
+      directCatalogLimit: Math.min(MAP_TILE_BACKFILL_JOB_DIRECT_CATALOG_LIMIT, Math.max(1, numberOrThrow(value.directCatalogLimit ?? MAP_TILE_BACKFILL_JOB_DIRECT_CATALOG_LIMIT, "directCatalogLimit"))),
+      rebuildLimit: Math.min(MAP_TILE_BACKFILL_JOB_REBUILD_LIMIT, Math.max(1, numberOrThrow(value.rebuildLimit ?? MAP_TILE_BACKFILL_JOB_REBUILD_LIMIT, "rebuildLimit"))),
+      maxTileRetries: Math.min(10, Math.max(1, numberOrThrow(value.maxTileRetries ?? MAP_TILE_BACKFILL_JOB_MAX_TILE_RETRIES, "maxTileRetries"))),
+      catalog: {
+        worldIndex: Math.max(0, numberOrThrow(catalog.worldIndex ?? 0, "catalog.worldIndex")),
+        source: catalog.source === "direct" ? "direct" : includeRegions ? "region" : "direct",
+        cursor: typeof catalog.cursor === "string" ? catalog.cursor : "",
+        chunkCursor: Math.max(0, numberOrThrow(catalog.chunkCursor ?? 0, "catalog.chunkCursor")),
+      },
+      stats: normalizeMapTileBackfillJobStats(value.stats || {}),
+      createdAt: numberOrThrow(value.createdAt ?? 0, "createdAt"),
+      updatedAt: numberOrThrow(value.updatedAt ?? 0, "updatedAt"),
+      completedAt: numberOrThrow(value.completedAt ?? 0, "completedAt"),
+      error: String(value.error || ""),
+      lastStep: value.lastStep || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeMapTileBackfillJobStats(value) {
+  const field = (name) => Math.max(0, numberOrThrow(value[name] ?? 0, name));
+  return {
+    catalogSteps: field("catalogSteps"),
+    rebuildSteps: field("rebuildSteps"),
+    scannedRegions: field("scannedRegions"),
+    invalidRegions: field("invalidRegions"),
+    scannedDirectObjects: field("scannedDirectObjects"),
+    scannedChunks: field("scannedChunks"),
+    skippedEmptyChunks: field("skippedEmptyChunks"),
+    invalidChunks: field("invalidChunks"),
+    queuedTileWrites: field("queuedTileWrites"),
+    rebuiltTiles: field("rebuiltTiles"),
+    writtenTiles: field("writtenTiles"),
+    deletedTiles: field("deletedTiles"),
+    skippedTiles: field("skippedTiles"),
+    failedTiles: field("failedTiles"),
+  };
+}
+
+function normalizeMapTileBackfillQueueEntry(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  try {
+    const tile = value.tile || {};
+    return {
+      jobId: cleanSegment(value.jobId || "low-zoom"),
+      tile: {
+        world: cleanSegment(tile.world),
+        dimension: cleanSegment(tile.dimension),
+        zoom: normalizeMapTileZoom(tile.zoom),
+        tileX: numberOrThrow(tile.tileX, "tileX"),
+        tileZ: numberOrThrow(tile.tileZ, "tileZ"),
+      },
+      attempts: Math.max(0, numberOrThrow(value.attempts ?? 0, "attempts")),
+      queuedAt: numberOrThrow(value.queuedAt ?? 0, "queuedAt"),
+      updatedAt: numberOrThrow(value.updatedAt ?? value.queuedAt ?? 0, "updatedAt"),
+      error: String(value.error || ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function mapTileBackfillQueuePrefix(jobId) {
+  return `${MAP_TILE_BACKFILL_QUEUE_PREFIX}${cleanSegment(jobId)}/`;
+}
+
+function mapTileBackfillQueueKey(jobId, tile) {
+  const priority = String(MAP_TILE_BASE_ZOOM - normalizeMapTileZoom(tile.zoom)).padStart(2, "0");
+  return `${mapTileBackfillQueuePrefix(jobId)}p${priority}/${cleanSegment(tile.world)}/${cleanSegment(tile.dimension)}/z${normalizeMapTileZoom(tile.zoom)}/${numberOrThrow(tile.tileX, "tileX")}/${numberOrThrow(tile.tileZ, "tileZ")}.json`;
+}
+
+function mapTileBackfillErrorKey(jobId, tile) {
+  return `${MAP_TILE_BACKFILL_ERROR_PREFIX}${cleanSegment(jobId)}/${cleanSegment(tile.world)}/${cleanSegment(tile.dimension)}/z${normalizeMapTileZoom(tile.zoom)}/${numberOrThrow(tile.tileX, "tileX")}/${numberOrThrow(tile.tileZ, "tileZ")}.json`;
 }
 
 async function handleMapTileDrain(request, env) {

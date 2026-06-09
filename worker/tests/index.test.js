@@ -328,6 +328,18 @@ async function backfillMapTileSourceChain(env, payload) {
   return backfillMapTile(env, payload);
 }
 
+async function backfillMapTileJob(env, payload, ctx = {}) {
+  return worker.fetch(
+    new Request("https://map.buhe.li/api/plugin/map-tiles/backfill-job", {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+    env,
+    ctx,
+  );
+}
+
 function brightness(pixel) {
   return pixel[0] + pixel[1] + pixel[2];
 }
@@ -2897,6 +2909,110 @@ describe("worker routes", () => {
     expect(png.width).toBe(256);
     expect(pngPixel(png, 0, 0)[3]).toBeGreaterThan(0);
     expect(pngPixel(png, 255, 255)[3]).toBeGreaterThan(0);
+  });
+
+  it("runs a slow one-shot low zoom backfill job from stored chunk regions", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put(
+      "meta/v1/world/Overworld.json",
+      JSON.stringify(
+        normalizeWorldMeta({
+          world: "world",
+          dimension: "Overworld",
+          status: "live",
+          chunkCount: 2,
+          bounds: { minChunkX: 0, maxChunkX: 2, minChunkZ: 0, maxChunkZ: 0 },
+          topBlocks: { "minecraft:grass_block": 512 },
+          importedAt: 10,
+          updatedAt: 10,
+        }),
+      ),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+    await env.MAP_DATA.put(
+      "chunk-regions/v1/world/Overworld/0/0.json",
+      JSON.stringify({
+        version: 1,
+        world: "world",
+        dimension: "Overworld",
+        chunks: [createChunk({ chunkX: 0, chunkZ: 0, updatedAt: 20 }), createChunk({ chunkX: 2, chunkZ: 0, updatedAt: 30 })],
+      }),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+
+    const start = await backfillMapTileJob(env, {
+      action: "start",
+      world: "world",
+      dimension: "Overworld",
+      zooms: [4, 3, 2],
+      includeDirect: false,
+      replace: true,
+    });
+    expect(start.status).toBe(200);
+    expect(await start.json()).toMatchObject({ ok: true, job: { status: "running", phase: "catalog", zooms: [3, 2] } });
+
+    const ctx = createExecutionContext();
+    await worker.scheduled({}, env, ctx);
+    await ctx.flush();
+    const queuedKeys = [...env.MAP_DATA.objects.keys()].filter((key) => key.startsWith("map-tile-backfill-queue/v1/")).sort();
+    expect(queuedKeys).toHaveLength(3);
+    expect(queuedKeys[0]).toContain("/p01/");
+    expect(queuedKeys[2]).toContain("/p02/");
+    expect([...env.MAP_DATA.objects.keys()].filter((key) => key.startsWith("map-tiles/v1/world/Overworld/"))).toHaveLength(0);
+
+    await backfillMapTileJob(env, { action: "step" });
+    const firstRebuild = await backfillMapTileJob(env, { action: "step" });
+    expect(await firstRebuild.json()).toMatchObject({ ok: true, job: { phase: "rebuild", stats: { rebuiltTiles: 1, writtenTiles: 1 } } });
+    expect([...env.MAP_DATA.objects.keys()].filter((key) => key.startsWith("map-tiles/v1/world/Overworld/z3/"))).toHaveLength(1);
+    expect([...env.MAP_DATA.objects.keys()].filter((key) => key.startsWith("map-tiles/v1/world/Overworld/z2/"))).toHaveLength(0);
+    expect([...env.MAP_DATA.objects.keys()].filter((key) => key.startsWith("map-tiles/v1/world/Overworld/z4/"))).toHaveLength(0);
+
+    const meta = await env.MAP_DATA.objects.get("meta/v1/world/Overworld.json").json();
+    expect(meta.updatedAt).toBeGreaterThan(10);
+
+    await backfillMapTileJob(env, { action: "step" });
+    expect([...env.MAP_DATA.objects.keys()].filter((key) => key.startsWith("map-tiles/v1/world/Overworld/z3/"))).toHaveLength(2);
+    expect([...env.MAP_DATA.objects.keys()].filter((key) => key.startsWith("map-tiles/v1/world/Overworld/z2/"))).toHaveLength(0);
+    await backfillMapTileJob(env, { action: "step" });
+    expect([...env.MAP_DATA.objects.keys()].filter((key) => key.startsWith("map-tiles/v1/world/Overworld/z2/"))).toHaveLength(1);
+    const complete = await backfillMapTileJob(env, { action: "step" });
+    expect(await complete.json()).toMatchObject({ ok: true, job: { status: "complete", phase: "rebuild", stats: { rebuiltTiles: 3, writtenTiles: 3 } } });
+  });
+
+  it("catalogs slow backfill region chunks in small batches", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put(
+      "chunk-regions/v1/world/Overworld/0/0.json",
+      JSON.stringify({
+        version: 1,
+        world: "world",
+        dimension: "Overworld",
+        chunks: createChunkRange({ minChunkX: 0, maxChunkX: 16, minChunkZ: 0, maxChunkZ: 0, updatedAt: 20 }),
+      }),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+    await backfillMapTileJob(env, {
+      action: "start",
+      world: "world",
+      dimension: "Overworld",
+      zooms: [3],
+      includeDirect: false,
+      replace: true,
+    });
+
+    const first = await backfillMapTileJob(env, { action: "step" });
+    expect(await first.json()).toMatchObject({
+      ok: true,
+      result: { phase: "catalog", scannedChunks: 16, nextChunkCursor: 16 },
+      job: { phase: "catalog", catalog: { source: "region", chunkCursor: 16 }, stats: { scannedChunks: 16 } },
+    });
+
+    const second = await backfillMapTileJob(env, { action: "step" });
+    expect(await second.json()).toMatchObject({
+      ok: true,
+      result: { phase: "catalog", scannedChunks: 1, nextChunkCursor: null },
+      job: { phase: "catalog", catalog: { worldIndex: 1, chunkCursor: 0 }, stats: { scannedChunks: 17 } },
+    });
   });
 
   it("deletes empty low zoom image tiles during rebuild", async () => {
