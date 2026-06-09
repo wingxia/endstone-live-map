@@ -49,6 +49,7 @@ const CHUNK_REGION_MIGRATION_CHUNK_DEFAULT_LIMIT = 24;
 const CHUNK_REGION_MIGRATION_CHUNK_MAX_LIMIT = 64;
 const CHUNK_CATALOG_DEFAULT_LIMIT = 25;
 const CHUNK_CATALOG_MAX_LIMIT = 100;
+const CHUNK_CATALOG_DIRECT_READ_MAX_LIMIT = 16;
 const CHUNK_DIRECT_READ_LIMIT = REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS;
 const MIN_COLUMN_HEIGHT = -64;
 const SEA_LEVEL = 63;
@@ -542,7 +543,8 @@ async function handleChunkCatalog(request, env) {
 
 async function chunkCatalogDirectPage(bucket, options) {
   const prefix = `chunks/v1/${cleanSegment(options.world)}/${cleanSegment(options.dimension)}/`;
-  const page = await bucket.list({ prefix, cursor: options.cursor || undefined, limit: options.limit });
+  const limit = Math.min(options.limit, CHUNK_CATALOG_DIRECT_READ_MAX_LIMIT);
+  const page = await bucket.list({ prefix, cursor: options.cursor || undefined, limit });
   const objects = page.objects || [];
   const chunks = [];
   let invalidChunks = 0;
@@ -1696,13 +1698,14 @@ function normalizeChunkMaterializePayload(payload) {
 
 export function normalizeChunkCatalogPayload(payload) {
   const source = payload?.source === "region" ? "region" : "direct";
+  const limit = Math.min(CHUNK_CATALOG_MAX_LIMIT, Math.max(1, numberOrThrow(payload?.limit ?? CHUNK_CATALOG_DEFAULT_LIMIT, "limit")));
   return {
     source,
     world: cleanSegment(payload?.world || "world"),
     dimension: cleanSegment(payload?.dimension || "Overworld"),
     cursor: typeof payload?.cursor === "string" && payload.cursor.length > 0 ? payload.cursor : "",
     chunkCursor: Math.max(0, numberOrThrow(payload?.chunkCursor ?? 0, "chunkCursor")),
-    limit: Math.min(CHUNK_CATALOG_MAX_LIMIT, Math.max(1, numberOrThrow(payload?.limit ?? CHUNK_CATALOG_DEFAULT_LIMIT, "limit"))),
+    limit: source === "direct" ? Math.min(limit, CHUNK_CATALOG_DIRECT_READ_MAX_LIMIT) : limit,
   };
 }
 

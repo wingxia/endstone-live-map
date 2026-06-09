@@ -529,7 +529,13 @@ describe("worker helpers", () => {
       limit: 100,
       chunkCursor: 2,
     });
-    expect(normalizeChunkCatalogPayload({ source: "invalid", chunkCursor: -1 })).toMatchObject({ source: "direct", chunkCursor: 0 });
+    expect(normalizeChunkCatalogPayload({ world: "Bedrock level", dimension: "Overworld", source: "direct", limit: 999 })).toMatchObject({
+      source: "direct",
+      world: "Bedrock_level",
+      dimension: "Overworld",
+      limit: 16,
+    });
+    expect(normalizeChunkCatalogPayload({ source: "invalid", chunkCursor: -1 })).toMatchObject({ source: "direct", chunkCursor: 0, limit: 16 });
   });
 
   it("normalizes empty chunk prune payloads", () => {
@@ -1398,6 +1404,31 @@ describe("worker routes", () => {
     const nextBody = await next.json();
     expect(nextBody).toMatchObject({ ok: true, source: "direct", nextSource: "region", cursor: "", done: false });
     expect(nextBody.chunks).toEqual([expect.objectContaining({ chunkX: 2, chunkZ: 0, source: "direct" })]);
+  });
+
+  it("caps direct chunk catalog pages to avoid Worker overload", async () => {
+    const env = createEnv();
+    for (let chunkX = 0; chunkX < 20; chunkX += 1) {
+      await env.MAP_DATA.put(`chunks/v1/world/Overworld/${chunkX}/0.json`, JSON.stringify(createChunk({ chunkX, chunkZ: 0, updatedAt: chunkX + 10 })), {
+        httpMetadata: { contentType: "application/json" },
+      });
+    }
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/catalog", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", source: "direct", limit: 100 }),
+      }),
+      env,
+      {},
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, source: "direct", matched: 16, cursor: "16", done: false });
+    expect(body.chunks).toHaveLength(16);
+    expect(env.MAP_DATA.getCalls.filter((key) => key.startsWith("chunks/v1/world/Overworld/"))).toHaveLength(16);
   });
 
   it("catalogs legacy region chunks for rebuilds with chunk cursors", async () => {

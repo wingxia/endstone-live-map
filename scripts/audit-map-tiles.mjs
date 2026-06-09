@@ -335,7 +335,6 @@ async function fetchChunkCatalogPage(options, meta, page) {
       source: page.source,
       cursor: page.cursor || "",
       chunkCursor: page.chunkCursor || 0,
-      limit: 100,
     }),
   }, options);
   const body = await response.json().catch(() => ({}));
