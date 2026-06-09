@@ -1130,6 +1130,35 @@ describe("worker routes", () => {
     expect(pngPixel(png, 4, 4)[3]).toBe(255);
   });
 
+  it("renders sparse very-low-zoom tiles from chunks without scanning the full range", async () => {
+    const env = createEnv();
+    const key = "map-tiles/v1/Bedrock_level/Nether/z-1/-1/-1.png";
+    await env.MAP_DATA.put("chunks/v1/Bedrock_level/Nether/-14/-4.json", JSON.stringify(createChunk({ world: "Bedrock_level", dimension: "Nether", chunkX: -14, chunkZ: -4 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await env.MAP_DATA.put("chunks/v1/Bedrock_level/Nether/-1/-1.json", JSON.stringify(createChunk({ world: "Bedrock_level", dimension: "Nether", chunkX: -1, chunkZ: -1 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const response = await backfillMapTile(env, { world: "Bedrock_level", dimension: "Nether", zoom: -1, minChunkX: -14, maxChunkX: -1, minChunkZ: -4, maxChunkZ: -1, dryRun: false, force: true });
+    const body = await response.json();
+
+    expect(body).toMatchObject({
+      ok: true,
+      tiles: [
+        expect.objectContaining({
+          deleted: false,
+          sourceTiles: 0,
+          missingSourceTiles: 4,
+          directFallback: expect.objectContaining({ attempted: true, sparse: true, chunkCount: 1024, sourceChunkCount: 2, hasPixels: true, chunks: 2 }),
+        }),
+      ],
+    });
+    const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
+    expect(png.width).toBe(256);
+    expect(pngPixel(png, 144, 224)[3]).toBe(255);
+  });
+
   it("derives low zoom image tiles from z4 sources with default fallback colors", async () => {
     const env = createEnv({ textureColors: { "minecraft:grass_block": [95, 159, 63] } });
     const key = "map-tiles/v1/world/Overworld/z3/0/0.png";
