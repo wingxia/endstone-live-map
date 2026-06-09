@@ -52,7 +52,8 @@ const CHUNK_CATALOG_DEFAULT_LIMIT = 25;
 const CHUNK_CATALOG_MAX_LIMIT = 100;
 const CHUNK_CATALOG_DIRECT_READ_MAX_LIMIT = 16;
 const CHUNK_DIRECT_READ_LIMIT = REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS;
-const DERIVED_TILE_DIRECT_FALLBACK_MAX_CHUNKS = 128;
+const DERIVED_TILE_DIRECT_FALLBACK_MAX_CHUNKS = CHUNK_DIRECT_READ_LIMIT;
+const DERIVED_TILE_FORCE_DIRECT_FALLBACK_MAX_CHUNKS = CHUNK_DIRECT_READ_LIMIT * 4;
 const MIN_COLUMN_HEIGHT = -64;
 const SEA_LEVEL = 63;
 const WORLD_META_SAMPLE_LIMIT = 128;
@@ -2808,6 +2809,7 @@ async function renderDerivedMapTileFromChunks(bucket, tile, options = {}) {
   const range = chunkRangeForMapTile(tile);
   const chunkCount = chunkCountForRange(range);
   const query = { world: tile.world, dimension: tile.dimension, ...range };
+  const maxChunks = options.force === true ? DERIVED_TILE_FORCE_DIRECT_FALLBACK_MAX_CHUNKS : DERIVED_TILE_DIRECT_FALLBACK_MAX_CHUNKS;
   let sparse = false;
   let chunksByCoord;
   let sourceChunkCount = chunkCount;
@@ -2815,8 +2817,8 @@ async function renderDerivedMapTileFromChunks(bucket, tile, options = {}) {
     sparse = true;
     const summaries = await readChunkSummariesForRange(bucket, query);
     sourceChunkCount = summaries.size;
-    if (sourceChunkCount > DERIVED_TILE_DIRECT_FALLBACK_MAX_CHUNKS) {
-      return { attempted: false, reason: "chunk_range_too_large", chunkCount, sourceChunkCount, hasPixels: false, sourceVersion: 0 };
+    if (sourceChunkCount > maxChunks) {
+      return { attempted: false, reason: "chunk_range_too_large", chunkCount, sourceChunkCount, directLimit: maxChunks, hasPixels: false, sourceVersion: 0 };
     }
     chunksByCoord = await readChunksForCoords(bucket, query, summaries.values(), { readConcurrency: options.readConcurrency });
   } else {
