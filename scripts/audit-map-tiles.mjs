@@ -434,7 +434,9 @@ async function rebuildMapTilesAndAudit(options) {
       }
       console.error(`Rebuilt ${meta.world}/${meta.dimension} z${zoom}: ${JSON.stringify(byZoom[`z${zoom}`])}`);
     }
-    rebuilds.push({ world: meta.world, dimension: meta.dimension, scannedRanges: stats.scannedRanges, nonAirChunks: stats.nonAirChunks, uniqueTiles: tiles.length, materialized, byZoom });
+    const worldMeta = await touchWorldMetaTileVersion(options, meta);
+    console.error(`Touched ${meta.world}/${meta.dimension} world metadata: ${JSON.stringify(worldMeta)}`);
+    rebuilds.push({ world: meta.world, dimension: meta.dimension, scannedRanges: stats.scannedRanges, nonAirChunks: stats.nonAirChunks, uniqueTiles: tiles.length, materialized, byZoom, worldMeta });
   }
 
   const audit = await auditMapTiles(options);
@@ -529,12 +531,33 @@ async function backfillOneMapTilePage(options, meta, range, zoom, { cursor = "",
       cursor,
       dryRun: false,
       force: true,
+      touchMeta: options.mode !== "rebuild",
       limit,
     }),
   }, options);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(`backfill failed for ${meta.world}/${meta.dimension}/z${zoom} ${formatChunkRange(range)} cursor ${cursor || "0"}: HTTP ${response.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
+async function touchWorldMetaTileVersion(options, meta) {
+  const response = await fetchWithRetry(`${options.workerUrl}/api/plugin/world-meta/touch`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${options.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      world: meta.world,
+      dimension: meta.dimension,
+      updatedAt: Date.now(),
+    }),
+  }, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`world meta touch failed for ${meta.world}/${meta.dimension}: HTTP ${response.status} ${JSON.stringify(body)}`);
   }
   return body;
 }
