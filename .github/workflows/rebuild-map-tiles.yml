@@ -38,23 +38,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Validate inputs
-        env:
-          DELETE_EXISTING: ${{ inputs.delete_existing }}
         run: |
           test -n "${{ secrets.PLUGIN_TOKEN }}" || (echo "Missing PLUGIN_TOKEN secret" && exit 1)
-          if [ "$DELETE_EXISTING" != "true" ]; then
-            echo "Set delete_existing=true to delete stale map tiles and rebuild from z4."
-            exit 1
-          fi
-      - name: Delete stale tiles and rebuild from z4
+      - name: Rebuild from z4
         env:
           PLUGIN_TOKEN: ${{ secrets.PLUGIN_TOKEN }}
           WORKER_URL: ${{ inputs.worker_url }}
           WORLD: ${{ inputs.world }}
           DIMENSION: ${{ inputs.dimension }}
           CONCURRENCY: ${{ inputs.concurrency }}
+          DELETE_EXISTING: ${{ inputs.delete_existing }}
         run: |
-          args=(rebuild --worker-url "$WORKER_URL" --delete-existing --concurrency "$CONCURRENCY" --request-timeout-ms 60000 --request-retries 4)
+          args=(rebuild --worker-url "$WORKER_URL" --concurrency "$CONCURRENCY" --request-timeout-ms 60000 --request-retries 4)
+          if [ "$DELETE_EXISTING" = "true" ]; then
+            args+=(--delete-existing)
+          fi
           if [ -n "$WORLD" ]; then
             args+=(--world "$WORLD")
           fi
