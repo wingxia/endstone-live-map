@@ -9,6 +9,9 @@ const MAP_TILE_BASE_ZOOM = 4;
 const MAP_TILE_MAX_ZOOM = MAP_TILE_BASE_ZOOM;
 const MIN_COLUMN_HEIGHT = -64;
 const MAX_MATERIALIZE_CHUNKS = 8;
+const CATALOG_DEFAULT_LIMIT = 25;
+const CATALOG_MIN_LIMIT = 1;
+const CATALOG_COOLDOWN_MS = 10000;
 
 class HttpError extends Error {
   constructor(status, url, body) {
@@ -50,6 +53,7 @@ function parseArgs(argv) {
     repairLimit: Number.POSITIVE_INFINITY,
     requestTimeoutMs: 45000,
     requestRetries: 3,
+    catalogLimit: CATALOG_DEFAULT_LIMIT,
     cleanupLimit: 500,
     world: "",
     dimension: "",
@@ -90,6 +94,8 @@ function parseArgs(argv) {
       options.requestTimeoutMs = Math.max(1000, numberValue(values, ++index, flag));
     } else if (flag === "--request-retries") {
       options.requestRetries = Math.max(0, numberValue(values, ++index, flag));
+    } else if (flag === "--catalog-limit") {
+      options.catalogLimit = Math.max(CATALOG_MIN_LIMIT, numberValue(values, ++index, flag));
     } else if (flag === "--cleanup-limit") {
       options.cleanupLimit = Math.max(1, numberValue(values, ++index, flag));
     } else if (flag === "--delete-existing") {
@@ -285,8 +291,10 @@ async function fetchChunkCatalog(options, meta, stats) {
   let source = "direct";
   let cursor = "";
   let chunkCursor = null;
+  let limit = options.catalogLimit;
   while (source) {
-    const body = await fetchChunkCatalogPage(options, meta, { source, cursor, chunkCursor });
+    const { body, limit: usedLimit } = await fetchChunkCatalogPageAdaptive(options, meta, { source, cursor, chunkCursor }, limit);
+    limit = usedLimit;
     stats.catalogPages += 1;
     stats.chunksRead += Array.isArray(body.chunks) ? body.chunks.length : 0;
     stats.skippedEmptyChunks += body.skippedEmpty || 0;
@@ -313,6 +321,7 @@ async function fetchChunkCatalog(options, meta, stats) {
       source = body.nextSource || "";
       cursor = "";
       chunkCursor = null;
+      limit = options.catalogLimit;
     } else {
       source = body.nextSource || source;
       cursor = body.cursor || "";
@@ -322,7 +331,25 @@ async function fetchChunkCatalog(options, meta, stats) {
   return [...chunksByKey.values()].sort((a, b) => a.world.localeCompare(b.world) || a.dimension.localeCompare(b.dimension) || a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
 }
 
-async function fetchChunkCatalogPage(options, meta, page) {
+async function fetchChunkCatalogPageAdaptive(options, meta, page, initialLimit) {
+  let limit = Math.max(CATALOG_MIN_LIMIT, initialLimit || options.catalogLimit);
+  while (true) {
+    const response = await fetchChunkCatalogPage(options, meta, page, limit);
+    const body = await response.json().catch(() => ({}));
+    if (response.ok) {
+      return { body, limit };
+    }
+    if (!isCatalogSplitStatus(response.status) || limit <= CATALOG_MIN_LIMIT) {
+      throw new Error(`chunk catalog failed for ${meta.world}/${meta.dimension}/${page.source} cursor ${page.cursor || "0"} chunk ${page.chunkCursor || "0"} limit ${limit}: HTTP ${response.status} ${JSON.stringify(body)}`);
+    }
+    const nextLimit = Math.max(CATALOG_MIN_LIMIT, Math.floor(limit / 2));
+    console.error(`Cooling chunk catalog ${meta.world}/${meta.dimension}/${page.source} cursor ${page.cursor || "0"} chunk ${page.chunkCursor || "0"} after HTTP ${response.status}; reducing limit ${limit}->${nextLimit}`);
+    limit = nextLimit;
+    await sleep(CATALOG_COOLDOWN_MS);
+  }
+}
+
+async function fetchChunkCatalogPage(options, meta, page, limit) {
   const response = await fetchWithRetry(`${options.workerUrl}/api/plugin/chunks/catalog`, {
     method: "POST",
     headers: {
@@ -335,13 +362,10 @@ async function fetchChunkCatalogPage(options, meta, page) {
       source: page.source,
       cursor: page.cursor || "",
       chunkCursor: page.chunkCursor || 0,
+      limit,
     }),
   }, options);
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(`chunk catalog failed for ${meta.world}/${meta.dimension}/${page.source} cursor ${page.cursor || "0"} chunk ${page.chunkCursor || "0"}: HTTP ${response.status} ${JSON.stringify(body)}`);
-  }
-  return body;
+  return response;
 }
 
 async function fetchChunksForAuditRange(options, meta, range, stats) {
@@ -769,6 +793,10 @@ function shouldSplitBackfillRange(error, range) {
     return true;
   }
   return isRetriableError(error);
+}
+
+function isCatalogSplitStatus(status) {
+  return status === 429 || status === 503;
 }
 
 function splitChunkRange(range) {

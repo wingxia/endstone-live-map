@@ -87,7 +87,7 @@ class MockR2Bucket {
     const start = Number.isFinite(Number(options.cursor)) ? Math.max(0, Number(options.cursor)) : 0;
     const selected = keys.slice(start, start + limit);
     return {
-      objects: selected.map((key) => ({ key })),
+      objects: selected.map((key) => ({ key, customMetadata: this.objects.get(key)?.customMetadata || {} })),
       truncated: keys.length > start + selected.length,
       cursor: keys.length > start + selected.length ? String(start + selected.length) : undefined,
     };
@@ -716,6 +716,13 @@ describe("worker routes", () => {
     expect(uploadBody.tiles).toHaveLength(6);
     expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z-1/0/0.png")).toBe(false);
     expect(env.MAP_DATA.objects.has("chunks/v1/world/Overworld/0/0.json")).toBe(true);
+    expect(env.MAP_DATA.objects.get("chunks/v1/world/Overworld/0/0.json").customMetadata).toMatchObject({
+      world: "world",
+      dimension: "Overworld",
+      chunkX: "0",
+      chunkZ: "0",
+      hasNonAir: "true",
+    });
     await drainMapTiles(env);
     expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z-1/0/0.png")).toBe(true);
     expect(env.MAP_DATA.objects.has("map-tiles/v1/world/Overworld/z0/0/0.png")).toBe(true);
@@ -1010,6 +1017,27 @@ describe("worker routes", () => {
 
     expect(await response.json()).toMatchObject({ ok: true, tiles: [expect.objectContaining({ deleted: true, sourceTiles: 0, missingSourceTiles: 4 })] });
     expect(env.MAP_DATA.objects.has(key)).toBe(false);
+  });
+
+  it("keeps low zoom pixels when one neighboring z4 source is still a placeholder", async () => {
+    const env = createEnv();
+    const key = "map-tiles/v1/world/Overworld/z3/0/0.png";
+    for (const chunkX of [0, 1, 2]) {
+      await env.MAP_DATA.put(`chunks/v1/world/Overworld/${chunkX}/0.json`, JSON.stringify(createChunk({ chunkX })), {
+        httpMetadata: { contentType: "application/json" },
+      });
+    }
+    await backfillMapTile(env, { world: "world", dimension: "Overworld", zoom: 4, minChunkX: 0, maxChunkX: 2, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true, limit: 4 });
+    await env.MAP_DATA.put("map-tiles/v1/world/Overworld/z4/1/1.png", new Uint8Array([1, 2, 3]), {
+      httpMetadata: { contentType: "image/png" },
+      customMetadata: { tileVersion: "10", sourceVersion: "10" },
+    });
+
+    const response = await backfillMapTile(env, { world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true });
+
+    expect(await response.json()).toMatchObject({ ok: true, tiles: [expect.objectContaining({ deleted: false, sourceTiles: 2 })] });
+    const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
+    expect(pngPixel(png, 4, 4)[3]).toBe(255);
   });
 
   it("derives low zoom image tiles from z4 sources with default fallback colors", async () => {
@@ -1429,6 +1457,35 @@ describe("worker routes", () => {
     expect(body).toMatchObject({ ok: true, source: "direct", matched: 16, cursor: "16", done: false });
     expect(body.chunks).toHaveLength(16);
     expect(env.MAP_DATA.getCalls.filter((key) => key.startsWith("chunks/v1/world/Overworld/"))).toHaveLength(16);
+  });
+
+  it("catalogs direct chunks from object metadata without body reads", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ chunkX: 0, chunkZ: 0, updatedAt: 10 })), {
+      httpMetadata: { contentType: "application/json" },
+      customMetadata: { world: "world", dimension: "Overworld", chunkX: "0", chunkZ: "0", updatedAt: "10", hasNonAir: "true" },
+    });
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/1/0.json", JSON.stringify(createEmptyChunk({ chunkX: 1, chunkZ: 0, updatedAt: 11 })), {
+      httpMetadata: { contentType: "application/json" },
+      customMetadata: { world: "world", dimension: "Overworld", chunkX: "1", chunkZ: "0", updatedAt: "11", hasNonAir: "false" },
+    });
+    env.MAP_DATA.getCalls = [];
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/chunks/catalog", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ world: "world", dimension: "Overworld", source: "direct", limit: 25 }),
+      }),
+      env,
+      {},
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, source: "direct", matched: 2, metadataHits: 2, bodyReads: 0, skippedEmpty: 1 });
+    expect(body.chunks).toEqual([expect.objectContaining({ chunkX: 0, chunkZ: 0, updatedAt: 10, hasNonAir: true, source: "direct" })]);
+    expect(env.MAP_DATA.getCalls).toHaveLength(0);
   });
 
   it("catalogs legacy region chunks for rebuilds with chunk cursors", async () => {

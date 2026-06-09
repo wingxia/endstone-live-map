@@ -24,6 +24,10 @@ on:
         description: Audit/rebuild scan concurrency
         required: false
         default: "2"
+      catalog_limit:
+        description: Chunk catalog page size
+        required: false
+        default: "25"
 
 jobs:
   rebuild:
@@ -47,9 +51,10 @@ jobs:
           WORLD: ${{ inputs.world }}
           DIMENSION: ${{ inputs.dimension }}
           CONCURRENCY: ${{ inputs.concurrency }}
+          CATALOG_LIMIT: ${{ inputs.catalog_limit }}
           DELETE_EXISTING: ${{ inputs.delete_existing }}
         run: |
-          args=(rebuild --worker-url "$WORKER_URL" --concurrency "$CONCURRENCY" --request-timeout-ms 60000 --request-retries 4)
+          args=(rebuild --worker-url "$WORKER_URL" --concurrency "$CONCURRENCY" --catalog-limit "$CATALOG_LIMIT" --request-timeout-ms 60000 --request-retries 4)
           if [ "$DELETE_EXISTING" = "true" ]; then
             args+=(--delete-existing)
           fi
