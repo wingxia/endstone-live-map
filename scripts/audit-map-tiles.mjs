@@ -331,6 +331,7 @@ function expectedMapTilesFromChunks(meta, chunks, stats) {
       dimension: chunk.dimension || meta.dimension,
       chunkX: chunk.chunkX,
       chunkZ: chunk.chunkZ,
+      source: chunk.source,
     };
     chunkRefs.set(`${ref.world}/${ref.dimension}/${ref.chunkX}/${ref.chunkZ}`, ref);
     for (const zoom of zoomRange()) {
