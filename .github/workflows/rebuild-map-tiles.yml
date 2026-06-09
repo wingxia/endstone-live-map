@@ -1,5 +1,9 @@
 name: rebuild-map-tiles
 
+concurrency:
+  group: rebuild-map-tiles-production
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:
@@ -20,7 +24,7 @@ on:
         required: false
         default: ""
       delete_existing:
-        description: Delete existing map-tiles/v1 objects before rebuilding
+        description: After rebuilding, remove stale map tile objects in the requested scope
         required: true
         type: boolean
         default: false
