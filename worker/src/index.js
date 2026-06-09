@@ -1890,7 +1890,7 @@ export function normalizeChunkQuery(params) {
 
 export function normalizeCleanupPayload(payload) {
   const prefix = String(payload.prefix || "");
-  if (!CLEANUP_PREFIXES.has(prefix) || prefix.startsWith("textures/v1/")) {
+  if (!isAllowedCleanupPrefix(prefix)) {
     throw new Error("cleanup prefix is not allowed");
   }
   const limit = Math.min(CLEANUP_MAX_LIMIT, Math.max(1, numberOrThrow(payload.limit ?? CLEANUP_DEFAULT_LIMIT, "limit")));
@@ -1901,6 +1901,17 @@ export function normalizeCleanupPayload(payload) {
     dryRun: payload.dryRun !== false,
     confirm: String(payload.confirm || ""),
   };
+}
+
+function isAllowedCleanupPrefix(prefix) {
+  if (!prefix || prefix.startsWith("textures/v1/")) {
+    return false;
+  }
+  if (CLEANUP_PREFIXES.has(prefix)) {
+    return true;
+  }
+  const escapedMapTilePrefix = MAP_TILE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escapedMapTilePrefix}[^/]+/[^/]+/$`).test(prefix);
 }
 
 export function normalizeMapTileBackfillPayload(payload) {

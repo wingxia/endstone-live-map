@@ -23,22 +23,27 @@ class HttpError extends Error {
   }
 }
 
-const args = parseArgs(process.argv.slice(2));
-
-try {
-  const summary =
-    args.mode === "rebuild"
-      ? await rebuildMapTilesAndAudit(args)
-      : args.mode === "repair"
-        ? await repairUntilClean(args)
-        : await auditMapTiles(args);
-  console.log(JSON.stringify(summary, null, 2));
-  if ((args.failOnMismatch || args.mode === "repair" || args.mode === "rebuild") && summary.mismatchCount > 0) {
-    process.exitCode = 2;
+if (isCliEntrypoint()) {
+  const args = parseArgs(process.argv.slice(2));
+  try {
+    const summary =
+      args.mode === "rebuild"
+        ? await rebuildMapTilesAndAudit(args)
+        : args.mode === "repair"
+          ? await repairUntilClean(args)
+          : await auditMapTiles(args);
+    console.log(JSON.stringify(summary, null, 2));
+    if ((args.failOnMismatch || args.mode === "repair" || args.mode === "rebuild") && summary.mismatchCount > 0) {
+      process.exitCode = 2;
+    }
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
   }
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+}
+
+function isCliEntrypoint() {
+  return import.meta.url === `file://${process.argv[1]}`;
 }
 
 function parseArgs(argv) {
@@ -756,7 +761,10 @@ async function materializeChunkBatch(options, chunks, offset) {
 }
 
 async function deleteMapTileObjects(options) {
-  const stats = { prefix: "map-tiles/v1/", calls: 0, matched: 0, deleted: 0 };
+  if (!options.world || !options.dimension) {
+    throw new Error("--delete-existing for map tiles requires --world and --dimension");
+  }
+  const stats = { prefix: mapTileCleanupPrefix(options.world, options.dimension), calls: 0, matched: 0, deleted: 0 };
   let cursor = "";
   do {
     const response = await fetchWithRetry(`${options.workerUrl}/api/plugin/map-data/cleanup`, {
@@ -783,6 +791,10 @@ async function deleteMapTileObjects(options) {
     cursor = body.cursor || "";
   } while (cursor);
   return stats;
+}
+
+export function mapTileCleanupPrefix(world, dimension) {
+  return `map-tiles/v1/${cleanPathSegment(world)}/${cleanPathSegment(dimension)}/`;
 }
 
 async function inspectMapTile(options, tile) {
@@ -1066,4 +1078,12 @@ async function mapWithConcurrency(items, concurrency, fn) {
 
 function floorDiv(value, divisor) {
   return Math.floor(value / divisor);
+}
+
+function cleanPathSegment(value) {
+  const cleaned = String(value).replace(/[^A-Za-z0-9_.:-]/g, "_");
+  if (!cleaned || cleaned === "." || cleaned === "..") {
+    throw new Error("invalid path segment");
+  }
+  return cleaned.slice(0, 80);
 }
