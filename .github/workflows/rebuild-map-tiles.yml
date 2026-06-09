@@ -28,6 +28,11 @@ on:
         description: Chunk catalog page size
         required: false
         default: "25"
+      skip_audit:
+        description: Skip final full audit after rebuilding
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   rebuild:
@@ -53,10 +58,14 @@ jobs:
           CONCURRENCY: ${{ inputs.concurrency }}
           CATALOG_LIMIT: ${{ inputs.catalog_limit }}
           DELETE_EXISTING: ${{ inputs.delete_existing }}
+          SKIP_AUDIT: ${{ inputs.skip_audit }}
         run: |
           args=(rebuild --worker-url "$WORKER_URL" --concurrency "$CONCURRENCY" --catalog-limit "$CATALOG_LIMIT" --request-timeout-ms 60000 --request-retries 4)
           if [ "$DELETE_EXISTING" = "true" ]; then
             args+=(--delete-existing)
+          fi
+          if [ "$SKIP_AUDIT" = "true" ]; then
+            args+=(--skip-audit)
           fi
           if [ -n "$WORLD" ]; then
             args+=(--world "$WORLD")

@@ -58,6 +58,7 @@ function parseArgs(argv) {
     world: "",
     dimension: "",
     deleteExisting: false,
+    skipAudit: false,
     failOnMismatch: false,
     sampleOnly: false,
   };
@@ -100,6 +101,8 @@ function parseArgs(argv) {
       options.cleanupLimit = Math.max(1, numberValue(values, ++index, flag));
     } else if (flag === "--delete-existing") {
       options.deleteExisting = true;
+    } else if (flag === "--skip-audit") {
+      options.skipAudit = true;
     } else if (flag === "--fail-on-mismatch") {
       options.failOnMismatch = true;
     } else if (flag === "--sample-only") {
@@ -478,7 +481,19 @@ async function rebuildMapTilesAndAudit(options) {
     rebuilds.push({ world: meta.world, dimension: meta.dimension, scannedRanges: stats.scannedRanges, nonAirChunks: stats.nonAirChunks, uniqueTiles: tiles.length, materialized, byZoom, worldMeta });
   }
 
-  const audit = await auditMapTiles(options);
+  const audit = options.skipAudit
+    ? {
+        ok: true,
+        mode: "audit",
+        workerUrl: options.workerUrl,
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        worlds: [],
+        mismatchCount: 0,
+        issues: [],
+        skipped: true,
+      }
+    : await auditMapTiles(options);
   return {
     ...audit,
     mode: "rebuild",
