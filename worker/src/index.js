@@ -2801,7 +2801,7 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
 }
 
 function shouldForceDirectDerivedMapTile(tile, options = {}) {
-  return options.force === true && normalizeMapTileZoom(tile.zoom) === MAP_TILE_BASE_ZOOM - 1;
+  return options.force === true && normalizeMapTileZoom(tile.zoom) < MAP_TILE_BASE_ZOOM;
 }
 
 async function renderDerivedMapTileFromChunks(bucket, tile, options = {}) {
