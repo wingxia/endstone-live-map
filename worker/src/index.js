@@ -1453,6 +1453,24 @@ async function handleMapDataCleanup(request, env) {
     return json({ error: "cleanup_confirmation_required", confirm: CLEANUP_CONFIRMATION }, 400);
   }
 
+  if (cleanup.keys.length > 0) {
+    const keys = cleanup.keys;
+    if (!cleanup.dryRun) {
+      await mapWithConcurrency(keys, 25, (key) => bucket.delete(key));
+    }
+
+    return json({
+      ok: true,
+      dryRun: cleanup.dryRun,
+      prefix: "",
+      deleted: cleanup.dryRun ? 0 : keys.length,
+      matched: keys.length,
+      keys,
+      truncated: false,
+      cursor: null,
+    });
+  }
+
   const page = await bucket.list({ prefix: cleanup.prefix, cursor: cleanup.cursor || undefined, limit: cleanup.limit });
   const keys = (page.objects || []).map((object) => object.key).filter((key) => key.startsWith(cleanup.prefix) && !key.startsWith("textures/v1/"));
   if (!cleanup.dryRun) {
@@ -1889,18 +1907,68 @@ export function normalizeChunkQuery(params) {
 }
 
 export function normalizeCleanupPayload(payload) {
+  const keys = normalizeCleanupKeys(payload.keys);
   const prefix = String(payload.prefix || "");
+  if (keys.length > 0) {
+    return {
+      prefix: "",
+      keys,
+      limit: keys.length,
+      cursor: "",
+      dryRun: payload.dryRun !== false,
+      confirm: String(payload.confirm || ""),
+    };
+  }
   if (!isAllowedCleanupPrefix(prefix)) {
     throw new Error("cleanup prefix is not allowed");
   }
   const limit = Math.min(CLEANUP_MAX_LIMIT, Math.max(1, numberOrThrow(payload.limit ?? CLEANUP_DEFAULT_LIMIT, "limit")));
   return {
     prefix,
+    keys,
     limit,
     cursor: typeof payload.cursor === "string" && payload.cursor.length > 0 ? payload.cursor : "",
     dryRun: payload.dryRun !== false,
     confirm: String(payload.confirm || ""),
   };
+}
+
+function normalizeCleanupKeys(value) {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("cleanup keys must be an array");
+  }
+
+  const keys = [];
+  const seen = new Set();
+  for (const item of value) {
+    const key = normalizeMapTileCleanupKey(item);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    keys.push(key);
+  }
+  if (keys.length > CLEANUP_MAX_LIMIT) {
+    throw new Error(`cleanup keys must be at most ${CLEANUP_MAX_LIMIT}`);
+  }
+  return keys;
+}
+
+function normalizeMapTileCleanupKey(value) {
+  const key = String(value || "");
+  const escapedMapTilePrefix = MAP_TILE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`^${escapedMapTilePrefix}([^/]+)/([^/]+)/z(-?\\d+)/(-?\\d+)/(-?\\d+)\\.png$`).exec(key);
+  if (!match) {
+    throw new Error("cleanup key is not allowed");
+  }
+  const normalized = mapTileKey(match[1], match[2], match[3], match[4], match[5]);
+  if (normalized !== key) {
+    throw new Error("cleanup key is not allowed");
+  }
+  return normalized;
 }
 
 function isAllowedCleanupPrefix(prefix) {
