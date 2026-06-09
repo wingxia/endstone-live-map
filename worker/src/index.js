@@ -2662,12 +2662,13 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
     }
   });
 
-  if (!hasPixels) {
+  const sourceComplete = sourceTileCount === sourceTiles.length && missingSourceTiles.length === 0 && invalidSourceTiles.length === 0;
+  if (!sourceComplete) {
     const fallback = await renderDerivedMapTileFromChunks(bucket, tile, options);
     const { png: fallbackPng, ...fallbackMeta } = fallback;
     directFallback = fallbackMeta;
     if (fallback.hasPixels) {
-      png = fallbackPng;
+      overlayPngNonTransparentPixels(png, fallbackPng);
       hasPixels = true;
       sourceVersion = Math.max(sourceVersion, directFallback.sourceVersion);
     }
@@ -2822,6 +2823,18 @@ function downsampleBaseTileIntoPng(target, source, destX, destY, destSize) {
     }
   }
   return hasPixels;
+}
+
+function overlayPngNonTransparentPixels(target, source) {
+  for (let index = 0; index < source.data.length; index += 4) {
+    if (source.data[index + 3] < 1) {
+      continue;
+    }
+    target.data[index] = source.data[index];
+    target.data[index + 1] = source.data[index + 1];
+    target.data[index + 2] = source.data[index + 2];
+    target.data[index + 3] = source.data[index + 3];
+  }
 }
 
 function averagePngRect(png, x, y, width, height) {

@@ -1072,6 +1072,41 @@ describe("worker routes", () => {
     expect(pngPixel(png, 4, 4)[3]).toBe(255);
   });
 
+  it("fills missing low zoom source quadrants from chunk data", async () => {
+    const env = createEnv();
+    const key = "map-tiles/v1/Bedrock_level/Nether/z3/76/-32.png";
+    const source = new PNG({ width: 256, height: 256, colorType: 6 });
+    for (let index = 0; index < source.data.length; index += 4) {
+      source.data[index] = 95;
+      source.data[index + 1] = 159;
+      source.data[index + 2] = 63;
+      source.data[index + 3] = 255;
+    }
+    const sourceBytes = PNG.sync.write(source);
+    for (const [tileX, tileZ] of [
+      [152, -64],
+      [153, -64],
+      [152, -63],
+    ]) {
+      await env.MAP_DATA.put(`map-tiles/v1/Bedrock_level/Nether/z4/${tileX}/${tileZ}.png`, sourceBytes, {
+        httpMetadata: { contentType: "image/png" },
+        customMetadata: { tileVersion: "10", sourceVersion: "10" },
+      });
+    }
+    await env.MAP_DATA.put("chunks/v1/Bedrock_level/Nether/153/-63.json", JSON.stringify(createChunk({ world: "Bedrock_level", dimension: "Nether", chunkX: 153, chunkZ: -63 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const response = await backfillMapTile(env, { world: "Bedrock_level", dimension: "Nether", zoom: 3, minChunkX: 152, maxChunkX: 153, minChunkZ: -64, maxChunkZ: -63, dryRun: false, force: true });
+
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      tiles: [expect.objectContaining({ deleted: false, sourceTiles: 3, missingSourceTiles: 1, directFallback: expect.objectContaining({ attempted: true, hasPixels: true, chunks: 1 }) })],
+    });
+    const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
+    expect(pngPixel(png, 192, 192)[3]).toBe(255);
+  });
+
   it("renders low zoom directly from chunks when source image tiles are missing", async () => {
     const env = createEnv();
     const key = "map-tiles/v1/Bedrock_level/Nether/z3/76/-32.png";
