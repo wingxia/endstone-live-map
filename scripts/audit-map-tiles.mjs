@@ -311,6 +311,7 @@ async function fetchChunkCatalog(options, meta, stats) {
           chunkX: chunk.chunkX,
           chunkZ: chunk.chunkZ,
           hasNonAir: true,
+          source: chunk.source || source,
         });
       }
       if (chunk.source === "region") {
@@ -627,6 +628,10 @@ async function materializeChunks(options, chunks) {
       continue;
     }
     seen.add(key);
+    if (chunk.source === "direct") {
+      stats.direct += 1;
+      continue;
+    }
     uniqueChunks.push(ref);
   }
   for (let index = 0; index < uniqueChunks.length; index += MAX_MATERIALIZE_CHUNKS) {
