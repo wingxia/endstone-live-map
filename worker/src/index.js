@@ -2749,43 +2749,60 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
   const missingSourceTiles = [];
   const invalidSourceTiles = [];
   let directFallback = null;
+  let renderedDirectly = false;
 
-  await mapWithConcurrency(sourceTiles, options.readConcurrency || MAP_TILE_BACKFILL_READ_CONCURRENCY, async (sourceTile) => {
-    const sourceKey = mapTileKey(sourceTile.world, sourceTile.dimension, sourceTile.zoom, sourceTile.tileX, sourceTile.tileZ);
-    const object = await bucket.get(sourceKey);
-    if (!object) {
-      missingSourceTiles.push(sourceKey);
-      return;
-    }
-    let sourcePng;
-    try {
-      sourcePng = PNG.sync.read(Buffer.from(await object.arrayBuffer()));
-    } catch (error) {
-      invalidSourceTiles.push({ key: sourceKey, error: error instanceof Error ? error.message : String(error) });
-      return;
-    }
-    if (sourcePng.width !== MAP_TILE_SIZE || sourcePng.height !== MAP_TILE_SIZE) {
-      missingSourceTiles.push(sourceKey);
-      return;
-    }
-    sourceTileCount += 1;
-    sourceVersion = Math.max(sourceVersion, mapTileObjectMetadataVersion(object));
-    const destX = (sourceTile.tileX - minSourceTileX) * sourceTileSize;
-    const destY = (sourceTile.tileZ - minSourceTileZ) * sourceTileSize;
-    if (downsampleBaseTileIntoPng(png, sourcePng, destX, destY, sourceTileSize)) {
-      hasPixels = true;
-    }
-  });
-
-  const sourceComplete = sourceTileCount === sourceTiles.length && missingSourceTiles.length === 0 && invalidSourceTiles.length === 0;
-  if (!sourceComplete) {
+  if (shouldForceDirectDerivedMapTile(tile, options)) {
     const fallback = await renderDerivedMapTileFromChunks(bucket, tile, options);
     const { png: fallbackPng, ...fallbackMeta } = fallback;
-    directFallback = fallbackMeta;
-    if (fallback.hasPixels) {
-      overlayPngNonTransparentPixels(png, fallbackPng);
-      hasPixels = true;
+    directFallback = { ...fallbackMeta, preferred: true };
+    if (fallback.attempted && fallback.chunks > 0) {
+      renderedDirectly = true;
       sourceVersion = Math.max(sourceVersion, directFallback.sourceVersion);
+      if (fallback.hasPixels) {
+        png = fallbackPng;
+        hasPixels = true;
+      }
+    }
+  }
+
+  if (!renderedDirectly) {
+    await mapWithConcurrency(sourceTiles, options.readConcurrency || MAP_TILE_BACKFILL_READ_CONCURRENCY, async (sourceTile) => {
+      const sourceKey = mapTileKey(sourceTile.world, sourceTile.dimension, sourceTile.zoom, sourceTile.tileX, sourceTile.tileZ);
+      const object = await bucket.get(sourceKey);
+      if (!object) {
+        missingSourceTiles.push(sourceKey);
+        return;
+      }
+      let sourcePng;
+      try {
+        sourcePng = PNG.sync.read(Buffer.from(await object.arrayBuffer()));
+      } catch (error) {
+        invalidSourceTiles.push({ key: sourceKey, error: error instanceof Error ? error.message : String(error) });
+        return;
+      }
+      if (sourcePng.width !== MAP_TILE_SIZE || sourcePng.height !== MAP_TILE_SIZE) {
+        missingSourceTiles.push(sourceKey);
+        return;
+      }
+      sourceTileCount += 1;
+      sourceVersion = Math.max(sourceVersion, mapTileObjectMetadataVersion(object));
+      const destX = (sourceTile.tileX - minSourceTileX) * sourceTileSize;
+      const destY = (sourceTile.tileZ - minSourceTileZ) * sourceTileSize;
+      if (downsampleBaseTileIntoPng(png, sourcePng, destX, destY, sourceTileSize)) {
+        hasPixels = true;
+      }
+    });
+
+    const sourceComplete = sourceTileCount === sourceTiles.length && missingSourceTiles.length === 0 && invalidSourceTiles.length === 0;
+    if (!sourceComplete) {
+      const fallback = await renderDerivedMapTileFromChunks(bucket, tile, options);
+      const { png: fallbackPng, ...fallbackMeta } = fallback;
+      directFallback = fallbackMeta;
+      if (fallback.hasPixels) {
+        overlayPngNonTransparentPixels(png, fallbackPng);
+        hasPixels = true;
+        sourceVersion = Math.max(sourceVersion, directFallback.sourceVersion);
+      }
     }
   }
 
@@ -2821,6 +2838,10 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
     },
   });
   return { ...tile, key, deleted: false, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length, directFallback };
+}
+
+function shouldForceDirectDerivedMapTile(tile, options = {}) {
+  return options.force === true && normalizeMapTileZoom(tile.zoom) === MAP_TILE_BASE_ZOOM - 1;
 }
 
 async function renderDerivedMapTileFromChunks(bucket, tile, options = {}) {

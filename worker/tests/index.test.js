@@ -1026,7 +1026,7 @@ describe("worker routes", () => {
 
     expect(await response.json()).toMatchObject({
       ok: true,
-      tiles: [expect.objectContaining({ deleted: false, sourceTiles: 0, missingSourceTiles: 4, directFallback: expect.objectContaining({ attempted: true, hasPixels: true, chunks: 1 }) })],
+      tiles: [expect.objectContaining({ deleted: false, sourceTiles: 0, missingSourceTiles: 0, directFallback: expect.objectContaining({ preferred: true, attempted: true, hasPixels: true, chunks: 1 }) })],
     });
     expect(env.MAP_DATA.objects.has(key)).toBe(true);
   });
@@ -1047,7 +1047,7 @@ describe("worker routes", () => {
 
     const response = await backfillMapTile(env, { world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true });
 
-    expect(await response.json()).toMatchObject({ ok: true, tiles: [expect.objectContaining({ deleted: false, sourceTiles: 2 })] });
+    expect(await response.json()).toMatchObject({ ok: true, tiles: [expect.objectContaining({ deleted: false, sourceTiles: 0, directFallback: expect.objectContaining({ preferred: true, chunks: 2 }) })] });
     const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
     expect(pngPixel(png, 4, 4)[3]).toBe(255);
   });
@@ -1110,7 +1110,7 @@ describe("worker routes", () => {
 
     expect(await response.json()).toMatchObject({
       ok: true,
-      tiles: [expect.objectContaining({ deleted: false, sourceTiles: 3, missingSourceTiles: 1, directFallback: expect.objectContaining({ attempted: true, hasPixels: true, chunks: 1 }) })],
+      tiles: [expect.objectContaining({ deleted: false, sourceTiles: 0, missingSourceTiles: 0, directFallback: expect.objectContaining({ preferred: true, attempted: true, hasPixels: true, chunks: 1 }) })],
     });
     const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
     expect(pngPixel(png, 192, 192)[3]).toBe(255);
@@ -1133,7 +1133,7 @@ describe("worker routes", () => {
 
     expect(await response.json()).toMatchObject({
       ok: true,
-      tiles: [expect.objectContaining({ deleted: false, sourceTiles: 0, missingSourceTiles: 4, directFallback: expect.objectContaining({ attempted: true, hasPixels: true, chunks: 3 }) })],
+      tiles: [expect.objectContaining({ deleted: false, sourceTiles: 0, missingSourceTiles: 0, directFallback: expect.objectContaining({ preferred: true, attempted: true, hasPixels: true, chunks: 3 }) })],
     });
     const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
     expect(pngPixel(png, 4, 4)[3]).toBe(255);
@@ -2649,6 +2649,61 @@ describe("worker routes", () => {
 
     expect(await response.json()).toMatchObject({ ok: true, force: true, written: 1 });
     expect(env.MAP_DATA.getCalls).not.toContain(key);
+  });
+
+  it("renders forced z3 backfills directly from chunks without reading z4 source images", async () => {
+    const env = createEnv();
+    const z3Key = "map-tiles/v1/world/Overworld/z3/0/0.png";
+    const z4Keys = [
+      "map-tiles/v1/world/Overworld/z4/0/0.png",
+      "map-tiles/v1/world/Overworld/z4/1/0.png",
+      "map-tiles/v1/world/Overworld/z4/0/1.png",
+      "map-tiles/v1/world/Overworld/z4/1/1.png",
+    ];
+    await env.MAP_DATA.put("chunk-regions/v1/world/Overworld/0/0.json", JSON.stringify({
+      version: 1,
+      world: "world",
+      dimension: "Overworld",
+      chunks: [
+        createChunk({ chunkX: 0, chunkZ: 0, updatedAt: 10 }),
+        createChunk({ chunkX: 1, chunkZ: 0, updatedAt: 20 }),
+      ],
+    }), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    const source = new PNG({ width: 256, height: 256, colorType: 6 });
+    source.data.fill(255);
+    for (const key of z4Keys) {
+      await env.MAP_DATA.put(key, PNG.sync.write(source), {
+        httpMetadata: { contentType: "image/png" },
+        customMetadata: { tileVersion: "5", sourceVersion: "5" },
+      });
+      env.MAP_DATA.objects.get(key).arrayBuffer = async () => {
+        throw new Error(`unexpected z4 source read: ${key}`);
+      };
+    }
+    env.MAP_DATA.getCalls = [];
+
+    const response = await backfillMapTile(env, { world: "world", dimension: "Overworld", zoom: 3, minChunkX: 0, maxChunkX: 1, minChunkZ: 0, maxChunkZ: 1, dryRun: false, force: true });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      force: true,
+      tiles: [
+        expect.objectContaining({
+          deleted: false,
+          sourceTiles: 0,
+          missingSourceTiles: 0,
+          directFallback: expect.objectContaining({ preferred: true, attempted: true, hasPixels: true, chunks: 2, sourceVersion: 20 }),
+        }),
+      ],
+    });
+    expect(env.MAP_DATA.getCalls.filter((key) => z4Keys.includes(key))).toHaveLength(0);
+    const png = readPng(await env.MAP_DATA.objects.get(z3Key).arrayBuffer());
+    expect(png.width).toBe(256);
+    expect(pngPixel(png, 4, 4)[3]).toBe(255);
   });
 
   it("deletes empty low zoom image tiles during rebuild", async () => {
