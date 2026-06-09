@@ -1162,8 +1162,8 @@ describe("worker routes", () => {
         expect.objectContaining({
           deleted: false,
           sourceTiles: 0,
-          missingSourceTiles: 4,
-          directFallback: expect.objectContaining({ attempted: true, sparse: true, chunkCount: 1024, sourceChunkCount: 65, hasPixels: true, chunks: 65 }),
+          missingSourceTiles: 0,
+          directFallback: expect.objectContaining({ preferred: true, attempted: true, sparse: true, chunkCount: 1024, sourceChunkCount: 65, hasPixels: true, chunks: 65 }),
         }),
       ],
     });
@@ -2704,6 +2704,62 @@ describe("worker routes", () => {
     const png = readPng(await env.MAP_DATA.objects.get(z3Key).arrayBuffer());
     expect(png.width).toBe(256);
     expect(pngPixel(png, 4, 4)[3]).toBe(255);
+  });
+
+  it("renders forced very low zoom backfills directly from sparse chunks", async () => {
+    const env = createEnv();
+    const key = "map-tiles/v1/Bedrock_level/Nether/z0/10/-4.png";
+    const sourceKeys = [
+      "map-tiles/v1/Bedrock_level/Nether/z1/20/-8.png",
+      "map-tiles/v1/Bedrock_level/Nether/z1/21/-8.png",
+      "map-tiles/v1/Bedrock_level/Nether/z1/20/-7.png",
+      "map-tiles/v1/Bedrock_level/Nether/z1/21/-7.png",
+    ];
+    await env.MAP_DATA.put("chunk-regions/v1/Bedrock_level/Nether/10/-4.json", JSON.stringify({
+      version: 1,
+      world: "Bedrock_level",
+      dimension: "Nether",
+      chunks: [
+        createChunk({ world: "Bedrock_level", dimension: "Nether", chunkX: 160, chunkZ: -64, updatedAt: 20 }),
+        createChunk({ world: "Bedrock_level", dimension: "Nether", chunkX: 175, chunkZ: -49, updatedAt: 30 }),
+      ],
+    }), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    const source = new PNG({ width: 256, height: 256, colorType: 6 });
+    source.data.fill(255);
+    for (const sourceKey of sourceKeys) {
+      await env.MAP_DATA.put(sourceKey, PNG.sync.write(source), {
+        httpMetadata: { contentType: "image/png" },
+        customMetadata: { tileVersion: "5", sourceVersion: "5" },
+      });
+      env.MAP_DATA.objects.get(sourceKey).arrayBuffer = async () => {
+        throw new Error(`unexpected z1 source read: ${sourceKey}`);
+      };
+    }
+    env.MAP_DATA.getCalls = [];
+
+    const response = await backfillMapTile(env, { world: "Bedrock_level", dimension: "Nether", zoom: 0, minChunkX: 160, maxChunkX: 175, minChunkZ: -64, maxChunkZ: -49, dryRun: false, force: true });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      force: true,
+      tiles: [
+        expect.objectContaining({
+          deleted: false,
+          sourceTiles: 0,
+          missingSourceTiles: 0,
+          directFallback: expect.objectContaining({ preferred: true, attempted: true, sparse: true, hasPixels: true, chunks: 2, sourceVersion: 30 }),
+        }),
+      ],
+    });
+    expect(env.MAP_DATA.getCalls.filter((sourceKey) => sourceKeys.includes(sourceKey))).toHaveLength(0);
+    const png = readPng(await env.MAP_DATA.objects.get(key).arrayBuffer());
+    expect(png.width).toBe(256);
+    expect(pngPixel(png, 0, 0)[3]).toBe(255);
+    expect(pngPixel(png, 255, 255)[3]).toBe(255);
   });
 
   it("deletes empty low zoom image tiles during rebuild", async () => {
