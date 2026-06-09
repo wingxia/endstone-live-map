@@ -39,7 +39,7 @@ const MAP_TILE_CRON_DRAIN_LIMIT = 50;
 const MAP_TILE_BACKFILL_WRITE_CONCURRENCY = 1;
 const MAP_TILE_BACKFILL_READ_CONCURRENCY = 4;
 const MAP_TILE_BACKFILL_WRITE_LIMIT = 1;
-const MAP_TILE_BACKFILL_BASE_WRITE_LIMIT = 1;
+const MAP_TILE_BACKFILL_BASE_WRITE_LIMIT = 4;
 const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
 const MAP_TILE_BACKFILL_MAX_LIMIT = 100;
 const EMPTY_CHUNK_PRUNE_WRITE_LIMIT = 8;
@@ -63,6 +63,8 @@ const TEXTURE_REPORT_KEY = "textures/v1/report.json";
 const WORLD_META_PREFIX = "meta/v1/";
 const CHUNK_REGION_PREFIX = "chunk-regions/v1/";
 const LAND_PREFIX = "lands/v1/";
+const MAP_TILE_PNG_WRITE_OPTIONS = { colorType: 6, inputColorType: 6, deflateLevel: 1 };
+const textureColorIndexCache = new WeakMap();
 
 export class LiveRoom {
   constructor(state, env) {
@@ -1132,6 +1134,7 @@ async function handleTextureUpload(request, env) {
   await bucket.put(TEXTURE_REPORT_KEY, JSON.stringify(report), {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
   });
+  textureColorIndexCache.delete(bucket);
 
   return json({ ok: true, keys: [TEXTURE_ATLAS_KEY, TEXTURE_MANIFEST_KEY, TEXTURE_REPORT_KEY] });
 }
@@ -2544,7 +2547,7 @@ async function rebuildBaseMapTile(bucket, tile, options = {}) {
     await bucket.delete(key);
     return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, missingColors, missingColorReason, chunks: chunksByCoord.size };
   }
-  const buffer = PNG.sync.write(png, { colorType: 6, inputColorType: 6 });
+  const buffer = PNG.sync.write(png, MAP_TILE_PNG_WRITE_OPTIONS);
   await bucket.put(key, buffer, {
     httpMetadata: { contentType: "image/png" },
     customMetadata: { world: tile.world, dimension: tile.dimension, zoom: String(tile.zoom), tileVersion: String(nextTileVersion), sourceVersion: String(sourceVersion) },
@@ -2612,7 +2615,7 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
     return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length };
   }
   fillTransparentMapTileHoles(png, transparentFillPixelLimit(2 ** tile.zoom));
-  const buffer = PNG.sync.write(png, { colorType: 6, inputColorType: 6 });
+  const buffer = PNG.sync.write(png, MAP_TILE_PNG_WRITE_OPTIONS);
   await bucket.put(key, buffer, {
     httpMetadata: { contentType: "image/png" },
     customMetadata: {
@@ -2753,13 +2756,13 @@ function averagePngRect(png, x, y, width, height) {
 }
 
 async function loadTextureColorIndex(bucket) {
+  const cached = textureColorIndexCache.get(bucket);
+  if (cached) {
+    return cached;
+  }
   const manifestObject = await bucket.get(TEXTURE_MANIFEST_KEY);
   if (!manifestObject) {
     return { ok: false, reason: "texture_manifest_missing", colors: new Map() };
-  }
-  const atlasObject = await bucket.get(TEXTURE_ATLAS_KEY);
-  if (!atlasObject) {
-    return { ok: false, reason: "texture_atlas_missing", colors: new Map() };
   }
 
   try {
@@ -2777,7 +2780,14 @@ async function loadTextureColorIndex(bucket) {
       }
     }
     if (colors.size > 0) {
-      return { ok: true, reason: "", colors };
+      const result = { ok: true, reason: "", colors, source: "manifest" };
+      textureColorIndexCache.set(bucket, result);
+      return result;
+    }
+
+    const atlasObject = await bucket.get(TEXTURE_ATLAS_KEY);
+    if (!atlasObject) {
+      return { ok: false, reason: "texture_atlas_missing", colors: new Map() };
     }
 
     const atlasBytes = Buffer.from(await atlasObject.arrayBuffer());
@@ -2792,7 +2802,9 @@ async function loadTextureColorIndex(bucket) {
     if (colors.size < 1) {
       return { ok: false, reason: "texture_colors_empty", colors };
     }
-    return { ok: true, reason: "", colors };
+    const result = { ok: true, reason: "", colors, source: "atlas" };
+    textureColorIndexCache.set(bucket, result);
+    return result;
   } catch (error) {
     return { ok: false, reason: "texture_atlas_invalid", colors: new Map(), message: error instanceof Error ? error.message : String(error) };
   }

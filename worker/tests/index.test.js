@@ -2154,6 +2154,24 @@ describe("worker routes", () => {
     expect(maxActiveReads).toBeLessThanOrEqual(4);
   });
 
+  it("backfills a small row of z4 base image tiles in one request", async () => {
+    const env = createEnv();
+    for (const chunkX of [0, 1, 2, 3]) {
+      await env.MAP_DATA.put(`chunks/v1/world/Overworld/${chunkX}/0.json`, JSON.stringify(createChunk({ chunkX })), {
+        httpMetadata: { contentType: "application/json" },
+      });
+    }
+
+    const response = await backfillMapTile(env, { world: "world", dimension: "Overworld", zoom: 4, minChunkX: 0, maxChunkX: 3, minChunkZ: 0, maxChunkZ: 0, limit: 25, dryRun: false, force: true, touchMeta: false });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, total: 4, matched: 4, written: 4, cursor: null });
+    for (const chunkX of [0, 1, 2, 3]) {
+      expect(env.MAP_DATA.objects.has(`map-tiles/v1/world/Overworld/z4/${chunkX}/0.png`)).toBe(true);
+    }
+  });
+
   it("serves transparent PNGs for missing low zoom image tiles", async () => {
     const env = createEnv();
     const response = await worker.fetch(new Request("https://map.buhe.li/api/map-tiles/world/Overworld/z3/0/0.png"), env, {});
@@ -2261,6 +2279,22 @@ describe("worker routes", () => {
     expect(env.MAP_DATA.getCalls).not.toContain(metaKey);
     expect(env.MAP_DATA.putCalls).not.toContain(metaKey);
     expect(await env.MAP_DATA.objects.get(metaKey).json()).toMatchObject({ updatedAt: 10 });
+  });
+
+  it("reuses manifest texture colors for repeated map tile backfills", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("chunks/v1/world/Overworld/0/0.json", JSON.stringify(createChunk({ updatedAt: 10 })), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    await backfillMapTile(env, { world: "world", dimension: "Overworld", zoom: 4, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true, touchMeta: false });
+    env.MAP_DATA.getCalls = [];
+
+    const response = await backfillMapTile(env, { world: "world", dimension: "Overworld", zoom: 4, minChunkX: 0, maxChunkX: 0, minChunkZ: 0, maxChunkZ: 0, dryRun: false, force: true, touchMeta: false });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, written: 1 });
+    expect(env.MAP_DATA.getCalls).not.toContain("textures/v1/manifest.json");
+    expect(env.MAP_DATA.getCalls).not.toContain("textures/v1/atlas.png");
   });
 
   it("touches world metadata through the plugin touch endpoint", async () => {
