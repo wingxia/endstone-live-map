@@ -2325,18 +2325,20 @@ async function readChunksForCoords(bucket, query, coords, options = {}) {
     uniqueCoords.push({ chunkX, chunkZ });
   }
 
-  const readKeys = uniqueCoords.map((coord) => chunkKey(query.world, query.dimension, coord.chunkX, coord.chunkZ));
+  if (uniqueCoords.length < 1) {
+    return chunksByCoord;
+  }
+
+  await readChunkRegionsForMissingCoords(bucket, query, uniqueCoords, chunksByCoord);
+
+  const missingCoords = uniqueCoords.filter((coord) => !chunksByCoord.has(coordKey(coord.chunkX, coord.chunkZ)));
+  const readKeys = missingCoords.map((coord) => chunkKey(query.world, query.dimension, coord.chunkX, coord.chunkZ));
   await mapWithConcurrency(readKeys, options.readConcurrency || BATCH_WRITE_CONCURRENCY, async (key) => {
     const chunk = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(key)));
     if (chunk) {
       chunksByCoord.set(coordKey(chunk.chunkX, chunk.chunkZ), chunk);
     }
   });
-
-  const missingCoords = uniqueCoords.filter((coord) => !chunksByCoord.has(coordKey(coord.chunkX, coord.chunkZ)));
-  if (missingCoords.length > 0) {
-    await readChunkRegionsForMissingCoords(bucket, query, missingCoords, chunksByCoord);
-  }
 
   return chunksByCoord;
 }
