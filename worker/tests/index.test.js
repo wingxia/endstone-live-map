@@ -510,8 +510,13 @@ describe("worker helpers", () => {
     expect(normalizeCleanupPayload({ prefix: "map-tiles/v1/Bedrock_level/Nether/" })).toMatchObject({
       prefix: "map-tiles/v1/Bedrock_level/Nether/",
     });
+    expect(normalizeCleanupPayload({ keys: ["map-tiles/v1/Bedrock_level/Nether/z-1/4/-2.png"] })).toMatchObject({
+      keys: ["map-tiles/v1/Bedrock_level/Nether/z-1/4/-2.png"],
+      prefix: "",
+    });
     expect(() => normalizeCleanupPayload({ prefix: "map-tiles/v1/Bedrock_level/" })).toThrow(/cleanup prefix/);
     expect(() => normalizeCleanupPayload({ prefix: "textures/v1/" })).toThrow(/cleanup prefix/);
+    expect(() => normalizeCleanupPayload({ keys: ["textures/v1/atlas.png"] })).toThrow(/cleanup key/);
   });
 
   it("normalizes chunk region migration payloads", () => {
@@ -2920,6 +2925,36 @@ describe("worker routes", () => {
     expect(env.MAP_DATA.objects.has("map-tiles/v1/Bedrock_level/Nether/z4/0/0.png")).toBe(false);
     expect(env.MAP_DATA.objects.has("map-tiles/v1/Bedrock_level/Overworld/z4/0/0.png")).toBe(true);
     expect(env.MAP_DATA.objects.has("map-tiles/v1/Other/Nether/z4/0/0.png")).toBe(true);
+  });
+
+  it("cleans exact map tile keys without listing broader prefixes", async () => {
+    const env = createEnv();
+    await env.MAP_DATA.put("map-tiles/v1/Bedrock_level/Nether/z4/153/-64.png", new Uint8Array([1]));
+    await env.MAP_DATA.put("map-tiles/v1/Bedrock_level/Nether/z3/76/-32.png", new Uint8Array([1]));
+    await env.MAP_DATA.put("map-tiles/v1/Bedrock_level/Nether/z3/77/-32.png", new Uint8Array([1]));
+
+    const response = await worker.fetch(
+      new Request("https://map.buhe.li/api/plugin/map-data/cleanup", {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          keys: [
+            "map-tiles/v1/Bedrock_level/Nether/z4/153/-64.png",
+            "map-tiles/v1/Bedrock_level/Nether/z3/76/-32.png",
+          ],
+          dryRun: false,
+          confirm: "delete-map-data-v1",
+        }),
+      }),
+      env,
+      {},
+    );
+
+    expect(await response.json()).toMatchObject({ dryRun: false, matched: 2, deleted: 2, truncated: false });
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/Bedrock_level/Nether/z4/153/-64.png")).toBe(false);
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/Bedrock_level/Nether/z3/76/-32.png")).toBe(false);
+    expect(env.MAP_DATA.objects.has("map-tiles/v1/Bedrock_level/Nether/z3/77/-32.png")).toBe(true);
+    expect(env.MAP_DATA.listCalls).toEqual([]);
   });
 
   it("rejects cleanup attempts for texture artifacts with a clear error", async () => {
