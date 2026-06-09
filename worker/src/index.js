@@ -38,6 +38,7 @@ const MAP_TILE_DRAIN_MAX_LIMIT = 100;
 const MAP_TILE_CRON_DRAIN_LIMIT = 50;
 const MAP_TILE_BACKFILL_WRITE_CONCURRENCY = 1;
 const MAP_TILE_BACKFILL_READ_CONCURRENCY = 4;
+const CHUNK_CATALOG_DIRECT_READ_CONCURRENCY = 2;
 const MAP_TILE_BACKFILL_WRITE_LIMIT = 1;
 const MAP_TILE_BACKFILL_BASE_WRITE_LIMIT = 4;
 const MAP_TILE_BACKFILL_DEFAULT_LIMIT = 25;
@@ -506,7 +507,7 @@ async function handleChunkMaterialize(request, env) {
       }
       await bucket.put(ref.key, JSON.stringify(snapshot), {
         httpMetadata: { contentType: "application/json; charset=utf-8" },
-        customMetadata: { world: snapshot.world, dimension: snapshot.dimension },
+        customMetadata: chunkSnapshotMetadata(snapshot),
       });
       found.add(coordKey(ref.chunkX, ref.chunkZ));
       results[ref.index] = { ...withoutIndex(ref), materialized: true, source: "region", updatedAt: snapshot.updatedAt };
@@ -544,18 +545,32 @@ async function handleChunkCatalog(request, env) {
 async function chunkCatalogDirectPage(bucket, options) {
   const prefix = `chunks/v1/${cleanSegment(options.world)}/${cleanSegment(options.dimension)}/`;
   const limit = Math.min(options.limit, CHUNK_CATALOG_DIRECT_READ_MAX_LIMIT);
-  const page = await bucket.list({ prefix, cursor: options.cursor || undefined, limit });
+  const page = await bucket.list({ prefix, cursor: options.cursor || undefined, limit, include: ["customMetadata"] });
   const objects = page.objects || [];
   const chunks = [];
   let invalidChunks = 0;
   let skippedEmpty = 0;
+  let metadataHits = 0;
+  let bodyReads = 0;
 
-  await mapWithConcurrency(objects, MAP_TILE_BACKFILL_READ_CONCURRENCY, async (object) => {
+  await mapWithConcurrency(objects, CHUNK_CATALOG_DIRECT_READ_CONCURRENCY, async (object) => {
     const parsed = parseChunkKey(object.key);
     if (!parsed) {
       invalidChunks += 1;
       return;
     }
+    const metadataEntry = chunkCatalogEntryFromObjectMetadata(object, parsed);
+    if (metadataEntry) {
+      metadataHits += 1;
+      if (!metadataEntry.hasNonAir) {
+        skippedEmpty += 1;
+        return;
+      }
+      chunks.push(metadataEntry);
+      return;
+    }
+
+    bodyReads += 1;
     const snapshot = normalizeOptionalChunkSnapshot(await readR2Json(await bucket.get(object.key)));
     if (!snapshot) {
       invalidChunks += 1;
@@ -579,6 +594,8 @@ async function chunkCatalogDirectPage(bucket, options) {
     scanned: objects.length,
     skippedEmpty,
     invalidChunks,
+    metadataHits,
+    bodyReads,
     chunks,
     cursor: page.truncated ? page.cursor || "" : "",
     chunkCursor: null,
@@ -676,8 +693,32 @@ function chunkCatalogEntry(snapshot, metadata) {
     chunkX: snapshot.chunkX,
     chunkZ: snapshot.chunkZ,
     updatedAt: snapshot.updatedAt,
+    hasNonAir: !isEmptyChunkSnapshot(snapshot),
     source: metadata.source,
     key: metadata.key,
+  };
+}
+
+function chunkCatalogEntryFromObjectMetadata(object, parsed) {
+  const metadata = object?.customMetadata || {};
+  if (!metadata || metadata.chunkX === undefined || metadata.chunkZ === undefined || metadata.hasNonAir === undefined) {
+    return null;
+  }
+  const chunkX = Number(metadata.chunkX);
+  const chunkZ = Number(metadata.chunkZ);
+  if (!Number.isFinite(chunkX) || !Number.isFinite(chunkZ) || chunkX !== parsed.chunkX || chunkZ !== parsed.chunkZ) {
+    return null;
+  }
+  const updatedAt = Number(metadata.updatedAt || 0);
+  return {
+    world: cleanSegment(metadata.world || parsed.world),
+    dimension: cleanSegment(metadata.dimension || parsed.dimension),
+    chunkX,
+    chunkZ,
+    updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : undefined,
+    hasNonAir: metadata.hasNonAir === "true",
+    source: "direct",
+    key: object.key,
   };
 }
 
@@ -783,7 +824,7 @@ async function applyBlockUpdateBatchToStorage(bucket, payload) {
   chunk.updatedAt = payload.updatedAt;
   await bucket.put(key, JSON.stringify(chunk), {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
-    customMetadata: { world: chunk.world, dimension: chunk.dimension },
+    customMetadata: chunkSnapshotMetadata(chunk),
   });
   return { batch: payload, key, missingBase: false, applied, chunk };
 }
@@ -816,7 +857,7 @@ async function putChunkSnapshot(bucket, snapshot, options) {
 
   await bucket.put(key, JSON.stringify(snapshot), {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
-    customMetadata: { world: snapshot.world, dimension: snapshot.dimension },
+    customMetadata: chunkSnapshotMetadata(snapshot),
   });
 
   if (options.broadcast) {
@@ -824,6 +865,17 @@ async function putChunkSnapshot(bucket, snapshot, options) {
   }
 
   return { key, updates: updates.length, blockUpdates: updates };
+}
+
+function chunkSnapshotMetadata(snapshot) {
+  return {
+    world: snapshot.world,
+    dimension: snapshot.dimension,
+    chunkX: String(snapshot.chunkX),
+    chunkZ: String(snapshot.chunkZ),
+    updatedAt: String(snapshot.updatedAt || 0),
+    hasNonAir: String(!isEmptyChunkSnapshot(snapshot)),
+  };
 }
 
 async function broadcastChunkSnapshot(env, snapshot, updates = []) {
@@ -2265,7 +2317,7 @@ async function migrateChunkRegionObject(bucket, key, options) {
     if (!options.dryRun) {
       await bucket.put(directKey, JSON.stringify(normalized), {
         httpMetadata: { contentType: "application/json; charset=utf-8" },
-        customMetadata: { world: normalized.world, dimension: normalized.dimension },
+        customMetadata: chunkSnapshotMetadata(normalized),
       });
     }
     migrated += 1;
@@ -2590,7 +2642,7 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
       return;
     }
     if (sourcePng.width !== MAP_TILE_SIZE || sourcePng.height !== MAP_TILE_SIZE) {
-      invalidSourceTiles.push({ key: sourceKey, error: `expected_${MAP_TILE_SIZE}x${MAP_TILE_SIZE}` });
+      missingSourceTiles.push(sourceKey);
       return;
     }
     sourceTileCount += 1;
@@ -2603,7 +2655,7 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
   });
 
   const nextTileVersion = Math.max(sourceVersion, options.rebuildVersion || 0);
-  if (invalidSourceTiles.length > 0) {
+  if (invalidSourceTiles.length > 0 && !hasPixels) {
     await bucket.delete(key);
     return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length, invalidSourceTiles };
   }
