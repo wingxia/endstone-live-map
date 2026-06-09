@@ -52,6 +52,7 @@ const CHUNK_CATALOG_DEFAULT_LIMIT = 25;
 const CHUNK_CATALOG_MAX_LIMIT = 100;
 const CHUNK_CATALOG_DIRECT_READ_MAX_LIMIT = 16;
 const CHUNK_DIRECT_READ_LIMIT = REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS;
+const DERIVED_TILE_DIRECT_FALLBACK_MAX_CHUNKS = 64;
 const MIN_COLUMN_HEIGHT = -64;
 const SEA_LEVEL = 63;
 const WORLD_META_SAMPLE_LIMIT = 128;
@@ -2624,7 +2625,7 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
   const sourceTileSize = MAP_TILE_SIZE / sourceFactor;
   const minSourceTileX = tile.tileX * sourceFactor;
   const minSourceTileZ = tile.tileZ * sourceFactor;
-  const png = new PNG({ width: MAP_TILE_SIZE, height: MAP_TILE_SIZE, colorType: 6 });
+  let png = new PNG({ width: MAP_TILE_SIZE, height: MAP_TILE_SIZE, colorType: 6 });
   png.data.fill(0);
 
   let hasPixels = false;
@@ -2632,6 +2633,7 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
   let sourceTileCount = 0;
   const missingSourceTiles = [];
   const invalidSourceTiles = [];
+  let directFallback = null;
 
   await mapWithConcurrency(sourceTiles, options.readConcurrency || MAP_TILE_BACKFILL_READ_CONCURRENCY, async (sourceTile) => {
     const sourceKey = mapTileKey(sourceTile.world, sourceTile.dimension, sourceTile.zoom, sourceTile.tileX, sourceTile.tileZ);
@@ -2660,10 +2662,21 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
     }
   });
 
+  if (!hasPixels) {
+    const fallback = await renderDerivedMapTileFromChunks(bucket, tile, options);
+    const { png: fallbackPng, ...fallbackMeta } = fallback;
+    directFallback = fallbackMeta;
+    if (fallback.hasPixels) {
+      png = fallbackPng;
+      hasPixels = true;
+      sourceVersion = Math.max(sourceVersion, directFallback.sourceVersion);
+    }
+  }
+
   const nextTileVersion = Math.max(sourceVersion, options.rebuildVersion || 0);
   if (invalidSourceTiles.length > 0 && !hasPixels) {
     await bucket.delete(key);
-    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length, invalidSourceTiles };
+    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length, invalidSourceTiles, directFallback };
   }
   if (!options.force && sourceVersion > 0) {
     const existingSourceVersion = await mapTileObjectSourceVersion(bucket, key);
@@ -2673,7 +2686,7 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
   }
   if (!hasPixels) {
     await bucket.delete(key);
-    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length };
+    return { ...tile, key, deleted: true, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length, directFallback };
   }
   fillTransparentMapTileHoles(png, transparentFillPixelLimit(2 ** tile.zoom));
   const buffer = PNG.sync.write(png, MAP_TILE_PNG_WRITE_OPTIONS);
@@ -2691,7 +2704,28 @@ async function rebuildDerivedMapTile(bucket, tile, options = {}) {
       missingSourceTiles: String(missingSourceTiles.length),
     },
   });
-  return { ...tile, key, deleted: false, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length };
+  return { ...tile, key, deleted: false, tileVersion: nextTileVersion, sourceVersion, sourceTiles: sourceTileCount, missingSourceTiles: missingSourceTiles.length, directFallback };
+}
+
+async function renderDerivedMapTileFromChunks(bucket, tile, options = {}) {
+  const range = chunkRangeForMapTile(tile);
+  const chunkCount = chunkCountForRange(range);
+  if (chunkCount > DERIVED_TILE_DIRECT_FALLBACK_MAX_CHUNKS) {
+    return { attempted: false, reason: "chunk_range_too_large", chunkCount, hasPixels: false, sourceVersion: 0 };
+  }
+  const chunksByCoord = await readChunksForRange(bucket, { world: tile.world, dimension: tile.dimension, ...range }, { readConcurrency: options.readConcurrency });
+  const textureColors = options.textureColors || (await loadTextureColorIndex(bucket));
+  const result = renderMapTilePng(tile, chunksByCoord, textureColors);
+  return {
+    attempted: true,
+    chunkCount,
+    chunks: chunksByCoord.size,
+    hasPixels: result.hasPixels,
+    sourceVersion: result.tileVersion,
+    missingColors: result.missingColors,
+    missingColorReason: result.missingColorReason,
+    png: result.png,
+  };
 }
 
 function renderMapTilePng(tile, chunksByCoord, textureColors) {
