@@ -1141,10 +1141,9 @@ describe("worker routes", () => {
       version: 1,
       world: "Bedrock_level",
       dimension: "Nether",
-      chunks: [
-        createChunk({ world: "Bedrock_level", dimension: "Nether", chunkX: -14, chunkZ: -4 }),
-        createChunk({ world: "Bedrock_level", dimension: "Nether", chunkX: -1, chunkZ: -1 }),
-      ],
+      chunks: Array.from({ length: 65 }, (_, index) =>
+        createChunk({ world: "Bedrock_level", dimension: "Nether", chunkX: -16 + (index % 16), chunkZ: -5 + Math.floor(index / 16) }),
+      ),
     }), {
       httpMetadata: { contentType: "application/json" },
     });
@@ -1159,7 +1158,7 @@ describe("worker routes", () => {
           deleted: false,
           sourceTiles: 0,
           missingSourceTiles: 4,
-          directFallback: expect.objectContaining({ attempted: true, sparse: true, chunkCount: 1024, sourceChunkCount: 2, hasPixels: true, chunks: 2 }),
+          directFallback: expect.objectContaining({ attempted: true, sparse: true, chunkCount: 1024, sourceChunkCount: 65, hasPixels: true, chunks: 65 }),
         }),
       ],
     });
