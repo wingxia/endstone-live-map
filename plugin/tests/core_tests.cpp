@@ -156,6 +156,8 @@ void testMapBlockClassification()
     assert(livemap::isMapDecorationBlock("minecraft:iron_bars"));
     assert(livemap::isMapDecorationBlock("minecraft:cake"));
     assert(livemap::isMapDecorationBlock("minecraft:end_rod"));
+    assert(livemap::isMapDecorationBlock("minecraft:unpowered_repeater"));
+    assert(livemap::isMapDecorationBlock("minecraft:powered_comparator"));
     assert(livemap::isMapDecorationBlock("minecraft:lantern"));
     assert(livemap::isMapDecorationBlock("minecraft:soul_lantern"));
     assert(!livemap::isMapDecorationBlock("minecraft:sea_lantern"));

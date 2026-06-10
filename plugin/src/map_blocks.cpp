@@ -89,7 +89,7 @@ constexpr std::array<std::string_view, 45> kPlantTokens = {
     "wither_rose",
 };
 
-constexpr std::array<std::string_view, 43> kCutoutSurfaceTokens = {
+constexpr std::array<std::string_view, 45> kCutoutSurfaceTokens = {
     "amethyst_cluster",
     "banner",
     "bell",
@@ -101,6 +101,7 @@ constexpr std::array<std::string_view, 43> kCutoutSurfaceTokens = {
     "carpet",
     "chain",
     "cobweb",
+    "comparator",
     "conduit",
     "copper_grate",
     "coral",
@@ -120,6 +121,7 @@ constexpr std::array<std::string_view, 43> kCutoutSurfaceTokens = {
     "pane",
     "pressure_plate",
     "rail",
+    "repeater",
     "redstone_torch",
     "redstone_wire",
     "scaffolding",

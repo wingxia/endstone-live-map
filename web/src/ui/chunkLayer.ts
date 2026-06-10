@@ -37,6 +37,26 @@ interface AtlasResource {
   image: HTMLImageElement | null;
 }
 
+interface BlockDrawContext {
+  worldX: number;
+  worldZ: number;
+  height: number;
+  chunksByCoord: Map<string, ChunkSnapshot>;
+}
+
+interface ColumnLayer {
+  blockId: string;
+  state: BlockStateMap;
+  height: number;
+  layer: "base" | "overlay";
+}
+
+type CardinalDirection = "north" | "east" | "south" | "west";
+
+type CardinalConnections = Record<CardinalDirection, boolean>;
+
+const CARDINAL_DIRECTIONS: CardinalDirection[] = ["north", "east", "south", "west"];
+
 interface TileDrawContext {
   world: string;
   dimension: string;
@@ -607,12 +627,17 @@ function drawChunk(ctx: CanvasRenderingContext2D, chunk: ChunkSnapshot, range: T
       const blockState = blockStateAt(chunk, index);
       const x = (worldX - range.minBlockX) * range.scale;
       const y = (worldZ - range.minBlockZ) * range.scale;
-      drawBlock(ctx, atlas, blockId, blockState, x, y, range.scale, "base");
+      const baseHeight = chunk.heights[index] ?? MIN_COLUMN_HEIGHT;
+      const baseContext = { worldX, worldZ, height: baseHeight, chunksByCoord };
+      drawBlock(ctx, atlas, blockId, blockState, x, y, range.scale, "base", baseContext);
       const overlayBlockId = overlayBlockAt(chunk, index);
       if (overlayBlockId && overlayBlockId !== "minecraft:air") {
-        drawBlock(ctx, atlas, overlayBlockId, overlayStateAt(chunk, index), x, y, range.scale, "overlay");
+        drawBlock(ctx, atlas, overlayBlockId, overlayStateAt(chunk, index), x, y, range.scale, "overlay", {
+          ...baseContext,
+          height: chunk.overlayHeights?.[index] ?? baseHeight,
+        });
       }
-      applyColumnShade(ctx, chunk.heights[index] ?? MIN_COLUMN_HEIGHT, worldX, worldZ, chunksByCoord, x, y, range.scale);
+      applyColumnShade(ctx, baseHeight, worldX, worldZ, chunksByCoord, x, y, range.scale);
     }
   }
 }
@@ -781,8 +806,9 @@ function drawBlock(
   y: number,
   size: number,
   layer: "base" | "overlay" = "base",
+  context?: BlockDrawContext,
 ) {
-  if (drawStatefulPartialBlock(ctx, atlas, blockId, state, x, y, size, layer)) {
+  if (drawStatefulPartialBlock(ctx, atlas, blockId, state, x, y, size, layer, context)) {
     return;
   }
   if (isPlantBlock(blockId)) {
@@ -824,8 +850,25 @@ function drawStatefulPartialBlock(
   y: number,
   size: number,
   layer: "base" | "overlay",
+  context?: BlockDrawContext,
 ) {
   const id = blockId.toLowerCase();
+  if (isRedstoneWireBlock(id)) {
+    drawRedstoneWireBlock(ctx, state, x, y, size, context);
+    return true;
+  }
+  if (isRailBlock(id)) {
+    drawRailBlock(ctx, blockId, state, x, y, size);
+    return true;
+  }
+  if (isTripwireBlock(id)) {
+    drawTripwireBlock(ctx, blockId, state, x, y, size, context);
+    return true;
+  }
+  if (isDirectionalCircuitBlock(id)) {
+    drawDirectionalCircuitBlock(ctx, blockId, state, x, y, size, layer);
+    return true;
+  }
   if (id === "minecraft:cake" || id.endsWith(":cake") || id === "cake") {
     drawCakeBlock(ctx, blockId, state, x, y, size, layer);
     return true;
@@ -847,6 +890,105 @@ function drawStatefulPartialBlock(
     return true;
   }
   return false;
+}
+
+function drawRedstoneWireBlock(ctx: CanvasRenderingContext2D, state: BlockStateMap, x: number, y: number, size: number, context?: BlockDrawContext) {
+  const connections = wireConnections(state, context, isRedstoneConnectable);
+  drawWireGlyph(ctx, x, y, size, redstoneWireColor(state), connections, Math.max(2, Math.floor(size * 0.24)));
+}
+
+function drawTripwireBlock(
+  ctx: CanvasRenderingContext2D,
+  blockId: string,
+  state: BlockStateMap,
+  x: number,
+  y: number,
+  size: number,
+  context?: BlockDrawContext,
+) {
+  const connections = wireConnections(state, context, isTripwireConnectable);
+  const color = stateBool(state, "powered_bit", stateBool(state, "powered", false)) ? "#9b8370" : fallbackTextureColor(blockId, state);
+  drawWireGlyph(ctx, x, y, size, color, connections, Math.max(1, Math.floor(size * 0.12)));
+}
+
+function drawRailBlock(ctx: CanvasRenderingContext2D, blockId: string, state: BlockStateMap, x: number, y: number, size: number) {
+  const connections = railConnections(state);
+  const sleeper = Math.max(1, Math.floor(size * 0.12));
+  ctx.fillStyle = "#8a6542";
+  if ((connections.east || connections.west) && !(connections.north || connections.south)) {
+    ctx.fillRect(x + Math.floor(size * 0.2), y + Math.floor(size * 0.28), sleeper, Math.max(1, Math.floor(size * 0.44)));
+    ctx.fillRect(x + Math.floor(size * 0.68), y + Math.floor(size * 0.28), sleeper, Math.max(1, Math.floor(size * 0.44)));
+  } else if ((connections.north || connections.south) && !(connections.east || connections.west)) {
+    ctx.fillRect(x + Math.floor(size * 0.28), y + Math.floor(size * 0.2), Math.max(1, Math.floor(size * 0.44)), sleeper);
+    ctx.fillRect(x + Math.floor(size * 0.28), y + Math.floor(size * 0.68), Math.max(1, Math.floor(size * 0.44)), sleeper);
+  }
+  drawWireGlyph(ctx, x, y, size, railColor(blockId, state), connections, Math.max(2, Math.floor(size * 0.16)));
+}
+
+function drawDirectionalCircuitBlock(
+  ctx: CanvasRenderingContext2D,
+  blockId: string,
+  state: BlockStateMap,
+  x: number,
+  y: number,
+  size: number,
+  layer: "base" | "overlay",
+) {
+  if (layer === "base") {
+    ctx.fillStyle = fallbackTextureColor(blockId, state);
+    ctx.fillRect(x, y, size, size);
+  }
+  const inset = Math.max(1, Math.floor(size * 0.14));
+  const bodyX = x + inset;
+  const bodyY = y + inset;
+  const bodySize = Math.max(1, size - inset * 2);
+  const facing = blockFacingEdgeForState(state, blockId);
+  const axis = facing === "east" || facing === "west" ? "east_west" : "north_south";
+  ctx.fillStyle = "#67615a";
+  ctx.fillRect(bodyX, bodyY, bodySize, bodySize);
+  drawWireGlyph(ctx, x, y, size, redstoneWireColor(state), axisConnections(axis), Math.max(1, Math.floor(size * 0.14)));
+  const pin = Math.max(1, Math.floor(size * 0.16));
+  ctx.fillStyle = "#be382d";
+  if (axis === "east_west") {
+    ctx.fillRect(x + Math.floor(size * 0.3), y + Math.floor((size - pin) / 2), pin, pin);
+    ctx.fillRect(x + Math.floor(size * 0.62), y + Math.floor((size - pin) / 2), pin, pin);
+  } else {
+    ctx.fillRect(x + Math.floor((size - pin) / 2), y + Math.floor(size * 0.3), pin, pin);
+    ctx.fillRect(x + Math.floor((size - pin) / 2), y + Math.floor(size * 0.62), pin, pin);
+  }
+}
+
+function drawWireGlyph(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  color: string,
+  connections: CardinalConnections,
+  thickness: number,
+) {
+  const center = Math.floor(size / 2);
+  const half = Math.floor(thickness / 2);
+  const centerX = x + center;
+  const centerY = y + center;
+  const lineX = centerX - half;
+  const lineY = centerY - half;
+  const width = Math.max(1, thickness);
+
+  ctx.fillStyle = color;
+  ctx.fillRect(lineX, lineY, width, width);
+  if (connections.west) {
+    ctx.fillRect(x, lineY, Math.max(1, centerX - x), width);
+  }
+  if (connections.east) {
+    ctx.fillRect(centerX, lineY, Math.max(1, x + size - centerX), width);
+  }
+  if (connections.north) {
+    ctx.fillRect(lineX, y, width, Math.max(1, centerY - y));
+  }
+  if (connections.south) {
+    ctx.fillRect(lineX, centerY, width, Math.max(1, y + size - centerY));
+  }
 }
 
 function drawCakeBlock(ctx: CanvasRenderingContext2D, blockId: string, state: BlockStateMap, x: number, y: number, size: number, layer: "base" | "overlay") {
@@ -1151,6 +1293,244 @@ function isSmallDecorationBlock(id: string) {
     id.includes("lantern") ||
     id.includes("skull")
   );
+}
+
+function isRedstoneWireBlock(id: string) {
+  return normalizeBlockId(id).endsWith(":redstone_wire");
+}
+
+function isRailBlock(id: string) {
+  const normalized = normalizeBlockId(id);
+  return normalized.endsWith(":rail") || normalized.includes("_rail");
+}
+
+function isTripwireBlock(id: string) {
+  return normalizeBlockId(id).endsWith(":tripwire");
+}
+
+function isDirectionalCircuitBlock(id: string) {
+  const normalized = normalizeBlockId(id);
+  return normalized.includes("repeater") || normalized.includes("comparator");
+}
+
+function wireConnections(
+  state: BlockStateMap,
+  context: BlockDrawContext | undefined,
+  isConnectable: (layer: ColumnLayer, sideFromCurrent: CardinalDirection, currentHeight: number) => boolean,
+): CardinalConnections {
+  const explicit = explicitWireConnections(state);
+  if (explicit) {
+    return explicit;
+  }
+  if (!context) {
+    return emptyConnections();
+  }
+
+  const connections = emptyConnections();
+  for (const direction of CARDINAL_DIRECTIONS) {
+    const offset = directionOffset(direction);
+    const layers = columnLayersAt(context.chunksByCoord, context.worldX + offset.x, context.worldZ + offset.z);
+    connections[direction] = layers.some((layer) => isConnectable(layer, direction, context.height));
+  }
+  return connections;
+}
+
+function explicitWireConnections(state: BlockStateMap) {
+  let hasExplicitConnection = false;
+  const connections = emptyConnections();
+  for (const direction of CARDINAL_DIRECTIONS) {
+    const value = explicitConnectionValue(state, direction);
+    if (value !== null) {
+      hasExplicitConnection = true;
+      connections[direction] = value;
+    }
+  }
+  return hasExplicitConnection ? connections : null;
+}
+
+function explicitConnectionValue(state: BlockStateMap, direction: CardinalDirection): boolean | null {
+  const keys = [`redstone_wire_connection_${direction}`, `${direction}_connection`, `connection_${direction}`, direction];
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(state, key)) {
+      continue;
+    }
+    const value = state[key];
+    if (typeof value === "boolean") {
+      return value;
+    }
+    if (typeof value === "number") {
+      return value !== 0;
+    }
+    const text = String(value).toLowerCase();
+    if (text === "none" || text === "false" || text === "0" || text === "disconnected") {
+      return false;
+    }
+    if (text === "side" || text === "up" || text === "true" || text === "1" || text === "connected") {
+      return true;
+    }
+  }
+  return null;
+}
+
+function isRedstoneConnectable(layer: ColumnLayer, sideFromCurrent: CardinalDirection, currentHeight: number) {
+  if (Math.abs(layer.height - currentHeight) > 1) {
+    return false;
+  }
+  const id = normalizeBlockId(layer.blockId);
+  if (isRedstoneWireBlock(id)) {
+    return true;
+  }
+  if (id.includes("repeater") || id.includes("comparator")) {
+    const facing = blockFacingEdgeForState(layer.state, layer.blockId);
+    return facing === sideFromCurrent || facing === oppositeDirection(sideFromCurrent);
+  }
+  return id.includes("redstone_torch") || id.includes("redstone_block") || id.includes("lever") || id.includes("button") || id.includes("pressure_plate");
+}
+
+function isTripwireConnectable(layer: ColumnLayer, sideFromCurrent: CardinalDirection, currentHeight: number) {
+  void sideFromCurrent;
+  return Math.abs(layer.height - currentHeight) <= 1 && (normalizeBlockId(layer.blockId).includes("tripwire") || normalizeBlockId(layer.blockId).includes("trip_wire"));
+}
+
+function columnLayersAt(chunksByCoord: Map<string, ChunkSnapshot>, worldX: number, worldZ: number): ColumnLayer[] {
+  const chunkX = floorDiv(worldX, BLOCKS_PER_CHUNK);
+  const chunkZ = floorDiv(worldZ, BLOCKS_PER_CHUNK);
+  const chunk = chunksByCoord.get(coordKey(chunkX, chunkZ));
+  if (!chunk) {
+    return [];
+  }
+  const localX = mod(worldX, BLOCKS_PER_CHUNK);
+  const localZ = mod(worldZ, BLOCKS_PER_CHUNK);
+  const index = blockColumnIndex(localX, localZ);
+  const layers: ColumnLayer[] = [];
+  const baseBlockId = chunk.palette[chunk.blocks[index]] || "minecraft:air";
+  if (baseBlockId !== "minecraft:air") {
+    layers.push({
+      blockId: baseBlockId,
+      state: blockStateAt(chunk, index),
+      height: chunk.heights[index] ?? MIN_COLUMN_HEIGHT,
+      layer: "base",
+    });
+  }
+  const overlayBlockId = overlayBlockAt(chunk, index);
+  if (overlayBlockId && overlayBlockId !== "minecraft:air") {
+    layers.push({
+      blockId: overlayBlockId,
+      state: overlayStateAt(chunk, index),
+      height: chunk.overlayHeights?.[index] ?? chunk.heights[index] ?? MIN_COLUMN_HEIGHT,
+      layer: "overlay",
+    });
+  }
+  return layers;
+}
+
+function railConnections(state: BlockStateMap): CardinalConnections {
+  const raw = stateValue(state, "rail_direction", stateValue(state, "shape", stateValue(state, "direction", 0)));
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric)) {
+    switch (numeric) {
+      case 1:
+      case 2:
+      case 3:
+        return axisConnections("east_west");
+      case 4:
+      case 5:
+        return axisConnections("north_south");
+      case 6:
+        return cornerConnections("south", "east");
+      case 7:
+        return cornerConnections("south", "west");
+      case 8:
+        return cornerConnections("north", "west");
+      case 9:
+        return cornerConnections("north", "east");
+      default:
+        return axisConnections("north_south");
+    }
+  }
+
+  const text = String(raw).toLowerCase();
+  if (text.includes("east_west") || text.includes("ascending_east") || text.includes("ascending_west")) {
+    return axisConnections("east_west");
+  }
+  if (text.includes("north_south") || text.includes("ascending_north") || text.includes("ascending_south")) {
+    return axisConnections("north_south");
+  }
+  if (text.includes("north") && text.includes("east")) {
+    return cornerConnections("north", "east");
+  }
+  if (text.includes("north") && text.includes("west")) {
+    return cornerConnections("north", "west");
+  }
+  if (text.includes("south") && text.includes("east")) {
+    return cornerConnections("south", "east");
+  }
+  if (text.includes("south") && text.includes("west")) {
+    return cornerConnections("south", "west");
+  }
+  return axisConnections("north_south");
+}
+
+function railColor(blockId: string, state: BlockStateMap) {
+  const powered = stateBool(state, "powered_bit", stateBool(state, "powered", stateBool(state, "rail_data_bit", false)));
+  if (powered || normalizeBlockId(blockId).includes("powered_rail") || normalizeBlockId(blockId).includes("activator_rail")) {
+    return "#c65b36";
+  }
+  return "#b9b6aa";
+}
+
+function redstoneWireColor(state: BlockStateMap) {
+  const power = clamp(stateNumber(state, "redstone_signal", stateNumber(state, "power", 0)), 0, 15);
+  const ratio = power / 15;
+  const red = Math.round(108 + ratio * 147);
+  const green = Math.round(20 + ratio * 30);
+  const blue = Math.round(18 + ratio * 18);
+  return `rgb(${red}, ${green}, ${blue})`;
+}
+
+function emptyConnections(): CardinalConnections {
+  return { north: false, east: false, south: false, west: false };
+}
+
+function axisConnections(axis: "north_south" | "east_west"): CardinalConnections {
+  return axis === "east_west"
+    ? { north: false, east: true, south: false, west: true }
+    : { north: true, east: false, south: true, west: false };
+}
+
+function cornerConnections(first: CardinalDirection, second: CardinalDirection): CardinalConnections {
+  return { ...emptyConnections(), [first]: true, [second]: true };
+}
+
+function directionOffset(direction: CardinalDirection) {
+  if (direction === "north") {
+    return { x: 0, z: -1 };
+  }
+  if (direction === "south") {
+    return { x: 0, z: 1 };
+  }
+  if (direction === "east") {
+    return { x: 1, z: 0 };
+  }
+  return { x: -1, z: 0 };
+}
+
+function oppositeDirection(direction: CardinalDirection): CardinalDirection {
+  if (direction === "north") {
+    return "south";
+  }
+  if (direction === "south") {
+    return "north";
+  }
+  if (direction === "east") {
+    return "west";
+  }
+  return "east";
+}
+
+function normalizeBlockId(value: string) {
+  const id = String(value || "minecraft:air").toLowerCase();
+  return id.includes(":") ? id : `minecraft:${id}`;
 }
 
 function stateValue(state: BlockStateMap, key: string, fallback: unknown) {
