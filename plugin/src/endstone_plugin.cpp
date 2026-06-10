@@ -2,6 +2,7 @@
 #include "livemap/chunk.hpp"
 #include "livemap/land.hpp"
 #include "livemap/map_blocks.hpp"
+#include "livemap/map_tile.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
 #include "livemap/tile_math.hpp"
@@ -293,8 +294,10 @@ private:
 
 class UploadDispatcher {
 public:
-    UploadDispatcher(livemap::LiveMapSettings settings, std::size_t max_queue_size)
+    UploadDispatcher(livemap::LiveMapSettings settings, std::size_t max_queue_size,
+                     std::filesystem::path tile_snapshot_cache_path)
         : settings_(std::move(settings)), max_queue_size_(std::max<std::size_t>(1, max_queue_size)),
+          tile_snapshot_cache_path_(std::move(tile_snapshot_cache_path)),
           worker_([this] { workerLoop(); })
     {
     }
@@ -375,7 +378,33 @@ private:
             }
 
             const auto started_at_ms = nowMs();
-            auto transport = livemap::postPluginJson(settings_, job.path, job.json);
+            auto json = job.json;
+            livemap::TransportResult transport;
+            if (job.kind == UploadJob::Kind::ChunkBatch && settings_.map_tile_render_enabled) {
+                std::string error;
+                const auto tiles = livemap::renderMapTilesForSnapshots(tile_snapshot_cache_path_, job.snapshots, &error);
+                if (tiles.empty()) {
+                    transport.ok = false;
+                    transport.error = error.empty() ? "rendered tile set was empty" : error;
+                }
+                else {
+                    json = livemap::serializeRenderedChunkBatch(job.snapshots, tiles, true,
+                                                                livemap::ChunkBatchStorage::Region);
+                    if (settings_.max_tile_bundle_bytes > 0 &&
+                        json.size() > static_cast<std::size_t>(settings_.max_tile_bundle_bytes)) {
+                        transport.ok = false;
+                        transport.response_code = 413;
+                        transport.error = "rendered tile bundle too large";
+                        transport.body = "{\"error\":\"rendered_tile_bundle_too_large\"}";
+                    }
+                    else {
+                        transport = livemap::postPluginJson(settings_, job.path, json);
+                    }
+                }
+            }
+            else {
+                transport = livemap::postPluginJson(settings_, job.path, json);
+            }
             const auto finished_at_ms = nowMs();
             {
                 std::scoped_lock lock(mutex_);
@@ -403,6 +432,7 @@ private:
 
     livemap::LiveMapSettings settings_;
     std::size_t max_queue_size_{};
+    std::filesystem::path tile_snapshot_cache_path_;
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     livemap::PrioritizedUploadQueue<UploadJob> jobs_;
@@ -557,6 +587,7 @@ public:
         settings_ = livemap::loadSettings(config_path);
         background_log_path_ = resolveDataPath(settings_.background_log_file);
         baseline_index_path_ = resolveDataPath(settings_.baseline_index_file);
+        tile_snapshot_cache_path_ = resolveDataPath(settings_.tile_snapshot_cache_dir);
         std::string background_log_error;
         if (!background_log_.open(background_log_path_, &background_log_error)) {
             getLogger().error("Failed to open live map background log {}: {}", background_log_path_.string(),
@@ -567,7 +598,8 @@ public:
         }
         loadChunkBaselines();
         upload_dispatcher_ =
-            std::make_unique<UploadDispatcher>(settings_, static_cast<std::size_t>(settings_.max_upload_queue_size));
+            std::make_unique<UploadDispatcher>(settings_, static_cast<std::size_t>(settings_.max_upload_queue_size),
+                                               tile_snapshot_cache_path_);
         player_dispatcher_ = std::make_unique<LatestUploadDispatcher>(settings_, "/api/plugin/live");
         active_ = true;
         listener_ = std::make_unique<LiveMapListener>(*this);
@@ -603,6 +635,12 @@ public:
             "s playerSeedJoinDelay=", settings_.player_seed_join_delay_seconds, "s chunkUploadBatch=",
             settings_.chunk_upload_batch_size, " chunkUploadFlush=", settings_.chunk_upload_flush_seconds,
             "s chunkUploadCooldown=", settings_.chunk_upload_cooldown_seconds,
+            "s mapTileRender=", settings_.map_tile_render_enabled,
+            " mapTileRenderThreads=", settings_.map_tile_render_threads,
+            " mapTileRenderFlush=", settings_.map_tile_render_flush_seconds,
+            "s mapTileUploadBatch=", settings_.map_tile_upload_batch_size,
+            " maxTileBundleBytes=", settings_.max_tile_bundle_bytes,
+            " tileSnapshotCache=", tile_snapshot_cache_path_.string(),
             "s httpTimeout=", settings_.http_timeout_seconds, "s dirtyBlockPush=", settings_.dirty_block_push_seconds,
             "s maxDirtyBlocks=",
             settings_.max_dirty_blocks_per_push, " maxDirtyChunks=", settings_.max_dirty_chunks_per_push,
@@ -1262,7 +1300,7 @@ private:
 
         if (pending_chunk_uploads_.empty()) {
             pending_chunk_cooldown_until_ms_ =
-                current_ms + static_cast<std::int64_t>(std::max(1, settings_.chunk_upload_cooldown_seconds)) * 1000;
+                current_ms + static_cast<std::int64_t>(std::max(1, settings_.map_tile_render_flush_seconds)) * 1000;
         }
         pending_chunk_uploads_.emplace(coord, PendingChunkUpload{std::move(snapshot), meta, current_ms});
         return true;
@@ -1301,7 +1339,7 @@ private:
                 if (pending_chunk_uploads_.empty()) {
                     pending_chunk_cooldown_until_ms_ =
                         current_ms +
-                        static_cast<std::int64_t>(std::max(1, settings_.chunk_upload_cooldown_seconds)) * 1000;
+                        static_cast<std::int64_t>(std::max(1, settings_.map_tile_render_flush_seconds)) * 1000;
                 }
                 const auto coord = metas[i].coord;
                 pending_chunk_uploads_.emplace(coord,
@@ -1336,7 +1374,8 @@ private:
     {
         bool queued_any = false;
         const auto current_ms = nowMs();
-        const auto max_batch_size = static_cast<std::size_t>(std::max(1, settings_.chunk_upload_batch_size));
+        const auto max_batch_size = static_cast<std::size_t>(
+            std::max(1, std::min(settings_.chunk_upload_batch_size, settings_.map_tile_upload_batch_size)));
         while (true) {
             std::vector<livemap::ChunkSnapshot> snapshots;
             std::vector<ChunkUploadMeta> metas;
@@ -1412,8 +1451,12 @@ private:
                 return queued_any;
             }
 
-            const auto json = livemap::serializeChunkBatch(snapshots, true, livemap::ChunkBatchStorage::Region);
-            if (!enqueueUpload({UploadJob::Kind::ChunkBatch, "/api/plugin/chunks/batch", json, metas, snapshots,
+            const auto path = settings_.map_tile_render_enabled ? "/api/plugin/chunks/rendered-batch"
+                                                                 : "/api/plugin/chunks/batch";
+            const auto json = settings_.map_tile_render_enabled
+                                  ? std::string{}
+                                  : livemap::serializeChunkBatch(snapshots, true, livemap::ChunkBatchStorage::Region);
+            if (!enqueueUpload({UploadJob::Kind::ChunkBatch, path, json, metas, snapshots,
                                 snapshots.size(), {}})) {
                 restorePendingChunkUploads(std::move(snapshots), metas);
                 const auto retry_after_ms = delayChunkBatchRetry();
@@ -1509,15 +1552,18 @@ private:
 
     [[nodiscard]] static bool shouldBackoffChunkBatchRetry(const livemap::TransportResult &transport)
     {
-        return transport.curl_code != 0 || transport.response_code == 0 || transport.response_code >= 500;
+        return transport.curl_code != 0 || transport.response_code == 0 || transport.response_code == 413 ||
+               transport.response_code >= 500;
     }
 
     [[nodiscard]] static bool shouldSplitChunkBatchRetry(const livemap::TransportResult &transport,
                                                          const std::size_t chunk_count)
     {
-        return chunk_count > 1 && (transport.response_code == 500 || transport.response_code == 503) &&
-               (transport.body.find("1101") != std::string::npos ||
-                transport.body.find("1102") != std::string::npos);
+        return chunk_count > 1 &&
+               (transport.response_code == 413 ||
+                ((transport.response_code == 500 || transport.response_code == 503) &&
+                 (transport.body.find("1101") != std::string::npos ||
+                  transport.body.find("1102") != std::string::npos)));
     }
 
     void processPlayerUploadResults()
@@ -1817,50 +1863,13 @@ private:
             background_log_.info("Queued ", queued_overlay_resamples,
                                  " live map chunk resample(s) for decoration-only column changes.");
         }
-        background_log_.info("Uploading live map dirty block updates for ", grouped.size(), " chunk(s) in one batch.");
-        std::vector<livemap::BlockUpdateBatch> batches;
-        std::vector<ChunkUploadMeta> metas;
-        std::vector<livemap::ChunkSnapshot> updated_snapshots;
-        std::vector<livemap::ChunkCoord> resample_after_success_chunks;
-        std::size_t update_count = 0;
-        batches.reserve(grouped.size());
-        metas.reserve(grouped.size());
-        resample_after_success_chunks.reserve(grouped.size());
-        for (const auto &[coord, updates] : grouped) {
-            livemap::BlockUpdateBatch batch;
-            batch.world = coord.world;
-            batch.dimension = coord.dimension;
-            batch.chunk_x = coord.x;
-            batch.chunk_z = coord.z;
-            batch.updates = updates;
-            batch.updated_at_ms = nowMs();
-            bool chunk_resample_after_success = false;
-            const auto meta = prepareDirtyBaselineMeta(coord, updates, batch.updated_at_ms,
-                                                       chunk_resample_after_success, updated_snapshots);
-            if (!meta.has_value()) {
-                enqueueSeedChunk(coord, false);
-                background_log_.warning("Queued base resample for ", chunkName(coord),
-                                        " because dirty update has no local baseline.");
-                continue;
-            }
-            if (chunk_resample_after_success) {
-                resample_after_success_chunks.push_back(coord);
-            }
-            metas.push_back(*meta);
-            update_count += updates.size();
-            batches.push_back(std::move(batch));
+        int queued_resamples = 0;
+        for (const auto &[coord, _updates] : grouped) {
+            queued_resamples += static_cast<int>(enqueueSeedChunk(coord, true));
         }
-        if (batches.empty()) {
-            return;
-        }
-        if (!enqueueUpload({UploadJob::Kind::BlockUpdates, "/api/plugin/block-updates/batch",
-                            livemap::serializeBlockUpdateBatches(batches), metas, updated_snapshots, update_count,
-                            resample_after_success_chunks})) {
-            for (const auto &meta : metas) {
-                enqueueSeedChunk(meta.coord, false);
-            }
-            background_log_.warning("Queued ", metas.size(),
-                                    " base resample(s) because dirty block batch upload queue is full.");
+        if (queued_resamples > 0) {
+            background_log_.info("Queued ", queued_resamples,
+                                 " live map chunk resample(s) for dirty block changes.");
         }
     }
 
@@ -1890,6 +1899,7 @@ private:
     bool baselines_dirty_ = false;
     std::filesystem::path background_log_path_;
     std::filesystem::path baseline_index_path_;
+    std::filesystem::path tile_snapshot_cache_path_;
     BackgroundLog background_log_;
     std::int64_t pending_chunk_cooldown_until_ms_ = 0;
     std::int64_t chunk_upload_backoff_until_ms_ = 0;

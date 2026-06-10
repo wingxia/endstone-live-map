@@ -15,6 +15,9 @@ const CHUNK_BLOCK_COUNT = 256;
 const MAX_CHUNK_PALETTE_SIZE = CHUNK_BLOCK_COUNT * 2;
 const MAX_CHUNKS_PER_REQUEST = 256;
 const MAX_CHUNKS_PER_BATCH = 384;
+const MAX_RENDERED_TILE_BATCH = 128;
+const MAX_RENDERED_TILE_BYTES = 4 * 1024 * 1024;
+const MAX_RENDERED_BATCH_BYTES = 16 * 1024 * 1024;
 const MAX_BLOCK_UPDATE_BATCH_UPDATES = 4096;
 const MAX_BLOCK_UPDATE_BATCH_CHUNKS = 256;
 const REGION_SIZE_CHUNKS = 16;
@@ -34,6 +37,7 @@ const EMPTY_PNG = Uint8Array.from([
 const MAP_TILE_MIN_ZOOM = -1;
 const MAP_TILE_BASE_ZOOM = 4;
 const MAP_TILE_MAX_ZOOM = MAP_TILE_BASE_ZOOM;
+const PLUGIN_RENDERED_TILE_MAX_ZOOM = 3;
 const MAP_TILE_WRITE_CONCURRENCY = 8;
 const LIVE_UPLOAD_MAP_TILE_WRITE_CONCURRENCY = 1;
 const LIVE_UPLOAD_MAP_TILE_READ_CONCURRENCY = 2;
@@ -189,6 +193,14 @@ export default {
         return handleChunkBatchUpload(request, env, ctx);
       }
 
+      if (url.pathname === "/api/plugin/chunks/rendered-batch") {
+        const auth = requirePluginAuth(request, env);
+        if (auth) {
+          return auth;
+        }
+        return handleRenderedChunkBatchUpload(request, env, ctx);
+      }
+
       if (url.pathname === "/api/plugin/chunks/materialize") {
         const auth = requirePluginAuth(request, env);
         if (auth) {
@@ -282,7 +294,7 @@ export default {
         if (auth) {
           return auth;
         }
-        return handleMapTileBackfill(request, env);
+        return retiredWorkerTileRendererResponse();
       }
 
       if (url.pathname === "/api/plugin/map-tiles/backfill-job") {
@@ -290,7 +302,7 @@ export default {
         if (auth) {
           return auth;
         }
-        return handleMapTileBackfillJob(request, env);
+        return retiredWorkerTileRendererResponse();
       }
 
       if (url.pathname === "/api/plugin/map-tiles/drain") {
@@ -298,7 +310,7 @@ export default {
         if (auth) {
           return auth;
         }
-        return handleMapTileDrain(request, env);
+        return retiredWorkerTileRendererResponse();
       }
 
       if (url.pathname.startsWith("/api/map-tiles/")) {
@@ -352,13 +364,8 @@ export default {
     if (!bucket) {
       return;
     }
-    const pending = scheduleBackgroundTask(ctx, "scheduled map tile maintenance", async () => {
-      await drainDirtyMapTiles(bucket, { limit: MAP_TILE_CRON_DRAIN_LIMIT });
-      await runMapTileBackfillJobStep(bucket, { source: "cron" });
-    });
-    if (pending) {
-      await pending;
-    }
+    // Map image tiles are rendered by the MC plugin now. Scheduled Worker-side
+    // tile generation is intentionally retired.
   },
 };
 
@@ -430,20 +437,15 @@ async function handleChunkUpload(request, env, ctx) {
     return json({ ok: true, skippedEmpty: 1, rejected: emptySnapshots, updates: 0 });
   }
   const result = await putChunkSnapshot(bucket, snapshot, { env, broadcast: false, diffForViewers: true });
-  const tileSchedule = scheduleMapTilesForChunks(ctx, bucket, [snapshot], { liveUpload: true });
   const metaPending = scheduleWorldMetaForChunks(ctx, bucket, [snapshot]);
   const broadcastPending = scheduleBackgroundTask(ctx, "broadcast chunk snapshot", () => broadcastChunkSnapshot(env, snapshot, result.blockUpdates));
-  if (tileSchedule.pending) {
-    await tileSchedule.pending;
-  }
   if (metaPending) {
     await metaPending;
   }
   if (broadcastPending) {
     await broadcastPending;
   }
-  const tiles = tileSchedule.tiles;
-  return json({ ok: true, key: result.key, updates: result.updates, tiles });
+  return json({ ok: true, key: result.key, updates: result.updates, tiles: [] });
 }
 
 async function handleChunkBatchUpload(request, env, ctx) {
@@ -470,19 +472,14 @@ async function handleChunkBatchUpload(request, env, ctx) {
   const results = await mapWithConcurrency(writableSnapshots, LIVE_UPLOAD_WRITE_CONCURRENCY, (snapshot) =>
     putChunkSnapshot(bucket, snapshot, { env, broadcast: false, diffForViewers: false }),
   );
-  const tileSchedule = scheduleMapTilesForChunks(ctx, bucket, writableSnapshots, { liveUpload: true });
   const metaPending = scheduleWorldMetaForChunks(ctx, bucket, writableSnapshots);
   const broadcastPending = broadcast ? scheduleBackgroundTask(ctx, "broadcast chunk batch", () => broadcastChunksReady(env, writableSnapshots)) : null;
-  if (tileSchedule.pending) {
-    await tileSchedule.pending;
-  }
   if (metaPending) {
     await metaPending;
   }
   if (broadcastPending) {
     await broadcastPending;
   }
-  const tiles = tileSchedule.tiles;
 
   return json({
     ok: true,
@@ -493,7 +490,58 @@ async function handleChunkBatchUpload(request, env, ctx) {
     rejected: emptySnapshots,
     keys: results.map((result) => result.key),
     updates: results.reduce((sum, result) => sum + result.updates, 0),
-    tiles,
+    tiles: [],
+  });
+}
+
+async function handleRenderedChunkBatchUpload(request, env, ctx) {
+  const bucket = mapBucket(env);
+  if (!bucket) {
+    return json({ error: "r2_not_configured" }, 503);
+  }
+
+  const contentLength = Number(request.headers.get("Content-Length") || 0);
+  if (contentLength > MAX_RENDERED_BATCH_BYTES) {
+    return json({ error: "rendered_batch_too_large", maxBytes: MAX_RENDERED_BATCH_BYTES }, 413);
+  }
+
+  let payload;
+  try {
+    payload = normalizeRenderedChunkBatchPayload(await request.json());
+  } catch (error) {
+    return json({ error: "invalid_rendered_chunk_batch", message: error instanceof Error ? error.message : String(error) }, 400);
+  }
+
+  const emptySnapshots = rejectedEmptyChunkSnapshots(payload.chunks);
+  const writableSnapshots = payload.chunks.filter((snapshot) => !isEmptyChunkSnapshot(snapshot));
+  if (writableSnapshots.length < 1) {
+    return json({ ok: true, storage: payload.storage, chunks: 0, skippedEmpty: emptySnapshots.length, rejected: emptySnapshots, keys: [], tiles: [] });
+  }
+
+  const chunkResults =
+    payload.storage === "region"
+      ? await putChunkRegionSnapshots(bucket, writableSnapshots)
+      : await mapWithConcurrency(writableSnapshots, LIVE_UPLOAD_WRITE_CONCURRENCY, (snapshot) =>
+          putChunkSnapshot(bucket, snapshot, { env, broadcast: false, diffForViewers: false }),
+        );
+  const tileResults = await mapWithConcurrency(payload.tiles, LIVE_UPLOAD_WRITE_CONCURRENCY, (tile) => putPluginRenderedMapTile(bucket, tile));
+  const metaPending = scheduleWorldMetaForChunks(ctx, bucket, writableSnapshots);
+  if (metaPending) {
+    await metaPending;
+  }
+  if (payload.broadcast) {
+    await broadcastChunksReady(env, writableSnapshots, Math.max(0, ...tileResults.map((tile) => tile.tileVersion)));
+  }
+
+  return json({
+    ok: true,
+    storage: payload.storage,
+    chunks: writableSnapshots.length,
+    skippedEmpty: emptySnapshots.length,
+    rejected: emptySnapshots,
+    regions: payload.storage === "region" ? chunkResults.length : undefined,
+    keys: chunkResults.map((result) => result.key),
+    tiles: tileResults,
   });
 }
 
@@ -782,15 +830,11 @@ async function handleBlockUpdatesUpload(request, env, ctx) {
   if (result.missingBase) {
     return json({ ok: true, missingBase: true, key: result.key, updates: 0 });
   }
-  const tileSchedule = result.applied.length > 0 ? scheduleMapTilesForChunks(ctx, bucket, [result.chunk], { liveUpload: true }) : { tiles: [], pending: null };
   const tileVersion = payload.updatedAt;
   const metaPending = result.applied.length > 0 ? scheduleWorldMetaForChunks(ctx, bucket, [result.chunk]) : null;
   const broadcastPending =
     result.applied.length > 0 ? scheduleBackgroundTask(ctx, "broadcast block updates", () => broadcastBlockUpdates(env, result.chunk, result.applied, tileVersion)) : null;
 
-  if (tileSchedule.pending) {
-    await tileSchedule.pending;
-  }
   if (metaPending) {
     await metaPending;
   }
@@ -798,7 +842,7 @@ async function handleBlockUpdatesUpload(request, env, ctx) {
     await broadcastPending;
   }
 
-  return json({ ok: true, missingBase: false, key: result.key, updates: result.applied.length, tiles: tileSchedule.tiles });
+  return json({ ok: true, missingBase: false, key: result.key, updates: result.applied.length, tiles: [] });
 }
 
 async function handleBlockUpdatesBatchUpload(request, env, ctx) {
@@ -816,21 +860,16 @@ async function handleBlockUpdatesBatchUpload(request, env, ctx) {
   const results = await mapWithConcurrency(payload.batches, BATCH_WRITE_CONCURRENCY, (batch) => applyBlockUpdateBatchToStorage(bucket, batch));
   const appliedResults = results.filter((result) => !result.missingBase && result.applied.length > 0);
   const updatedChunks = appliedResults.map((result) => result.chunk);
-  const tileSchedule = updatedChunks.length > 0 ? scheduleMapTilesForChunks(ctx, bucket, updatedChunks, { liveUpload: true }) : { tiles: [], pending: null };
   const metaPending = updatedChunks.length > 0 ? scheduleWorldMetaForChunks(ctx, bucket, updatedChunks) : null;
   const broadcastPending = scheduleBackgroundTask(ctx, "broadcast block update batch", () =>
     mapWithConcurrency(appliedResults, LIVE_UPLOAD_WRITE_CONCURRENCY, (result) => broadcastBlockUpdates(env, result.chunk, result.applied, result.chunk.updatedAt)),
   );
-  if (tileSchedule.pending) {
-    await tileSchedule.pending;
-  }
   if (metaPending) {
     await metaPending;
   }
   if (broadcastPending) {
     await broadcastPending;
   }
-  const tiles = tileSchedule.tiles;
 
   const missingBase = results
     .filter((result) => result.missingBase)
@@ -848,7 +887,7 @@ async function handleBlockUpdatesBatchUpload(request, env, ctx) {
     missingBaseChunks: missingBase,
     chunks: appliedResults.length,
     updates: applied,
-    tiles,
+    tiles: [],
   });
 }
 
@@ -907,6 +946,66 @@ async function putChunkSnapshot(bucket, snapshot, options) {
   return { key, updates: updates.length, blockUpdates: updates };
 }
 
+async function putChunkRegionSnapshots(bucket, snapshots) {
+  const groups = new Map();
+  for (const snapshot of snapshots) {
+    const regionX = floorDiv(snapshot.chunkX, REGION_SIZE_CHUNKS);
+    const regionZ = floorDiv(snapshot.chunkZ, REGION_SIZE_CHUNKS);
+    const key = chunkRegionKey(snapshot.world, snapshot.dimension, regionX, regionZ);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        world: snapshot.world,
+        dimension: snapshot.dimension,
+        regionX,
+        regionZ,
+        chunks: new Map(),
+      });
+    }
+    groups.get(key).chunks.set(coordKey(snapshot.chunkX, snapshot.chunkZ), snapshot);
+  }
+
+  return mapWithConcurrency([...groups.values()], LIVE_UPLOAD_WRITE_CONCURRENCY, async (group) => {
+    const existing = await readR2Json(await bucket.get(group.key));
+    for (const chunk of Array.isArray(existing?.chunks) ? existing.chunks : []) {
+      const normalized = normalizeOptionalChunkSnapshot(chunk);
+      if (!normalized) {
+        continue;
+      }
+      const key = coordKey(normalized.chunkX, normalized.chunkZ);
+      if (!group.chunks.has(key)) {
+        group.chunks.set(key, normalized);
+      }
+    }
+    const chunks = [...group.chunks.values()].sort((a, b) => a.chunkZ - b.chunkZ || a.chunkX - b.chunkX);
+    const updatedAt = Math.max(0, ...chunks.map((chunk) => chunk.updatedAt || 0));
+    await bucket.put(
+      group.key,
+      JSON.stringify({
+        version: 1,
+        world: group.world,
+        dimension: group.dimension,
+        regionX: group.regionX,
+        regionZ: group.regionZ,
+        updatedAt,
+        chunks,
+      }),
+      {
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        customMetadata: {
+          world: group.world,
+          dimension: group.dimension,
+          regionX: String(group.regionX),
+          regionZ: String(group.regionZ),
+          updatedAt: String(updatedAt),
+          chunks: String(chunks.length),
+        },
+      },
+    );
+    return { key: group.key, chunks: chunks.length, updatedAt };
+  });
+}
+
 function chunkSnapshotMetadata(snapshot) {
   return {
     world: snapshot.world,
@@ -915,6 +1014,32 @@ function chunkSnapshotMetadata(snapshot) {
     chunkZ: String(snapshot.chunkZ),
     updatedAt: String(snapshot.updatedAt || 0),
     hasNonAir: String(!isEmptyChunkSnapshot(snapshot)),
+  };
+}
+
+async function putPluginRenderedMapTile(bucket, tile) {
+  const key = mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ);
+  await bucket.put(key, tile.png, {
+    httpMetadata: { contentType: "image/png" },
+    customMetadata: {
+      world: tile.world,
+      dimension: tile.dimension,
+      zoom: String(tile.zoom),
+      tileVersion: String(tile.tileVersion),
+      sourceVersion: String(tile.sourceVersion),
+      renderer: "plugin",
+    },
+  });
+  return {
+    key,
+    world: tile.world,
+    dimension: tile.dimension,
+    zoom: tile.zoom,
+    tileX: tile.tileX,
+    tileZ: tile.tileZ,
+    tileVersion: tile.tileVersion,
+    sourceVersion: tile.sourceVersion,
+    bytes: tile.png.byteLength,
   };
 }
 
@@ -950,7 +1075,7 @@ async function broadcastChunkSnapshot(env, snapshot, updates = []) {
   }
 }
 
-async function broadcastChunksReady(env, snapshots) {
+async function broadcastChunksReady(env, snapshots, tileVersionOverride = 0) {
   const groups = new Map();
   for (const snapshot of snapshots) {
     const key = `${snapshot.world}\n${snapshot.dimension}`;
@@ -972,9 +1097,19 @@ async function broadcastChunksReady(env, snapshots) {
         dimension: group.dimension,
         chunks: group.chunks,
         updatedAt: group.updatedAt,
-        tileVersion: group.updatedAt,
+        tileVersion: Math.max(group.updatedAt, tileVersionOverride || 0),
       }),
     ),
+  );
+}
+
+function retiredWorkerTileRendererResponse() {
+  return json(
+    {
+      error: "worker_tile_renderer_retired",
+      message: "Map image tiles are rendered and uploaded by the MC plugin.",
+    },
+    410,
   );
 }
 
@@ -2276,6 +2411,54 @@ export function normalizeChunkBatchPayload(payload) {
   }
   const storage = payload.storage === "region" || payload.storage === "regions" ? "region" : "chunk";
   return { chunks, broadcast: payload.broadcast === true, storage };
+}
+
+export function normalizeRenderedChunkBatchPayload(payload) {
+  const chunks = Array.isArray(payload.chunks) ? payload.chunks.map((chunk) => normalizeChunkSnapshot(chunk)) : [];
+  if (chunks.length < 1 || chunks.length > MAX_CHUNKS_PER_BATCH) {
+    throw new Error(`chunks must contain 1-${MAX_CHUNKS_PER_BATCH} entries`);
+  }
+  const tiles = Array.isArray(payload.tiles) ? payload.tiles.map((tile, index) => normalizePluginRenderedMapTile(tile, index)) : [];
+  if (tiles.length < 1 || tiles.length > MAX_RENDERED_TILE_BATCH) {
+    throw new Error(`tiles must contain 1-${MAX_RENDERED_TILE_BATCH} entries`);
+  }
+  const totalTileBytes = tiles.reduce((sum, tile) => sum + tile.png.byteLength, 0);
+  if (totalTileBytes > MAX_RENDERED_BATCH_BYTES) {
+    throw new Error(`rendered tile bytes exceed ${MAX_RENDERED_BATCH_BYTES}`);
+  }
+  const storage = payload.storage === "chunk" ? "chunk" : "region";
+  return { chunks, tiles, broadcast: payload.broadcast === true, storage };
+}
+
+function normalizePluginRenderedMapTile(tile, index) {
+  const zoom = normalizeMapTileZoom(tile?.zoom);
+  if (zoom > PLUGIN_RENDERED_TILE_MAX_ZOOM) {
+    throw new Error(`tiles[${index}].zoom must be ${MAP_TILE_MIN_ZOOM}-${PLUGIN_RENDERED_TILE_MAX_ZOOM}`);
+  }
+  const pngBase64 = typeof tile?.pngBase64 === "string" ? tile.pngBase64 : "";
+  if (!pngBase64) {
+    throw new Error(`tiles[${index}].pngBase64 is required`);
+  }
+  const png = Buffer.from(pngBase64, "base64");
+  if (png.byteLength < 8 || png.byteLength > MAX_RENDERED_TILE_BYTES || !isPngBytes(png)) {
+    throw new Error(`tiles[${index}].pngBase64 must be a valid PNG up to ${MAX_RENDERED_TILE_BYTES} bytes`);
+  }
+  const sourceVersion = numberOrThrow(tile.sourceVersion ?? tile.tileVersion ?? 0, `tiles[${index}].sourceVersion`);
+  const tileVersion = Math.max(sourceVersion, numberOrThrow(tile.tileVersion ?? sourceVersion, `tiles[${index}].tileVersion`));
+  return {
+    world: cleanSegment(tile.world || "world"),
+    dimension: cleanSegment(tile.dimension || "Overworld"),
+    zoom,
+    tileX: numberOrThrow(tile.tileX, `tiles[${index}].tileX`),
+    tileZ: numberOrThrow(tile.tileZ, `tiles[${index}].tileZ`),
+    sourceVersion,
+    tileVersion,
+    png,
+  };
+}
+
+function isPngBytes(bytes) {
+  return bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71 && bytes[4] === 13 && bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10;
 }
 
 export function normalizeBlockUpdateBatch(payload) {

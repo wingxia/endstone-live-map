@@ -112,6 +112,7 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.server_id = stringValue(source, "server_id", settings.server_id);
     settings.background_log_file = stringValue(source, "background_log_file", settings.background_log_file);
     settings.baseline_index_file = stringValue(source, "baseline_index_file", settings.baseline_index_file);
+    settings.tile_snapshot_cache_dir = stringValue(source, "tile_snapshot_cache_dir", settings.tile_snapshot_cache_dir);
     settings.land_config_file = stringValue(source, "land_config_file", settings.land_config_file);
     settings.dimensions = dimensionsValue(source, settings.dimensions);
     settings.scan_radius_chunks = intValue(source, "scan_radius_chunks", settings.scan_radius_chunks);
@@ -132,6 +133,12 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
         intValue(source, "chunk_upload_flush_seconds", settings.chunk_upload_flush_seconds);
     settings.chunk_upload_cooldown_seconds =
         intValue(source, "chunk_upload_cooldown_seconds", settings.chunk_upload_cooldown_seconds);
+    settings.map_tile_render_threads = intValue(source, "map_tile_render_threads", settings.map_tile_render_threads);
+    settings.map_tile_render_flush_seconds =
+        intValue(source, "map_tile_render_flush_seconds", settings.map_tile_render_flush_seconds);
+    settings.map_tile_upload_batch_size =
+        intValue(source, "map_tile_upload_batch_size", settings.map_tile_upload_batch_size);
+    settings.max_tile_bundle_bytes = intValue(source, "max_tile_bundle_bytes", settings.max_tile_bundle_bytes);
     settings.http_timeout_seconds = intValue(source, "http_timeout_seconds", settings.http_timeout_seconds);
     settings.dirty_block_push_seconds = intValue(source, "dirty_block_push_seconds", settings.dirty_block_push_seconds);
     settings.land_push_seconds = intValue(source, "land_push_seconds", settings.land_push_seconds);
@@ -141,6 +148,8 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.max_pending_chunk_uploads =
         intValue(source, "max_pending_chunk_uploads", settings.max_pending_chunk_uploads);
     settings.upload_chunks = legacyBoolValue(source, "upload_chunks", "upload_tiles", settings.upload_chunks);
+    settings.map_tile_render_enabled =
+        boolValue(source, "map_tile_render_enabled", settings.map_tile_render_enabled);
     settings.auto_seed_chunks = boolValue(source, "auto_seed_chunks", settings.auto_seed_chunks);
     settings.upload_dirty_blocks = boolValue(source, "upload_dirty_blocks", settings.upload_dirty_blocks);
     settings.upload_players = boolValue(source, "upload_players", settings.upload_players);
@@ -158,6 +167,10 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.chunk_upload_batch_size = std::clamp(settings.chunk_upload_batch_size, 1, 128);
     settings.chunk_upload_flush_seconds = std::clamp(settings.chunk_upload_flush_seconds, 1, 60);
     settings.chunk_upload_cooldown_seconds = std::clamp(settings.chunk_upload_cooldown_seconds, 1, 600);
+    settings.map_tile_render_threads = std::clamp(settings.map_tile_render_threads, 1, 1);
+    settings.map_tile_render_flush_seconds = std::clamp(settings.map_tile_render_flush_seconds, 1, 300);
+    settings.map_tile_upload_batch_size = std::clamp(settings.map_tile_upload_batch_size, 1, 128);
+    settings.max_tile_bundle_bytes = std::clamp(settings.max_tile_bundle_bytes, 262144, 16777216);
     settings.http_timeout_seconds = std::clamp(settings.http_timeout_seconds, 5, 120);
     settings.dirty_block_push_seconds = std::clamp(settings.dirty_block_push_seconds, 1, 60);
     settings.land_push_seconds = std::clamp(settings.land_push_seconds, 10, 3600);
@@ -178,6 +191,7 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"server_id\": \"vvnas\",\n"
         << "  \"background_log_file\": \"live_map.log\",\n"
         << "  \"baseline_index_file\": \"chunk_baselines.tsv\",\n"
+        << "  \"tile_snapshot_cache_dir\": \"tile_snapshot_cache\",\n"
         << "  \"land_config_file\": \"/vol1/1000/bedrock_server/plugins/land/land.json\",\n"
         << "  \"dimensions\": [\"Overworld\", \"Nether\", \"TheEnd\"],\n"
         << "  \"scan_radius_chunks\": 8,\n"
@@ -192,6 +206,11 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"chunk_upload_batch_size\": 8,\n"
         << "  \"chunk_upload_flush_seconds\": 10,\n"
         << "  \"chunk_upload_cooldown_seconds\": 60,\n"
+        << "  \"map_tile_render_enabled\": true,\n"
+        << "  \"map_tile_render_threads\": 1,\n"
+        << "  \"map_tile_render_flush_seconds\": 15,\n"
+        << "  \"map_tile_upload_batch_size\": 8,\n"
+        << "  \"max_tile_bundle_bytes\": 2097152,\n"
         << "  \"http_timeout_seconds\": 30,\n"
         << "  \"dirty_block_push_seconds\": 60,\n"
         << "  \"land_push_seconds\": 60,\n"
