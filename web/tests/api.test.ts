@@ -99,6 +99,8 @@ describe("api helpers", () => {
     expect(isMapDecorationBlock("minecraft:oak_trapdoor")).toBe(true);
     expect(isMapDecorationBlock("minecraft:cake")).toBe(true);
     expect(isMapDecorationBlock("minecraft:end_rod")).toBe(true);
+    expect(isMapDecorationBlock("minecraft:unpowered_repeater")).toBe(true);
+    expect(isMapDecorationBlock("minecraft:powered_comparator")).toBe(true);
     expect(isMapDecorationBlock("minecraft:lantern")).toBe(true);
     expect(isMapDecorationBlock("minecraft:soul_lantern")).toBe(true);
     expect(isMapDecorationBlock("minecraft:sea_lantern")).toBe(false);

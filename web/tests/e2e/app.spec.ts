@@ -41,6 +41,10 @@ const EMPTY_TILE_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4AWMAAQAABQABNtCI3QAAAABJRU5ErkJggg==",
   "base64",
 );
+const WHITE_PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4AWP4DwQACfsD/c8LaHIAAAAASUVORK5CYII=",
+  "base64",
+);
 
 test("loads the map application shell", async ({ page }) => {
   await page.route("**/api/live", async (route) => route.abort());
@@ -1223,6 +1227,110 @@ test("renders stateful partial blocks without dark base holes", async ({ page })
   await expect.poll(() => firstChunkTileHasNoDarkHoles(page)).toBe(true);
 });
 
+test("renders redstone wire color and connections without using white atlas pixels", async ({ page }) => {
+  const redstoneCells = new Set([
+    "1,12",
+    "2,12",
+    "3,12",
+    "6,11",
+    "6,12",
+    "6,13",
+    "9,12",
+    "10,12",
+    "11,12",
+    "10,13",
+    "12,12",
+    "13,11",
+    "13,12",
+    "13,13",
+    "14,12",
+  ]);
+  const targetChunk = {
+    world: "Bedrock level",
+    dimension: "Overworld",
+    chunkX: 0,
+    chunkZ: 0,
+    palette: ["minecraft:grass_block", "minecraft:redstone_wire", "minecraft:air"],
+    blocks: Array.from({ length: 256 }, () => 0),
+    heights: Array.from({ length: 256 }, () => 64),
+    overlayBlocks: Array.from({ length: 256 }, (_, index) => {
+      const x = index % 16;
+      const z = Math.floor(index / 16);
+      return redstoneCells.has(`${x},${z}`) ? 1 : 2;
+    }),
+    overlayHeights: Array.from({ length: 256 }, (_, index) => {
+      const x = index % 16;
+      const z = Math.floor(index / 16);
+      return redstoneCells.has(`${x},${z}`) ? 65 : -64;
+    }),
+    overlayStates: Array.from({ length: 256 }, (_, index) => {
+      const x = index % 16;
+      const z = Math.floor(index / 16);
+      return redstoneCells.has(`${x},${z}`) ? { redstone_signal: 12 } : {};
+    }),
+    updatedAt: 1,
+  };
+
+  await page.route("**/api/live", async (route) => route.abort());
+  await page.route("**/api/lands?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ version: 1, world: "Bedrock level", dimension: "Overworld", claims: [], updatedAt: 0 }) });
+  });
+  await page.route("**/api/worlds", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        worlds: [
+          {
+            version: 1,
+            world: "Bedrock level",
+            dimension: "Overworld",
+            status: "complete",
+            chunkCount: 1,
+            importedAt: 1,
+            updatedAt: 1,
+            bounds: {
+              minChunkX: 0,
+              maxChunkX: 0,
+              minChunkZ: 0,
+              maxChunkZ: 0,
+              minBlockX: 0,
+              maxBlockX: 15,
+              minBlockZ: 0,
+              maxBlockZ: 15,
+            },
+            topBlocks: { "minecraft:grass_block": 241, "minecraft:redstone_wire": 15 },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/chunks?**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ chunks: [targetChunk], missing: [] }) });
+  });
+  await page.route("**/api/textures/manifest", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        tileSize: 1,
+        atlas: "/textures/white-redstone-atlas.png",
+        blocks: {
+          "minecraft:redstone_wire": { x: 0, y: 0, w: 1, h: 1 },
+          redstone_wire: { x: 0, y: 0, w: 1, h: 1 },
+        },
+      }),
+    });
+  });
+  await page.route("**/textures/white-redstone-atlas.png", async (route) => {
+    await route.fulfill({ contentType: "image/png", body: WHITE_PIXEL_PNG });
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => firstChunkTileHasColor(page, [226, 44, 32])).toBe(true);
+  await expect.poll(() => redstoneWirePatternsVisible(page)).toBe(true);
+});
+
 test("does not request chunk data before a world import exists when only live players are known", async ({ page }) => {
   let chunkRequests = 0;
   let imageTileRequests = 0;
@@ -2210,4 +2318,70 @@ async function firstChunkTileHasColor(page: Page, color: [number, number, number
     }
     return false;
   }, color);
+}
+
+async function redstoneWirePatternsVisible(page: Page) {
+  return page.evaluate(() => {
+    const patterns = [
+      { x: 2, z: 12, north: false, east: true, south: false, west: true },
+      { x: 6, z: 12, north: true, east: false, south: true, west: false },
+      { x: 10, z: 12, north: false, east: true, south: true, west: true },
+      { x: 13, z: 12, north: true, east: true, south: true, west: true },
+    ];
+    const isRed = (red: number, green: number, blue: number) => red > 120 && red > green * 2.8 && red > blue * 2.8;
+    const isWhite = (red: number, green: number, blue: number) => red > 220 && green > 220 && blue > 220;
+    const countRegion = (data: Uint8ClampedArray, startX: number, startY: number, width: number, height: number, predicate: (r: number, g: number, b: number) => boolean) => {
+      let count = 0;
+      for (let y = startY; y < startY + height; y += 1) {
+        for (let x = startX; x < startX + width; x += 1) {
+          const index = (y * 16 + x) * 4;
+          if (data[index + 3] === 255 && predicate(data[index], data[index + 1], data[index + 2])) {
+            count += 1;
+          }
+        }
+      }
+      return count;
+    };
+    const cellMatches = (
+      ctx: CanvasRenderingContext2D,
+      pattern: { x: number; z: number; north: boolean; east: boolean; south: boolean; west: boolean },
+    ) => {
+      const data = ctx.getImageData(pattern.x * 16, pattern.z * 16, 16, 16).data;
+      const arms = {
+        west: countRegion(data, 0, 6, 6, 4, isRed),
+        east: countRegion(data, 10, 6, 6, 4, isRed),
+        north: countRegion(data, 6, 0, 4, 6, isRed),
+        south: countRegion(data, 6, 10, 4, 6, isRed),
+      };
+      const center = countRegion(data, 6, 6, 4, 4, isRed);
+      const white = countRegion(data, 0, 0, 16, 16, isWhite);
+      return (
+        center >= 8 &&
+        arms.west >= (pattern.west ? 8 : 0) &&
+        arms.east >= (pattern.east ? 8 : 0) &&
+        arms.north >= (pattern.north ? 8 : 0) &&
+        arms.south >= (pattern.south ? 8 : 0) &&
+        (!pattern.west || arms.west > 0) &&
+        (!pattern.east || arms.east > 0) &&
+        (!pattern.north || arms.north > 0) &&
+        (!pattern.south || arms.south > 0) &&
+        (pattern.west || arms.west < 4) &&
+        (pattern.east || arms.east < 4) &&
+        (pattern.north || arms.north < 4) &&
+        (pattern.south || arms.south < 4) &&
+        white < 2
+      );
+    };
+
+    for (const canvas of document.querySelectorAll<HTMLCanvasElement>("canvas.chunk-tile")) {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        continue;
+      }
+      if (patterns.every((pattern) => cellMatches(ctx, pattern))) {
+        return true;
+      }
+    }
+    return false;
+  });
 }
