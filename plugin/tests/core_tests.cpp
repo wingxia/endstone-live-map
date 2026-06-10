@@ -3,6 +3,7 @@
 #include "livemap/chunk.hpp"
 #include "livemap/land.hpp"
 #include "livemap/map_blocks.hpp"
+#include "livemap/map_tile.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
 #include "livemap/tile_math.hpp"
@@ -13,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <span>
 #include <variant>
 #include <vector>
 
@@ -373,9 +375,9 @@ void testProtocol()
 void testBase64()
 {
     const std::vector<std::uint8_t> bytes = {'M', 'a', 'p'};
-    assert(livemap::base64Encode(bytes) == "TWFw");
+    assert(livemap::base64Encode(std::span<const std::uint8_t>(bytes.data(), bytes.size())) == "TWFw");
     const std::vector<std::uint8_t> one = {'M'};
-    assert(livemap::base64Encode(one) == "TQ==");
+    assert(livemap::base64Encode(std::span<const std::uint8_t>(one.data(), one.size())) == "TQ==");
 }
 
 livemap::ChunkSnapshot makeBaselineTestSnapshot()
@@ -456,6 +458,72 @@ void testChunkBaselineIndex()
     std::filesystem::remove(path);
 }
 
+void testChunkSnapshotStoreAndMapTileRendering()
+{
+    const auto dir = std::filesystem::temp_directory_path() / "live_map_tile_snapshot_cache_test";
+    std::filesystem::remove_all(dir);
+
+    auto snapshot = makeBaselineTestSnapshot();
+    snapshot.chunk_x = 0;
+    snapshot.chunk_z = 0;
+    snapshot.updated_at_ms = 123;
+
+    livemap::ChunkSnapshotStore store(dir);
+    std::string error;
+    assert(store.put(snapshot, &error));
+    const auto loaded = store.get({"world", "Overworld", 0, 0});
+    assert(loaded.has_value());
+    assert(loaded->palette == snapshot.palette);
+    assert(loaded->blocks[3] == snapshot.blocks[3]);
+    assert(loaded->heights[3] == snapshot.heights[3]);
+    assert(std::get<int>(loaded->block_states[3].at("facing_direction")) == 1);
+
+    const auto refs = livemap::mapTilesForChunk({"world", "Overworld", 0, 0});
+    assert(refs.size() == 5);
+    assert(refs.front().zoom == -1);
+    assert(refs.back().zoom == 3);
+    const auto negative_refs = livemap::mapTilesForChunk({"world", "Overworld", -1, -17});
+    assert(negative_refs[0].zoom == -1 && negative_refs[0].tile_x == -1 && negative_refs[0].tile_z == -1);
+    assert(negative_refs[4].zoom == 3 && negative_refs[4].tile_x == -1 && negative_refs[4].tile_z == -9);
+
+    const auto tiles = livemap::renderMapTilesForSnapshots(dir, {snapshot}, &error);
+    assert(tiles.size() == 5);
+    assert(tiles.front().source_version == 123);
+    assert(tiles.front().png.size() > 8);
+    assert(tiles.front().png[0] == 137);
+    assert(tiles.front().png[1] == 80);
+    assert(tiles.front().png[2] == 78);
+    assert(tiles.front().png[3] == 71);
+
+    auto same_tile_snapshot = snapshot;
+    same_tile_snapshot.chunk_x = 1;
+    same_tile_snapshot.updated_at_ms = 124;
+    const auto deduped_tiles = livemap::renderMapTilesForSnapshots(dir, {snapshot, same_tile_snapshot}, &error);
+    assert(deduped_tiles.size() == 5);
+
+    const auto empty_dir = std::filesystem::temp_directory_path() / "live_map_empty_tile_snapshot_cache_test";
+    std::filesystem::remove_all(empty_dir);
+    livemap::ChunkSnapshot empty_snapshot;
+    empty_snapshot.world = "world";
+    empty_snapshot.dimension = "Overworld";
+    empty_snapshot.palette = {"minecraft:air"};
+    empty_snapshot.blocks.fill(0);
+    empty_snapshot.heights.fill(-64);
+    empty_snapshot.overlay_blocks.fill(0);
+    empty_snapshot.overlay_heights.fill(-64);
+    empty_snapshot.updated_at_ms = 125;
+    assert(livemap::renderMapTilesForSnapshots(empty_dir, {empty_snapshot}, &error).empty());
+    std::filesystem::remove_all(empty_dir);
+
+    const auto json = livemap::serializeRenderedChunkBatch({snapshot}, tiles, true);
+    assert(json.find("\"storage\":\"region\"") != std::string::npos);
+    assert(json.find("\"tiles\":[") != std::string::npos);
+    assert(json.find("\"pngBase64\":\"") != std::string::npos);
+    assert(json.find("\"zoom\":3") != std::string::npos);
+
+    std::filesystem::remove_all(dir);
+}
+
 void testSettingsLegacyKeys()
 {
     const auto path = std::filesystem::temp_directory_path() / "live_map_legacy_settings_test.json";
@@ -529,6 +597,12 @@ void testSettingsDirtyBatchDefaults()
     assert(settings.dirty_block_push_seconds == 60);
     assert(settings.max_dirty_blocks_per_push == 2048);
     assert(settings.max_dirty_chunks_per_push == 64);
+    assert(settings.map_tile_render_enabled);
+    assert(settings.map_tile_render_threads == 1);
+    assert(settings.map_tile_render_flush_seconds == 15);
+    assert(settings.map_tile_upload_batch_size == 8);
+    assert(settings.max_tile_bundle_bytes == 2097152);
+    assert(settings.tile_snapshot_cache_dir == "tile_snapshot_cache");
 }
 
 void testSettingsNewKeysOverrideLegacyKeys()
@@ -619,6 +693,7 @@ int main()
     testBase64();
     testChunkSnapshotFingerprint();
     testChunkBaselineIndex();
+    testChunkSnapshotStoreAndMapTileRendering();
     testSettingsLegacyKeys();
     testSettingsDirtyBatchDefaults();
     testSettingsNewKeysOverrideLegacyKeys();

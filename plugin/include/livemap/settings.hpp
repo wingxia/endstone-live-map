@@ -12,6 +12,7 @@ struct LiveMapSettings {
     std::string server_id = "default";
     std::string background_log_file = "live_map.log";
     std::string baseline_index_file = "chunk_baselines.tsv";
+    std::string tile_snapshot_cache_dir = "tile_snapshot_cache";
     std::string land_config_file = "/vol1/1000/bedrock_server/plugins/land/land.json";
     std::vector<std::string> dimensions = {"Overworld"};
     int scan_radius_chunks = 8;
@@ -26,6 +27,10 @@ struct LiveMapSettings {
     int chunk_upload_batch_size = 8;
     int chunk_upload_flush_seconds = 10;
     int chunk_upload_cooldown_seconds = 60;
+    int map_tile_render_threads = 1;
+    int map_tile_render_flush_seconds = 15;
+    int map_tile_upload_batch_size = 8;
+    int max_tile_bundle_bytes = 2097152;
     int http_timeout_seconds = 30;
     int dirty_block_push_seconds = 60;
     int land_push_seconds = 60;
@@ -34,6 +39,7 @@ struct LiveMapSettings {
     int max_upload_queue_size = 256;
     int max_pending_chunk_uploads = 4096;
     bool upload_chunks = true;
+    bool map_tile_render_enabled = true;
     bool auto_seed_chunks = false;
     bool upload_dirty_blocks = true;
     bool upload_players = true;
