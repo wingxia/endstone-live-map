@@ -758,7 +758,8 @@ std::string serializeRenderedChunkBatch(const std::vector<ChunkSnapshot> &snapsh
             << jsonEscape(tile.ref.dimension) << "\",\"zoom\":" << tile.ref.zoom
             << ",\"tileX\":" << tile.ref.tile_x << ",\"tileZ\":" << tile.ref.tile_z
             << ",\"sourceVersion\":" << tile.source_version << ",\"tileVersion\":" << tile.source_version
-            << ",\"pngBase64\":\"" << base64Encode(tile.png) << "\"}";
+            << ",\"pngBase64\":\"" << base64Encode(std::span<const std::uint8_t>(tile.png.data(), tile.png.size()))
+            << "\"}";
     }
     out << "]}";
     return out.str();

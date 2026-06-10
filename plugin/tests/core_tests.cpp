@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <span>
 #include <variant>
 #include <vector>
 
@@ -374,9 +375,9 @@ void testProtocol()
 void testBase64()
 {
     const std::vector<std::uint8_t> bytes = {'M', 'a', 'p'};
-    assert(livemap::base64Encode(bytes) == "TWFw");
+    assert(livemap::base64Encode(std::span<const std::uint8_t>(bytes.data(), bytes.size())) == "TWFw");
     const std::vector<std::uint8_t> one = {'M'};
-    assert(livemap::base64Encode(one) == "TQ==");
+    assert(livemap::base64Encode(std::span<const std::uint8_t>(one.data(), one.size())) == "TQ==");
 }
 
 livemap::ChunkSnapshot makeBaselineTestSnapshot()
