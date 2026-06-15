@@ -2,23 +2,21 @@
   "name": "endstone-live-map",
   "private": true,
   "workspaces": [
+    "server",
     "web",
     "worker"
   ],
   "scripts": {
-    "build": "npm run build -w web && npm run build -w worker",
-    "test": "npm run test -w worker && npm run test -w web",
+    "build": "npm run build -w web && npm run build -w server && npm run build -w worker",
+    "test": "npm run test -w server && npm run test -w worker && npm run test -w web",
     "test:e2e": "npm run test:e2e -w web",
-    "typecheck": "npm run typecheck -w web && npm run typecheck -w worker",
+    "typecheck": "npm run typecheck -w web && npm run typecheck -w server && npm run typecheck -w worker",
+    "server": "npm run start -w server",
+    "cleanup:r2": "node scripts/cleanup-r2-map-data.mjs",
     "deploy": "npm run build && npm run deploy -w worker",
-    "cf:whoami": "npm exec -w worker -- wrangler whoami",
-    "textures:atlas": "node scripts/build-texture-atlas.mjs",
-    "textures:upload": "node scripts/upload-textures.mjs"
+    "cf:whoami": "npm exec -w worker -- wrangler whoami"
   },
   "engines": {
     "node": ">=22"
-  },
-  "devDependencies": {
-    "pngjs": "^7.0.0"
   }
 }

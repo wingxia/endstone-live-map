@@ -18,7 +18,7 @@ describe("MapCanvas coordinate helpers", () => {
 
 describe("PlayerList", () => {
   it("shows online player coordinates", () => {
-    render(
+    const { container } = render(
       <PlayerList
         players={[
           {
@@ -31,6 +31,8 @@ describe("PlayerList", () => {
             z: -8.6,
             yaw: 0,
             pitch: 0,
+            avatarHash: "abc123",
+            avatarUrl: "/api/players/1/avatar.png?_=abc123",
             updatedAt: 1,
           },
         ]}
@@ -39,6 +41,7 @@ describe("PlayerList", () => {
 
     expect(screen.getByText("Wing")).toBeInTheDocument();
     expect(screen.getByText("12, 64, -9")).toBeInTheDocument();
+    expect(container.querySelector(".avatar img")).toHaveAttribute("src", "/api/players/1/avatar.png?_=abc123");
   });
 
   it("selects a player from the list", () => {

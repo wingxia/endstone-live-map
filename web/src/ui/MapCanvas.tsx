@@ -1,7 +1,7 @@
 import { Clipboard, ClipboardCheck } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type ChunksReadyMessage, type LandClaim, type PlayerState, type WorldMeta } from "../api";
+import { playerAvatarUrl, segmentKey, type LandClaim, type PlayerState, type TilesReadyMessage, type WorldMeta } from "../api";
 import { blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "./coords";
 import { createChunkGridLayer, INITIAL_MAP_ZOOM, MIN_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
@@ -25,13 +25,11 @@ interface MapCanvasProps {
   players: PlayerState[];
   lands: LandClaim[];
   worldMeta: WorldMeta | null;
-  chunkReady: ChunkReadyMessage | null;
-  chunksReady: ChunksReadyMessage | null;
-  blockUpdates: BlockUpdatesMessage | null;
+  tilesReady: TilesReadyMessage | null;
   focusTarget: { x: number; z: number; nonce: number } | null;
 }
 
-export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkReady, chunksReady, blockUpdates, focusTarget }: MapCanvasProps) {
+export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesReady, focusTarget }: MapCanvasProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const stateRef = useRef<{
     map: import("leaflet").Map;
@@ -62,7 +60,9 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
         minZoom: MIN_MAP_ZOOM,
         maxZoom: INITIAL_MAP_ZOOM,
       }).setView([0, 0], INITIAL_MAP_ZOOM);
-
+      if (navigator.webdriver) {
+        (window as unknown as { __endstoneLiveMapLeaflet?: import("leaflet").Map }).__endstoneLiveMapLeaflet = map;
+      }
       L.control.zoom({ position: "bottomright" }).addTo(map);
       const chunkLayer = createChunkGridLayer(L, world, dimension).addTo(map);
 
@@ -146,22 +146,10 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
   }, [dimension, mapReady, players, world, worldMeta]);
 
   useEffect(() => {
-    if (chunkReady) {
-      stateRef.current?.chunkLayer.refreshChunk(chunkReady);
+    if (tilesReady) {
+      stateRef.current?.chunkLayer.refreshTiles(tilesReady);
     }
-  }, [chunkReady]);
-
-  useEffect(() => {
-    if (chunksReady) {
-      stateRef.current?.chunkLayer.refreshChunks(chunksReady);
-    }
-  }, [chunksReady]);
-
-  useEffect(() => {
-    if (blockUpdates) {
-      stateRef.current?.chunkLayer.applyBlockUpdates(blockUpdates);
-    }
-  }, [blockUpdates]);
+  }, [tilesReady]);
 
   useEffect(() => {
     const state = stateRef.current;
@@ -238,12 +226,14 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
       state.layers.clearLayers();
 
       for (const player of players) {
-        L.circleMarker(minecraftToLeaflet(player.x, player.z), {
-          radius: 7,
-          color: "#111827",
-          weight: 2,
-          fillColor: "#46d9a5",
-          fillOpacity: 0.95,
+        L.marker(minecraftToLeaflet(player.x, player.z), {
+          icon: L.divIcon({
+            className: "player-marker",
+            html: playerMarkerHtml(player),
+            iconSize: [36, 48],
+            iconAnchor: [18, 42],
+          }),
+          keyboard: false,
         })
           .bindTooltip(`${escapeHtml(player.name)} (${Math.round(player.x)}, ${Math.round(player.y)}, ${Math.round(player.z)})`, {
             permanent: false,
@@ -426,6 +416,16 @@ function landTooltip(land: LandClaim) {
   return `${escapeHtml(land.name)}<br/>所属 ${escapeHtml(land.owner)}<br/>范围 ${size}<br/>TP ${land.teleport.x}, ${land.teleport.y}, ${land.teleport.z}<br/>成员 ${land.members.length}${parent}`;
 }
 
+function playerMarkerHtml(player: PlayerState) {
+  const avatar = playerAvatarUrl(player);
+  const initial = escapeHtml((player.name || "?").slice(0, 1).toUpperCase());
+  const name = escapeHtml(player.name || "Player");
+  const avatarHtml = avatar
+    ? `<img class="player-marker-avatar" src="${escapeAttribute(avatar)}" alt="" loading="lazy" />`
+    : `<span class="player-marker-fallback">${initial}</span>`;
+  return `<span class="player-marker-frame">${avatarHtml}</span><span class="player-marker-name">${name}</span>`;
+}
+
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (char) => {
     const entities: Record<string, string> = {
@@ -437,4 +437,8 @@ function escapeHtml(value: string) {
     };
     return entities[char];
   });
+}
+
+function escapeAttribute(value: string) {
+  return escapeHtml(value);
 }

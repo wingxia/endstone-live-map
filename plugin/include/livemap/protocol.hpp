@@ -4,18 +4,12 @@
 #include <string>
 #include <vector>
 
-#include "livemap/chunk.hpp"
-
 namespace livemap {
-
-enum class ChunkBatchStorage {
-    Chunk,
-    Region,
-};
 
 struct PlayerState {
     std::string id;
     std::string name;
+    std::string xuid;
     std::string world;
     std::string dimension;
     double x{};
@@ -23,17 +17,13 @@ struct PlayerState {
     double z{};
     double yaw{};
     double pitch{};
+    std::string avatar_hash;
+    std::string avatar_png_base64;
     std::int64_t updated_at_ms{};
 };
 
 std::string jsonEscape(std::string_view value);
 std::string serializePlayerSnapshot(const std::vector<PlayerState> &players);
-std::string serializeChunkSnapshot(const ChunkSnapshot &snapshot);
-std::string serializeChunkBatch(const std::vector<ChunkSnapshot> &snapshots, bool broadcast,
-                                ChunkBatchStorage storage = ChunkBatchStorage::Chunk);
-std::string serializeBlockUpdateBatch(const BlockUpdateBatch &batch);
-std::string serializeBlockUpdateBatches(const std::vector<BlockUpdateBatch> &batches);
-std::string serializeChunkReady(const ChunkCoord &coord);
 std::string serializeHeartbeat(std::string_view server_id, std::int64_t now_ms);
 
 }  // namespace livemap

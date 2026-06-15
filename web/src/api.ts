@@ -1,6 +1,7 @@
 export interface PlayerState {
   id: string;
   name: string;
+  xuid?: string;
   world: string;
   dimension: string;
   x: number;
@@ -8,55 +9,9 @@ export interface PlayerState {
   z: number;
   yaw: number;
   pitch: number;
+  avatarHash?: string;
+  avatarUrl?: string;
   updatedAt: number;
-}
-
-export interface ChunkSnapshot {
-  world: string;
-  dimension: string;
-  chunkX: number;
-  chunkZ: number;
-  palette: string[];
-  blocks: number[];
-  heights: number[];
-  blockStates?: BlockStateMap[];
-  overlayBlocks?: number[];
-  overlayHeights?: number[];
-  overlayStates?: BlockStateMap[];
-  updatedAt: number;
-}
-
-export interface ChunkQuery {
-  world: string;
-  dimension: string;
-  minChunkX: number;
-  maxChunkX: number;
-  minChunkZ: number;
-  maxChunkZ: number;
-}
-
-export interface ChunkFetchOptions {
-  cacheBust?: string | number;
-  cache?: RequestCache;
-}
-
-export interface ChunkResponse {
-  chunks: ChunkSnapshot[];
-  missing: Array<{ chunkX: number; chunkZ: number }>;
-}
-
-export interface TextureAtlasEntry {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-export interface TextureManifest {
-  version: number;
-  tileSize: number;
-  atlas: string;
-  blocks: Record<string, TextureAtlasEntry>;
 }
 
 export interface WorldMeta {
@@ -117,54 +72,25 @@ export interface LandResponse {
   updatedAt: number;
 }
 
-export interface BlockUpdate {
-  localX: number;
-  localZ: number;
-  block: string;
-  height: number;
-  state?: BlockStateMap;
-  overlayBlock?: string;
-  overlayHeight?: number;
-  overlayState?: BlockStateMap;
-}
-
 export type BlockStateValue = boolean | number | string;
 export type BlockStateMap = Record<string, BlockStateValue>;
 
-export interface ChunkReadyMessage {
-  type: "chunk_ready";
-  world: string;
-  dimension: string;
-  chunkX: number;
-  chunkZ: number;
-  updatedAt: number;
-  tileVersion?: number;
-}
-
 export interface ReadyChunk {
+  world?: string;
+  dimension?: string;
   chunkX: number;
   chunkZ: number;
   updatedAt?: number;
 }
 
-export interface ChunksReadyMessage {
-  type: "chunks_ready";
+export interface ReadyTile {
   world: string;
   dimension: string;
-  chunks: ReadyChunk[];
+  zoom: number;
+  tileX: number;
+  tileZ: number;
   updatedAt: number;
-  tileVersion?: number;
-}
-
-export interface BlockUpdatesMessage {
-  type: "block_updates";
-  world: string;
-  dimension: string;
-  chunkX: number;
-  chunkZ: number;
-  updates: BlockUpdate[];
-  updatedAt: number;
-  tileVersion?: number;
+  hasPixels: boolean;
 }
 
 export interface LandsUpdatedMessage {
@@ -174,32 +100,21 @@ export interface LandsUpdatedMessage {
   updatedAt: number;
 }
 
+export interface TilesReadyMessage {
+  type: "tiles_ready";
+  chunks: Array<ReadyChunk & { world: string; dimension: string }>;
+  tiles?: ReadyTile[];
+  updatedAt: number;
+}
+
 export interface LiveMessage {
-  type: "player_snapshot" | "chunk_ready" | "chunks_ready" | "block_updates" | "lands_updated" | "heartbeat";
+  type: "player_snapshot" | "tiles_ready" | "lands_updated" | "heartbeat";
   players?: PlayerState[];
   world?: string;
   dimension?: string;
-  chunkX?: number;
-  chunkZ?: number;
   chunks?: ReadyChunk[];
-  updates?: BlockUpdate[];
+  tiles?: ReadyTile[];
   updatedAt?: number;
-  tileVersion?: number;
-}
-
-export function chunkUrl(query: ChunkQuery, options: ChunkFetchOptions = {}): string {
-  const params = new URLSearchParams({
-    world: query.world,
-    dimension: query.dimension,
-    minChunkX: String(query.minChunkX),
-    maxChunkX: String(query.maxChunkX),
-    minChunkZ: String(query.minChunkZ),
-    maxChunkZ: String(query.maxChunkZ),
-  });
-  if (options.cacheBust !== undefined) {
-    params.set("_", String(options.cacheBust));
-  }
-  return `/api/chunks?${params.toString()}`;
 }
 
 export function mapImageTileUrl(world: string, dimension: string, zoom: number, tileX: number, tileZ: number, cacheBust?: string | number): string {
@@ -211,39 +126,15 @@ export function mapImageTileUrl(world: string, dimension: string, zoom: number, 
   return `/api/map-tiles/${segmentKey(world)}/${segmentKey(dimension)}/z${zoom}/${tileX}/${tileZ}.png${suffix ? `?${suffix}` : ""}`;
 }
 
-export async function fetchChunks(query: ChunkQuery, options: ChunkFetchOptions = {}): Promise<ChunkResponse> {
-  try {
-    const response = await fetch(chunkUrl(query, options), { cache: options.cache });
-    if (!response.ok) {
-      throw new Error(`Failed to load chunks: ${response.status}`);
-    }
-    return (await response.json()) as ChunkResponse;
-  } catch (error) {
-    if (import.meta.env.DEV) {
-      const { mockChunks } = await import("./mockData");
-      return {
-        chunks: mockChunks.filter(
-          (chunk) =>
-            chunk.world === query.world &&
-            chunk.dimension === query.dimension &&
-            chunk.chunkX >= query.minChunkX &&
-            chunk.chunkX <= query.maxChunkX &&
-            chunk.chunkZ >= query.minChunkZ &&
-            chunk.chunkZ <= query.maxChunkZ,
-        ),
-        missing: [],
-      };
-    }
-    throw error;
+export function playerAvatarUrl(player: Pick<PlayerState, "id" | "avatarHash" | "avatarUrl">): string {
+  if (player.avatarUrl) {
+    return player.avatarUrl;
   }
-}
-
-export async function fetchTextureManifest(): Promise<TextureManifest> {
-  const response = await fetch("/api/textures/manifest");
-  if (!response.ok) {
-    throw new Error(`Failed to load texture manifest: ${response.status}`);
+  if (!player.avatarHash) {
+    return "";
   }
-  return (await response.json()) as TextureManifest;
+  const params = new URLSearchParams({ _: String(player.avatarHash) });
+  return `/api/players/${encodeURIComponent(player.id)}/avatar.png?${params.toString()}`;
 }
 
 export function landsUrl(world: string, dimension: string, cacheBust?: string | number): string {
@@ -274,10 +165,6 @@ export async function fetchLands(world: string, dimension: string, cacheBust?: s
     }
     throw error;
   }
-}
-
-export function textureAtlasUrl(manifest: TextureManifest): string {
-  return manifest.atlas || "/textures/atlas.png";
 }
 
 export function segmentKey(value: string): string {

@@ -1,49 +1,68 @@
 # Cloudflare Bootstrap
 
-Run these commands after `npx wrangler login` or with `CLOUDFLARE_API_TOKEN` set.
+Cloudflare is optional in the MipMap-style refactor. The required frontend/API runs on the server-local Node service. Use Cloudflare only when you want public edge reads for mirrored R2 tiles.
+
+## R2 Bucket
+
+Run after `npx wrangler login` or with `CLOUDFLARE_API_TOKEN` set:
 
 ```bash
 cd /Users/winxia/codex/endstone-live-map/worker
 npx wrangler r2 bucket create endstone-live-map-tiles
 ```
 
-R2 stores chunk snapshots and the generated texture atlas:
+The plugin writes only finished PNG tiles:
 
 ```text
-chunks/v1/{world}/{dimension}/{chunkX}/{chunkZ}.json
-textures/v1/atlas.png
-textures/v1/manifest.json
+map-tiles/v2/<world>/<dimension>/z<zoom>/<tileX>/<tileZ>.png
 ```
 
-Create a Hyperdrive config that points at the NAS MySQL TCP hostname exposed through Cloudflare Tunnel:
+Keep plugin R2 secrets out of `live_map.json`:
 
 ```bash
-npx wrangler hyperdrive create endstone-live-map-mysql \
-  --connection-string="mysql://<user>:<password>@mysql-map.buhe.li:3306/endstone_live_map"
+export LIVE_MAP_R2_ACCESS_KEY_ID=...
+export LIVE_MAP_R2_SECRET_ACCESS_KEY=...
 ```
 
-Copy the returned Hyperdrive id into the GitHub repository variable:
+## Worker
 
-```bash
-gh variable set CLOUDFLARE_HYPERDRIVE_ID --repo wingxia/endstone-live-map --body '<hyperdrive_id>'
-```
+The Worker now provides only:
 
-Set GitHub deployment secrets:
+- `GET /api/health`
+- `GET /api/map-tiles/<world>/<dimension>/z<zoom>/<tileX>/<tileZ>.png`
+- `POST /api/plugin/map-data/cleanup`
+
+Set GitHub deployment secrets if using the existing workflow:
 
 ```bash
 gh secret set CLOUDFLARE_API_TOKEN --repo wingxia/endstone-live-map --body '<cloudflare_api_token>'
 gh secret set CLOUDFLARE_ACCOUNT_ID --repo wingxia/endstone-live-map --body '<cloudflare_account_id>'
-gh secret set PLUGIN_TOKEN --repo wingxia/endstone-live-map --body '<shared_plugin_token>'
+gh secret set PLUGIN_TOKEN --repo wingxia/endstone-live-map --body '<cleanup_token>'
 ```
 
-Optionally set a marker write token:
+Then deploy:
 
 ```bash
-gh secret set MARKER_WRITE_TOKEN --repo wingxia/endstone-live-map --body '<optional_marker_write_token>'
+npm run deploy -w worker
 ```
 
-Then trigger the manual deploy workflow:
+## Cleanup
+
+Dry-run old map-data cleanup:
 
 ```bash
-gh workflow run deploy-worker.yml --repo wingxia/endstone-live-map --ref main
+LIVE_MAP_R2_ACCESS_KEY_ID=... LIVE_MAP_R2_SECRET_ACCESS_KEY=... \
+npm run cleanup:r2 -- \
+  --endpoint https://<account-id>.r2.cloudflarestorage.com \
+  --bucket endstone-live-map-tiles
+```
+
+Destructive cleanup requires explicit confirmation:
+
+```bash
+LIVE_MAP_R2_ACCESS_KEY_ID=... LIVE_MAP_R2_SECRET_ACCESS_KEY=... \
+npm run cleanup:r2 -- \
+  --endpoint https://<account-id>.r2.cloudflarestorage.com \
+  --bucket endstone-live-map-tiles \
+  --confirm delete-map-data-v2
 ```

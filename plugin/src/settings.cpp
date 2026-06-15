@@ -108,12 +108,21 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     }
 
     settings.worker_url = stringValue(source, "worker_url", settings.worker_url);
+    settings.local_server_url = stringValue(source, "local_server_url", settings.local_server_url);
     settings.plugin_token = stringValue(source, "plugin_token", settings.plugin_token);
     settings.server_id = stringValue(source, "server_id", settings.server_id);
     settings.background_log_file = stringValue(source, "background_log_file", settings.background_log_file);
     settings.baseline_index_file = stringValue(source, "baseline_index_file", settings.baseline_index_file);
     settings.land_config_file = stringValue(source, "land_config_file", settings.land_config_file);
+    settings.tile_data_dir = stringValue(source, "tile_data_dir", settings.tile_data_dir);
+    settings.r2_endpoint = stringValue(source, "r2_endpoint", settings.r2_endpoint);
+    settings.r2_bucket = stringValue(source, "r2_bucket", settings.r2_bucket);
+    settings.r2_region = stringValue(source, "r2_region", settings.r2_region);
+    settings.r2_key_prefix = stringValue(source, "r2_key_prefix", settings.r2_key_prefix);
     settings.dimensions = dimensionsValue(source, settings.dimensions);
+    settings.tile_min_zoom = intValue(source, "tile_min_zoom", settings.tile_min_zoom);
+    settings.tile_max_zoom = intValue(source, "tile_max_zoom", settings.tile_max_zoom);
+    settings.render_worker_threads = intValue(source, "render_worker_threads", settings.render_worker_threads);
     settings.scan_radius_chunks = intValue(source, "scan_radius_chunks", settings.scan_radius_chunks);
     settings.chunk_refresh_seconds =
         legacyIntValue(source, "chunk_refresh_seconds", "tile_refresh_seconds", settings.chunk_refresh_seconds);
@@ -140,12 +149,22 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.max_upload_queue_size = intValue(source, "max_upload_queue_size", settings.max_upload_queue_size);
     settings.max_pending_chunk_uploads =
         intValue(source, "max_pending_chunk_uploads", settings.max_pending_chunk_uploads);
+    settings.r2_max_concurrent_uploads =
+        intValue(source, "r2_max_concurrent_uploads", settings.r2_max_concurrent_uploads);
+    settings.r2_max_uploads_per_minute =
+        intValue(source, "r2_max_uploads_per_minute", settings.r2_max_uploads_per_minute);
+    settings.r2_retry_count = intValue(source, "r2_retry_count", settings.r2_retry_count);
+    settings.r2_retry_backoff_ms = intValue(source, "r2_retry_backoff_ms", settings.r2_retry_backoff_ms);
     settings.upload_chunks = legacyBoolValue(source, "upload_chunks", "upload_tiles", settings.upload_chunks);
     settings.auto_seed_chunks = boolValue(source, "auto_seed_chunks", settings.auto_seed_chunks);
     settings.upload_dirty_blocks = boolValue(source, "upload_dirty_blocks", settings.upload_dirty_blocks);
     settings.upload_players = boolValue(source, "upload_players", settings.upload_players);
     settings.upload_lands = boolValue(source, "upload_lands", settings.upload_lands);
+    settings.r2_enabled = boolValue(source, "r2_enabled", settings.r2_enabled);
 
+    settings.tile_min_zoom = std::clamp(settings.tile_min_zoom, -4, 4);
+    settings.tile_max_zoom = std::clamp(settings.tile_max_zoom, settings.tile_min_zoom, 4);
+    settings.render_worker_threads = std::clamp(settings.render_worker_threads, 1, 8);
     settings.scan_radius_chunks = std::clamp(settings.scan_radius_chunks, 0, 16);
     settings.chunk_refresh_seconds = std::clamp(settings.chunk_refresh_seconds, 5, 3600);
     settings.player_push_seconds = std::clamp(settings.player_push_seconds, 1, 300);
@@ -165,6 +184,10 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.max_dirty_chunks_per_push = std::clamp(settings.max_dirty_chunks_per_push, 1, 256);
     settings.max_upload_queue_size = std::clamp(settings.max_upload_queue_size, 1, 4096);
     settings.max_pending_chunk_uploads = std::clamp(settings.max_pending_chunk_uploads, 1, 65536);
+    settings.r2_max_concurrent_uploads = std::clamp(settings.r2_max_concurrent_uploads, 1, 4);
+    settings.r2_max_uploads_per_minute = std::clamp(settings.r2_max_uploads_per_minute, 1, 600);
+    settings.r2_retry_count = std::clamp(settings.r2_retry_count, 0, 10);
+    settings.r2_retry_backoff_ms = std::clamp(settings.r2_retry_backoff_ms, 100, 60000);
     return settings;
 }
 
@@ -173,13 +196,17 @@ void writeExampleSettings(const std::filesystem::path &path)
     std::filesystem::create_directories(path.parent_path());
     std::ofstream out(path);
     out << "{\n"
-        << "  \"worker_url\": \"https://map.buhe.li\",\n"
-        << "  \"plugin_token\": \"replace-with-cloudflare-secret\",\n"
+        << "  \"local_server_url\": \"http://127.0.0.1:8000\",\n"
+        << "  \"plugin_token\": \"replace-with-local-node-token\",\n"
         << "  \"server_id\": \"vvnas\",\n"
         << "  \"background_log_file\": \"live_map.log\",\n"
         << "  \"baseline_index_file\": \"chunk_baselines.tsv\",\n"
         << "  \"land_config_file\": \"/vol1/1000/bedrock_server/plugins/land/land.json\",\n"
+        << "  \"tile_data_dir\": \"map-data\",\n"
         << "  \"dimensions\": [\"Overworld\", \"Nether\", \"TheEnd\"],\n"
+        << "  \"tile_min_zoom\": -1,\n"
+        << "  \"tile_max_zoom\": 4,\n"
+        << "  \"render_worker_threads\": 2,\n"
         << "  \"scan_radius_chunks\": 8,\n"
         << "  \"chunk_refresh_seconds\": 20,\n"
         << "  \"player_push_seconds\": 1,\n"
@@ -199,6 +226,15 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"max_dirty_chunks_per_push\": 64,\n"
         << "  \"max_upload_queue_size\": 256,\n"
         << "  \"max_pending_chunk_uploads\": 4096,\n"
+        << "  \"r2_enabled\": false,\n"
+        << "  \"r2_endpoint\": \"https://<account-id>.r2.cloudflarestorage.com\",\n"
+        << "  \"r2_bucket\": \"endstone-live-map-tiles\",\n"
+        << "  \"r2_region\": \"auto\",\n"
+        << "  \"r2_key_prefix\": \"map-tiles/v2\",\n"
+        << "  \"r2_max_concurrent_uploads\": 1,\n"
+        << "  \"r2_max_uploads_per_minute\": 60,\n"
+        << "  \"r2_retry_count\": 3,\n"
+        << "  \"r2_retry_backoff_ms\": 1000,\n"
         << "  \"upload_chunks\": true,\n"
         << "  \"auto_seed_chunks\": false,\n"
         << "  \"upload_dirty_blocks\": true,\n"

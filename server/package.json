@@ -1,0 +1,14 @@
+{
+  "name": "@endstone-live-map/server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "vitest run",
+    "typecheck": "node --check src/index.js",
+    "build": "node --check src/index.js"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
+  }
+}

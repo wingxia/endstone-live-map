@@ -73,9 +73,7 @@ export function App() {
           players={selectedPlayers}
           lands={publicLands}
           worldMeta={selectedWorldMeta}
-          chunkReady={live.chunkReady}
-          chunksReady={live.chunksReady}
-          blockUpdates={live.blockUpdates}
+          tilesReady={live.tilesReady}
           focusTarget={focusTarget}
         />
         <div className="map-hud" aria-label="地图状态">

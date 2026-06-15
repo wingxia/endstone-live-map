@@ -7,44 +7,20 @@
   "observability": {
     "enabled": true
   },
-  "triggers": {
-    "crons": ["*/2 * * * *"]
-  },
-  "assets": {
-    "directory": "../web/dist",
-    "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
-  },
-  "routes": [
-    {
-      "pattern": "map.buhe.li",
-      "custom_domain": true
-    }
-  ],
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "LIVE_ROOM",
-        "class_name": "LiveRoom"
-      }
-    ]
-  },
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["LiveRoom"]
+    },
+    {
+      "tag": "v2-delete-live-room",
+      "deleted_classes": ["LiveRoom"]
     }
   ],
   "r2_buckets": [
     {
       "binding": "MAP_DATA",
       "bucket_name": "endstone-live-map-tiles"
-    }
-  ],
-  "hyperdrive": [
-    {
-      "binding": "HYPERDRIVE",
-      "id": "REPLACE_WITH_HYPERDRIVE_ID"
     }
   ]
 }

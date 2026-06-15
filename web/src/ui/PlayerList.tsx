@@ -1,6 +1,6 @@
 import { UserRound } from "lucide-react";
 
-import type { PlayerState } from "../api";
+import { playerAvatarUrl, type PlayerState } from "../api";
 
 interface PlayerListProps {
   players: PlayerState[];
@@ -18,7 +18,11 @@ export function PlayerList({ players, onSelectPlayer }: PlayerListProps) {
         <li key={player.id}>
           <button type="button" className="item-action" onClick={() => onSelectPlayer?.(player)}>
             <span className="avatar" aria-hidden="true">
-              {player.name.slice(0, 1).toUpperCase()}
+              {playerAvatarUrl(player) ? (
+                <img src={playerAvatarUrl(player)} alt="" loading="lazy" />
+              ) : (
+                player.name.slice(0, 1).toUpperCase()
+              )}
             </span>
             <span>
               <strong>{player.name}</strong>

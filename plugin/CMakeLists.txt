@@ -15,9 +15,13 @@ add_library(livemap_core
     src/chunk.cpp
     src/land.cpp
     src/map_blocks.cpp
+    src/png.cpp
     src/protocol.cpp
+    src/r2_signing.cpp
     src/settings.cpp
+    src/sha256.cpp
     src/tile_math.cpp
+    src/tile_renderer.cpp
 )
 target_include_directories(livemap_core PUBLIC include)
 target_compile_features(livemap_core PUBLIC cxx_std_20)
@@ -42,6 +46,7 @@ if(LIVE_MAP_WITH_ENDSTONE)
     endstone_add_plugin(${PROJECT_NAME}
         src/endstone_plugin.cpp
         src/http_transport.cpp
+        src/r2_client.cpp
     )
     target_include_directories(${PROJECT_NAME} PRIVATE include)
     target_link_libraries(${PROJECT_NAME} PRIVATE livemap_core CURL::libcurl)
