@@ -74,6 +74,28 @@ describe("local live map server", () => {
     expect(lands.claims).toEqual([claim]);
   });
 
+  it("serves mutable map tiles with revalidation and uncached placeholders", async () => {
+    const tileFile = path.join(tmp, "tiles", "Bedrock_level", "Overworld", "z4", "0", "0.png");
+    await fs.mkdir(path.dirname(tileFile), { recursive: true });
+    await fs.writeFile(tileFile, Buffer.from([1, 2, 3]));
+
+    const existing = await fetch(`${baseUrl}/api/map-tiles/Bedrock_level/Overworld/z4/0/0.png`);
+    expect(existing.status).toBe(200);
+    expect(existing.headers.get("content-type")).toContain("image/png");
+    expect(existing.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+    expect(existing.headers.get("etag")).toBeTruthy();
+    expect(Buffer.from(await existing.arrayBuffer())).toEqual(Buffer.from([1, 2, 3]));
+
+    const revalidated = await fetch(`${baseUrl}/api/map-tiles/Bedrock_level/Overworld/z4/0/0.png`, {
+      headers: { "If-None-Match": existing.headers.get("etag") },
+    });
+    expect(revalidated.status).toBe(304);
+
+    const missing = await fetch(`${baseUrl}/api/map-tiles/Bedrock_level/Overworld/z4/9/9.png`);
+    expect(missing.status).toBe(200);
+    expect(missing.headers.get("cache-control")).toBe("no-store");
+  });
+
   it("caches player avatars from plugin snapshots and serves lightweight player state", async () => {
     const avatarPngBase64 =
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4AWP4DwQACfsD/c8LaHIAAAAASUVORK5CYII=";

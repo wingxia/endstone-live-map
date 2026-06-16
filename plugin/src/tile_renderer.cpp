@@ -13,6 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <tuple>
 
 namespace livemap {
@@ -343,6 +344,15 @@ bool hasPixels(const RgbaImage &image)
     return false;
 }
 
+bool fileExistsWithBytes(const std::filesystem::path &path)
+{
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error)) {
+        return false;
+    }
+    return std::filesystem::file_size(path, error) > 0 && !error;
+}
+
 Rgba average2x2(const RgbaImage &image, int x, int y)
 {
     int count = 0;
@@ -459,6 +469,21 @@ std::string tileR2Key(const LiveMapSettings &settings, std::string_view world, s
     }
     return prefix + "/" + cleanSegment(world) + "/" + cleanSegment(dimension) + "/z" + std::to_string(zoom) + "/" +
            std::to_string(tile_x) + "/" + std::to_string(tile_z) + ".png";
+}
+
+bool renderedTileFilesExistForChunk(const LiveMapSettings &settings, const ChunkCoord &coord)
+{
+    int tile_x = coord.x;
+    int tile_z = coord.z;
+    for (int zoom = kMapTileBaseZoom; zoom >= settings.tile_min_zoom; --zoom) {
+        if (!fileExistsWithBytes(tilePngPath(settings, coord.world, coord.dimension, zoom, tile_x, tile_z)) ||
+            !fileExistsWithBytes(tileRawPath(settings, coord.world, coord.dimension, zoom, tile_x, tile_z))) {
+            return false;
+        }
+        tile_x = floorDiv(tile_x, 2);
+        tile_z = floorDiv(tile_z, 2);
+    }
+    return true;
 }
 
 RgbaImage renderChunkTile(const ChunkSnapshot &snapshot)

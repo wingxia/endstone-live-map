@@ -46,6 +46,7 @@ struct TileRenderResult {
                                                 std::string_view dimension, int zoom, int tile_x, int tile_z);
 [[nodiscard]] std::string tileR2Key(const LiveMapSettings &settings, std::string_view world, std::string_view dimension,
                                     int zoom, int tile_x, int tile_z);
+[[nodiscard]] bool renderedTileFilesExistForChunk(const LiveMapSettings &settings, const ChunkCoord &coord);
 [[nodiscard]] RgbaImage renderChunkTile(const ChunkSnapshot &snapshot);
 [[nodiscard]] TileRenderResult renderChunkSnapshotsToTiles(const LiveMapSettings &settings,
                                                            const std::vector<ChunkSnapshot> &snapshots);

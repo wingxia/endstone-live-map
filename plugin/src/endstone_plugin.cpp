@@ -1364,7 +1364,8 @@ private:
         std::scoped_lock lock(state_mutex_);
 
         const auto confirmed = chunk_baselines_.find(coord);
-        if (!force && confirmed != chunk_baselines_.end() && confirmed->second.fingerprint == fingerprint) {
+        if (!force && confirmed != chunk_baselines_.end() && confirmed->second.fingerprint == fingerprint &&
+            livemap::renderedTileFilesExistForChunk(settings_, coord)) {
             ++skipped_cached_chunks_;
             return false;
         }

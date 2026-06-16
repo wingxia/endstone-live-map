@@ -8,6 +8,7 @@ Endstone Bedrock 服务器实时网页地图。当前版本把地图渲染迁回
 - 实时显示在线玩家位置。
 - 保留公开领地显示：领地列表搜索、矩形/点位覆盖、传送点标记、点击聚焦、按维度过滤。
 - 在服务器本地生成 `z4` 基础瓦片，并从 `z4` 递归生成 `z3..z-1` 低缩放瓦片。
+- 每 60 秒扫描在线玩家附近已加载区块；对应区域已有完整本地瓦片且区块指纹未变时跳过，玩家改动会进入脏区块缓存并强制重采样。
 - 可选把生成完成的 PNG 瓦片直接上传到 Cloudflare R2，键格式为 `map-tiles/v2/<world>/<dimension>/z<zoom>/<tileX>/<tileZ>.png`。
 - Worker 现在只保留可选边缘能力：健康检查、从 R2 读取公开瓦片、受 token 保护的清理接口。
 
@@ -59,13 +60,16 @@ npm run server
   "tile_min_zoom": -1,
   "tile_max_zoom": 4,
   "render_worker_threads": 2,
+  "player_seed_interval_seconds": 60,
+  "max_seed_chunks_per_pulse": 4,
+  "dirty_block_push_seconds": 60,
   "upload_chunks": true,
   "upload_players": true,
   "upload_lands": true
 }
 ```
 
-5. 重启服务器。玩家附近已加载区块会逐步被采样并生成瓦片。管理员也可以手动触发：
+5. 重启服务器。玩家附近已加载区块会每分钟逐步采样并生成瓦片；已渲染且区块指纹未变的区块不会重复写图，玩家方块改动会在 60 秒脏区块缓存 flush 后强制重采样。管理员也可以手动触发：
 
 ```text
 /livemap render-chunk <chunkX> <chunkZ>
@@ -102,7 +106,7 @@ export LIVE_MAP_R2_ACCESS_KEY_ID=...
 export LIVE_MAP_R2_SECRET_ACCESS_KEY=...
 ```
 
-插件只上传已经写好的 PNG 瓦片，不再上传区块 JSON、方块更新 JSON、region 数据或纹理 atlas。
+插件只上传已经写好的 PNG 瓦片，不再上传区块 JSON、方块更新 JSON、region 数据或纹理 atlas。R2 镜像写入由 `r2_max_uploads_per_minute` 限速，避免公网对象存储写入过快。
 
 ## R2 清理
 
@@ -147,6 +151,8 @@ Node 服务默认监听 `127.0.0.1:8000`，环境变量：
 - `GET /api/players`
 - `GET /api/map-tiles/<world>/<dimension>/z<zoom>/<tileX>/<tileZ>.png`
 - `GET /api/live` WebSocket
+
+地图瓦片是可变资源：本地服务和 Worker 会返回需要重新验证的缓存头，缺失瓦片占位图不会缓存。前端收到 `tiles_ready` 后会带版本参数刷新可见瓦片并重新读取 `/api/worlds`。
 
 插件写入接口：
 

@@ -88,12 +88,12 @@ async function handleMapTileGet(url, env) {
   }
   const object = await bucket.get(mapTileKey(tile.world, tile.dimension, tile.zoom, tile.tileX, tile.tileZ));
   if (!object) {
-    return pngResponse(EMPTY_PNG, { "Cache-Control": "public, max-age=60" });
+    return pngResponse(EMPTY_PNG, { "Cache-Control": "no-store" });
   }
   const headers = new Headers(CORS_HEADERS);
   object.writeHttpMetadata?.(headers);
   headers.set("Content-Type", headers.get("Content-Type") || "image/png");
-  headers.set("Cache-Control", "public, max-age=31536000, immutable");
+  headers.set("Cache-Control", "public, max-age=0, must-revalidate");
   return new Response(await object.arrayBuffer(), { headers });
 }
 

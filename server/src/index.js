@@ -77,7 +77,7 @@ export async function handleRequest(state, request, response) {
     return;
   }
   if (request.method === "GET" && url.pathname.startsWith("/api/map-tiles/")) {
-    await serveTile(state, url.pathname, response);
+    await serveTile(state, request, url.pathname, response);
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/plugin/live") {
@@ -368,7 +368,7 @@ function landFile(dataDir, world, dimension) {
   return path.join(dataDir, "lands", world, `${dimension}.json`);
 }
 
-async function serveTile(state, pathname, response) {
+async function serveTile(state, request, pathname, response) {
   const match = /^\/api\/map-tiles\/([^/]+)\/([^/]+)\/z(-?\d+)\/(-?\d+)\/(-?\d+)\.png$/.exec(pathname);
   if (!match) {
     json(response, 404, { error: "invalid_tile_path" });
@@ -377,11 +377,31 @@ async function serveTile(state, pathname, response) {
   const [, world, dimension, zoom, tileX, tileZ] = match;
   const file = path.join(state.dataDir, "tiles", cleanSegment(world), cleanSegment(dimension), `z${Number(zoom)}`, String(Number(tileX)), `${Number(tileZ)}.png`);
   if (!existsSync(file)) {
-    response.writeHead(200, corsHeaders({ "Content-Type": "image/png", "Cache-Control": "public, max-age=30" }));
+    response.writeHead(200, corsHeaders({ "Content-Type": "image/png", "Cache-Control": "no-store" }));
     response.end(EMPTY_PNG);
     return;
   }
-  response.writeHead(200, corsHeaders({ "Content-Type": "image/png", "Cache-Control": "public, max-age=31536000, immutable" }));
+  const stats = await fs.stat(file);
+  const etag = `"${stats.size.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}"`;
+  const lastModified = stats.mtime.toUTCString();
+  const headers = corsHeaders({
+    "Content-Type": "image/png",
+    "Cache-Control": "public, max-age=0, must-revalidate",
+    ETag: etag,
+    "Last-Modified": lastModified,
+  });
+  if (request.headers["if-none-match"] === etag) {
+    response.writeHead(304, headers);
+    response.end();
+    return;
+  }
+  const modifiedSince = Date.parse(String(request.headers["if-modified-since"] || ""));
+  if (Number.isFinite(modifiedSince) && modifiedSince >= Math.floor(stats.mtimeMs / 1000) * 1000) {
+    response.writeHead(304, headers);
+    response.end();
+    return;
+  }
+  response.writeHead(200, headers);
   createReadStream(file).pipe(response);
 }
 

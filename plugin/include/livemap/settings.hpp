@@ -28,8 +28,8 @@ struct LiveMapSettings {
     int player_push_seconds = 1;
     int max_chunks_per_refresh = 32;
     int player_seed_radius_chunks = 4;
-    int player_seed_interval_seconds = 600;
-    int max_seed_chunks_per_pulse = 1;
+    int player_seed_interval_seconds = 60;
+    int max_seed_chunks_per_pulse = 4;
     int seed_pulse_seconds = 1;
     int player_seed_join_delay_seconds = 10;
     int chunk_upload_batch_size = 8;

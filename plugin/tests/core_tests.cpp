@@ -471,11 +471,22 @@ void testTileRendering()
     assert(result.tiles.size() == 6);
     assert(std::filesystem::exists(livemap::tilePngPath(settings, "Bedrock level", "Overworld", 4, -1, 2)));
     assert(std::filesystem::exists(livemap::tilePngPath(settings, "Bedrock level", "Overworld", 3, -1, 1)));
+    assert(livemap::renderedTileFilesExistForChunk(settings, {"Bedrock level", "Overworld", -1, 2}));
     assert(livemap::tileR2Key(settings, "Bedrock level", "Overworld", 4, -1, 2) ==
            "map-tiles/v2/Bedrock_level/Overworld/z4/-1/2.png");
     const auto json = livemap::serializeTilesReady(result);
     assert(json.find("\"type\":\"tiles_ready\"") != std::string::npos);
     assert(json.find("\"zoom\":-1") != std::string::npos);
+
+    std::filesystem::remove(livemap::tilePngPath(settings, "Bedrock level", "Overworld", 3, -1, 1));
+    assert(!livemap::renderedTileFilesExistForChunk(settings, {"Bedrock level", "Overworld", -1, 2}));
+
+    const auto rerendered = livemap::renderChunkSnapshotsToTiles(settings, {snapshot});
+    assert(rerendered.ok);
+    assert(livemap::renderedTileFilesExistForChunk(settings, {"Bedrock level", "Overworld", -1, 2}));
+
+    std::filesystem::remove(livemap::tileRawPath(settings, "Bedrock level", "Overworld", 4, -1, 2));
+    assert(!livemap::renderedTileFilesExistForChunk(settings, {"Bedrock level", "Overworld", -1, 2}));
 
     std::filesystem::remove_all(dir);
 }
@@ -587,6 +598,8 @@ void testSettingsDirtyBatchDefaults()
     const auto path = std::filesystem::temp_directory_path() / "live_map_dirty_batch_defaults_test.json";
     std::filesystem::remove(path);
     const auto settings = livemap::loadSettings(path);
+    assert(settings.player_seed_interval_seconds == 60);
+    assert(settings.max_seed_chunks_per_pulse == 4);
     assert(settings.dirty_block_push_seconds == 60);
     assert(settings.max_dirty_blocks_per_push == 2048);
     assert(settings.max_dirty_chunks_per_push == 64);

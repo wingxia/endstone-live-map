@@ -60,11 +60,13 @@ describe("edge worker", () => {
 
     const existing = await worker.fetch(new Request("https://map.example/api/map-tiles/Bedrock_level/Overworld/z4/0/0.png"), testEnv);
     expect(existing.status).toBe(200);
+    expect(existing.headers.get("Cache-Control")).toBe("public, max-age=0, must-revalidate");
     expect(new Uint8Array(await existing.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
 
     const missing = await worker.fetch(new Request("https://map.example/api/map-tiles/Bedrock_level/Overworld/z4/9/9.png"), testEnv);
     expect(missing.status).toBe(200);
     expect(missing.headers.get("Content-Type")).toBe("image/png");
+    expect(missing.headers.get("Cache-Control")).toBe("no-store");
   });
 
   it("keeps cleanup scoped and protects lands", async () => {

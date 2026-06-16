@@ -24,6 +24,30 @@ test("renders the operational map shell from local PNG tiles only", async ({ pag
   expect(requests.legacy.length).toBe(0);
 });
 
+test("refreshes visible tiles and world metadata after live tile updates", async ({ page }) => {
+  await installMockLiveSocket(page);
+  const requests = await mockLiveMap(page, { players: false });
+
+  await page.goto("/");
+
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("_=10")))).toBe(true);
+
+  await page.evaluate(() => {
+    (window as unknown as { __liveMapSocketSend: (data: string) => void }).__liveMapSocketSend(
+      JSON.stringify({
+        type: "tiles_ready",
+        updatedAt: 999,
+        chunks: [{ world: "Bedrock level", dimension: "Overworld", chunkX: 0, chunkZ: 0, updatedAt: 999 }],
+      }),
+    );
+  });
+
+  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("_=999")))).toBe(true);
+  await expect.poll(() => requests.worlds).toBeGreaterThan(1);
+  expect(requests.legacy.length).toBe(0);
+});
+
 test("uses generated PNG tiles for every zoom level from z4 through z-1", async ({ page }) => {
   const requests = await mockLiveMap(page, { players: false });
   await page.goto("/");
@@ -85,7 +109,7 @@ test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
 
 async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
   const includePlayers = options.players !== false;
-  const requests = { tiles: [] as string[], avatars: [] as string[], legacy: [] as string[] };
+  const requests = { tiles: [] as string[], avatars: [] as string[], legacy: [] as string[], worlds: 0 };
   page.on("request", (request) => {
     const url = request.url();
     if (url.includes("/api/chunks") || url.includes("/api/textures") || url.includes("/textures/")) {
@@ -158,6 +182,7 @@ async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
     });
   });
   await page.route("**/api/worlds", async (route) => {
+    requests.worlds += 1;
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
@@ -200,6 +225,45 @@ async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
     await route.fulfill({ status: 410, body: "texture atlas disabled" });
   });
   return requests;
+}
+
+async function installMockLiveSocket(page: Page) {
+  await page.addInitScript(() => {
+    const sockets: Array<EventTarget & { close: () => void; send: () => void; __message: (data: string) => void; readyState: number }> = [];
+    class MockWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = MockWebSocket.OPEN;
+      url: string;
+
+      constructor(url: string) {
+        super();
+        this.url = url;
+        sockets.push(this);
+        window.setTimeout(() => this.dispatchEvent(new Event("open")), 0);
+      }
+
+      send() {}
+
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.dispatchEvent(new Event("close"));
+      }
+
+      __message(data: string) {
+        this.dispatchEvent(new MessageEvent("message", { data }));
+      }
+    }
+
+    (window as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWebSocket as unknown as typeof WebSocket;
+    (window as unknown as { __liveMapSocketSend: (data: string) => void }).__liveMapSocketSend = (data: string) => {
+      for (const socket of sockets) {
+        socket.__message(data);
+      }
+    };
+  });
 }
 
 async function elementsOverlap(page: Page, leftSelector: string, rightSelector: string) {

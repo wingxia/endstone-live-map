@@ -117,8 +117,9 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
     }
     const playerBounds = players.length > 0 ? boundsForPlayers(players) : null;
     const meta = isWorldMetaForMap(worldMeta, world, dimension) ? worldMeta : null;
+    const knownBounds = mergeMapBounds(meta?.bounds || null, playerBounds);
     const autoFitKey = autoFitKeyFor(world, dimension, meta, playerBounds);
-    state.chunkLayer.setKnownBounds(meta?.bounds || null, meta?.updatedAt);
+    state.chunkLayer.setKnownBounds(knownBounds, meta?.updatedAt);
     if (!meta && !playerBounds) {
       state.chunkLayer.setActive(false);
       if (autoFitKeyRef.current !== autoFitKey) {
@@ -131,8 +132,8 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
       if (playerBounds) {
         state.map.fitBounds(
           [
-            minecraftToLeaflet(playerBounds.minX, playerBounds.maxZ),
-            minecraftToLeaflet(playerBounds.maxX, playerBounds.minZ),
+            minecraftToLeaflet(playerBounds.minBlockX, playerBounds.maxBlockZ),
+            minecraftToLeaflet(playerBounds.maxBlockX, playerBounds.minBlockZ),
           ],
           { animate: false, padding: [24, 24], maxZoom: INITIAL_MAP_ZOOM },
         );
@@ -399,14 +400,43 @@ function autoFitKeyFor(world: string, dimension: string, meta: WorldMeta | null,
   return `${prefix}/empty`;
 }
 
-function boundsForPlayers(players: PlayerState[]) {
+function boundsForPlayers(players: PlayerState[]): WorldMeta["bounds"] {
   const xs = players.map((player) => player.x);
   const zs = players.map((player) => player.z);
+  const minBlockX = Math.floor(Math.min(...xs) - LIVE_PLAYER_PADDING_BLOCKS);
+  const maxBlockX = Math.ceil(Math.max(...xs) + LIVE_PLAYER_PADDING_BLOCKS);
+  const minBlockZ = Math.floor(Math.min(...zs) - LIVE_PLAYER_PADDING_BLOCKS);
+  const maxBlockZ = Math.ceil(Math.max(...zs) + LIVE_PLAYER_PADDING_BLOCKS);
+  const minChunk = blockToChunk(minBlockX, minBlockZ);
+  const maxChunk = blockToChunk(maxBlockX, maxBlockZ);
   return {
-    minX: Math.floor(Math.min(...xs) - LIVE_PLAYER_PADDING_BLOCKS),
-    maxX: Math.ceil(Math.max(...xs) + LIVE_PLAYER_PADDING_BLOCKS),
-    minZ: Math.floor(Math.min(...zs) - LIVE_PLAYER_PADDING_BLOCKS),
-    maxZ: Math.ceil(Math.max(...zs) + LIVE_PLAYER_PADDING_BLOCKS),
+    minChunkX: minChunk.chunkX,
+    maxChunkX: maxChunk.chunkX,
+    minChunkZ: minChunk.chunkZ,
+    maxChunkZ: maxChunk.chunkZ,
+    minBlockX,
+    maxBlockX,
+    minBlockZ,
+    maxBlockZ,
+  };
+}
+
+export function mergeMapBounds(left: WorldMeta["bounds"] | null, right: WorldMeta["bounds"] | null): WorldMeta["bounds"] | null {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  return {
+    minChunkX: Math.min(left.minChunkX, right.minChunkX),
+    maxChunkX: Math.max(left.maxChunkX, right.maxChunkX),
+    minChunkZ: Math.min(left.minChunkZ, right.minChunkZ),
+    maxChunkZ: Math.max(left.maxChunkZ, right.maxChunkZ),
+    minBlockX: Math.min(left.minBlockX, right.minBlockX),
+    maxBlockX: Math.max(left.maxBlockX, right.maxBlockX),
+    minBlockZ: Math.min(left.minBlockZ, right.minBlockZ),
+    maxBlockZ: Math.max(left.maxBlockZ, right.maxBlockZ),
   };
 }
 

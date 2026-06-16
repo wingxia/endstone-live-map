@@ -83,9 +83,15 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     }
 
     setKnownBounds(bounds: ChunkLayerBounds | null, tileVersion?: string | number) {
+      const boundsChanged = !sameBounds(this.knownBounds, bounds);
       this.knownBounds = bounds;
-      if (tileVersion !== undefined && this.imageTileVersion !== tileVersion) {
+      const versionChanged = tileVersion !== undefined && this.imageTileVersion !== tileVersion;
+      if (versionChanged) {
         this.imageTileVersion = tileVersion;
+      }
+      if (boundsChanged) {
+        this.redraw();
+      } else if (versionChanged) {
         this.redrawVisibleImageTiles();
       }
     }
@@ -272,6 +278,16 @@ export function blockFacingEdgeForState(state: Record<string, unknown>) {
 
 function sameWorldDimension(leftWorld: string | undefined, leftDimension: string | undefined, rightWorld: string, rightDimension: string) {
   return segmentKey(leftWorld || "") === segmentKey(rightWorld) && segmentKey(leftDimension || "") === segmentKey(rightDimension);
+}
+
+function sameBounds(left: ChunkLayerBounds | null, right: ChunkLayerBounds | null) {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return left.minChunkX === right.minChunkX && left.maxChunkX === right.maxChunkX && left.minChunkZ === right.minChunkZ && left.maxChunkZ === right.maxChunkZ;
 }
 
 function segmentKey(value: string): string {
