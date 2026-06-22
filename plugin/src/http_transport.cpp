@@ -1,4 +1,3 @@
-#include "livemap/chunk.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/settings.hpp"
 
@@ -38,7 +37,11 @@ public:
             return {.ok = false, .error = "curl_easy_init failed"};
         }
 
-        const auto url = settings_.worker_url + std::string(path);
+        auto base_url = settings_.local_server_url.empty() ? settings_.worker_url : settings_.local_server_url;
+        while (!base_url.empty() && base_url.back() == '/') {
+            base_url.pop_back();
+        }
+        const auto url = base_url + std::string(path);
         char error_buffer[CURL_ERROR_SIZE] = {};
         std::string response_body;
         struct curl_slist *headers = nullptr;
@@ -68,7 +71,6 @@ public:
         transport_result.response_code = response_code;
         transport_result.curl_code = static_cast<int>(result);
         transport_result.body = std::move(response_body);
-        transport_result.missing_base = transport_result.body.find("\"missingBase\":true") != std::string::npos;
         if (result != CURLE_OK) {
             transport_result.error = error_buffer[0] != '\0' ? error_buffer : curl_easy_strerror(result);
         }
@@ -90,16 +92,6 @@ TransportResult postLiveJson(const LiveMapSettings &settings, std::string_view j
 TransportResult postPluginJson(const LiveMapSettings &settings, std::string_view path, std::string_view json)
 {
     return CurlTransport(settings).postJson(path, json);
-}
-
-TransportResult uploadChunkSnapshot(const LiveMapSettings &settings, const ChunkSnapshot &snapshot)
-{
-    return CurlTransport(settings).postJson("/api/plugin/chunks", serializeChunkSnapshot(snapshot));
-}
-
-TransportResult uploadBlockUpdateBatch(const LiveMapSettings &settings, const BlockUpdateBatch &batch)
-{
-    return CurlTransport(settings).postJson("/api/plugin/block-updates", serializeBlockUpdateBatch(batch));
 }
 
 }  // namespace livemap

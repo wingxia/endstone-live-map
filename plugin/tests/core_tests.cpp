@@ -3,10 +3,13 @@
 #include "livemap/chunk.hpp"
 #include "livemap/land.hpp"
 #include "livemap/map_blocks.hpp"
-#include "livemap/map_tile.hpp"
+#include "livemap/png.hpp"
 #include "livemap/protocol.hpp"
+#include "livemap/r2_signing.hpp"
 #include "livemap/settings.hpp"
+#include "livemap/sha256.hpp"
 #include "livemap/tile_math.hpp"
+#include "livemap/tile_renderer.hpp"
 #include "livemap/upload_queue.hpp"
 
 #include <cassert>
@@ -14,7 +17,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <span>
 #include <variant>
 #include <vector>
 
@@ -299,6 +301,7 @@ void testProtocol()
     const std::vector<livemap::PlayerState> players = {{
         "uuid",
         "Player \"One\"",
+        "xuid-1",
         "world",
         "Overworld",
         12.5,
@@ -306,78 +309,83 @@ void testProtocol()
         -8.25,
         90.0,
         0.0,
+        "avatarhash",
+        "iVBORw0KGgo=",
         42,
     }};
     const auto json = livemap::serializePlayerSnapshot(players);
     assert(json.find("player_snapshot") != std::string::npos);
     assert(json.find("Player \\\"One\\\"") != std::string::npos);
+    assert(json.find("\"xuid\":\"xuid-1\"") != std::string::npos);
+    assert(json.find("\"avatarHash\":\"avatarhash\"") != std::string::npos);
+    assert(json.find("\"avatarPngBase64\":\"iVBORw0KGgo=\"") != std::string::npos);
     assert(json.find("\"z\":-8.25") != std::string::npos);
 
     const auto heartbeat = livemap::serializeHeartbeat("vvnas", 7);
     assert(heartbeat == "{\"type\":\"heartbeat\",\"serverId\":\"vvnas\",\"updatedAt\":7}");
 
-    livemap::ChunkSnapshot snapshot;
-    snapshot.world = "world";
-    snapshot.dimension = "Overworld";
-    snapshot.chunk_x = -1;
-    snapshot.chunk_z = 2;
-    snapshot.palette = {"minecraft:grass_block", "minecraft:water"};
-    snapshot.blocks.fill(0);
-    snapshot.blocks[3] = 1;
-    snapshot.heights.fill(64);
-    snapshot.heights[3] = 62;
-    snapshot.block_states[3] = {{"facing_direction", 1}};
-    snapshot.overlay_blocks.fill(0);
-    snapshot.overlay_heights.fill(-64);
-    snapshot.palette.push_back("minecraft:poppy");
-    snapshot.overlay_blocks[3] = 2;
-    snapshot.overlay_heights[3] = 63;
-    snapshot.overlay_states[3] = {{"open_bit", true}, {"direction", 2}};
-    snapshot.updated_at_ms = 99;
-    const auto chunk_json = livemap::serializeChunkSnapshot(snapshot);
-    assert(chunk_json.find("\"chunkX\":-1") != std::string::npos);
-    assert(chunk_json.find("\"palette\":[\"minecraft:grass_block\",\"minecraft:water\",\"minecraft:poppy\"]") != std::string::npos);
-    assert(chunk_json.find("\"blockStates\"") != std::string::npos);
-    assert(chunk_json.find("\"facing_direction\":1") != std::string::npos);
-    assert(chunk_json.find("\"overlayBlocks\"") != std::string::npos);
-    assert(chunk_json.find("\"overlayHeights\"") != std::string::npos);
-    assert(chunk_json.find("\"overlayStates\"") != std::string::npos);
-    assert(chunk_json.find("\"open_bit\":true") != std::string::npos);
-    assert(chunk_json.find("\"updatedAt\":99") != std::string::npos);
-    const auto chunk_batch_json = livemap::serializeChunkBatch({snapshot}, true);
-    assert(chunk_batch_json.find("\"broadcast\":true") != std::string::npos);
-    assert(chunk_batch_json.find("\"storage\":\"chunk\"") != std::string::npos);
-    assert(chunk_batch_json.find("\"chunks\":[{\"world\":\"world\"") != std::string::npos);
-    const auto region_batch_json = livemap::serializeChunkBatch({snapshot}, true, livemap::ChunkBatchStorage::Region);
-    assert(region_batch_json.find("\"broadcast\":true") != std::string::npos);
-    assert(region_batch_json.find("\"storage\":\"region\"") != std::string::npos);
-
-    livemap::BlockUpdateBatch batch;
-    batch.world = "world";
-    batch.dimension = "Overworld";
-    batch.chunk_x = 0;
-    batch.chunk_z = 0;
-    batch.updates.push_back({1, 2, "minecraft:stone", 70, {{"bite_counter", 3}}, "minecraft:poppy", 71, {{"facing_direction", 0}}});
-    batch.updated_at_ms = 100;
-    const auto update_json = livemap::serializeBlockUpdateBatch(batch);
-    assert(update_json.find("\"updates\":[{\"localX\":1,\"localZ\":2") != std::string::npos);
-    assert(update_json.find("\"block\":\"minecraft:stone\"") != std::string::npos);
-    assert(update_json.find("\"state\":{\"bite_counter\":3}") != std::string::npos);
-    assert(update_json.find("\"overlayBlock\":\"minecraft:poppy\"") != std::string::npos);
-    assert(update_json.find("\"overlayState\":{\"facing_direction\":0}") != std::string::npos);
-    livemap::BlockUpdateBatch second = batch;
-    second.chunk_x = 1;
-    const auto update_batches_json = livemap::serializeBlockUpdateBatches({batch, second});
-    assert(update_batches_json.find("\"batches\":[{\"world\":\"world\"") != std::string::npos);
-    assert(update_batches_json.find("\"chunkX\":1") != std::string::npos);
 }
 
 void testBase64()
 {
     const std::vector<std::uint8_t> bytes = {'M', 'a', 'p'};
-    assert(livemap::base64Encode(std::span<const std::uint8_t>(bytes.data(), bytes.size())) == "TWFw");
+    assert(livemap::base64Encode(bytes) == "TWFw");
     const std::vector<std::uint8_t> one = {'M'};
-    assert(livemap::base64Encode(std::span<const std::uint8_t>(one.data(), one.size())) == "TQ==");
+    assert(livemap::base64Encode(one) == "TQ==");
+}
+
+void testPngEncoding()
+{
+    auto image = livemap::makeRgbaImage(2, 2);
+    image.pixels = {
+        255, 0, 0, 255,
+        0, 255, 0, 255,
+        0, 0, 255, 255,
+        255, 255, 255, 255,
+    };
+    const auto png = livemap::encodePngRgba(image);
+    assert(png.size() > 40);
+    assert(png[0] == 137);
+    assert(png[1] == 80);
+    assert(png[2] == 78);
+    assert(png[3] == 71);
+    assert(std::string(reinterpret_cast<const char *>(png.data() + 12), 4) == "IHDR");
+}
+
+void testSha256AndHmac()
+{
+    assert(livemap::hexLower(livemap::sha256("abc")) ==
+           "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    const std::vector<std::uint8_t> key = {'k', 'e', 'y'};
+    assert(livemap::hexLower(livemap::hmacSha256(key, "The quick brown fox jumps over the lazy dog")) ==
+           "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8");
+}
+
+void testR2SigningAndRateLimit()
+{
+    livemap::R2SigningInput input;
+    input.endpoint = "https://account.r2.cloudflarestorage.com";
+    input.bucket = "bucket";
+    input.key = "map-tiles/v2/Bedrock_level/Overworld/z4/-1/2.png";
+    input.access_key_id = "ACCESS";
+    input.secret_access_key = "SECRET";
+    input.amz_date = "20260612T000000Z";
+    input.date_stamp = "20260612";
+    input.payload_sha256 = livemap::hexLower(livemap::sha256("payload"));
+    const auto signed_request = livemap::signR2Request(input);
+    assert(signed_request.url ==
+           "https://account.r2.cloudflarestorage.com/bucket/map-tiles/v2/Bedrock_level/Overworld/z4/-1/2.png");
+    assert(signed_request.canonical_request.find("host:account.r2.cloudflarestorage.com") != std::string::npos);
+    assert(signed_request.authorization.find("Credential=ACCESS/20260612/auto/s3/aws4_request") !=
+           std::string::npos);
+
+    livemap::UploadRateLimiter limiter(2);
+    assert(limiter.delayMs(0) == 0);
+    limiter.record(0);
+    assert(limiter.delayMs(1000) == 0);
+    limiter.record(1000);
+    assert(limiter.delayMs(2000) == 58000);
+    assert(limiter.delayMs(61000) == 0);
 }
 
 livemap::ChunkSnapshot makeBaselineTestSnapshot()
@@ -421,6 +429,68 @@ void testChunkSnapshotFingerprint()
     assert(std::get<int>(fourth.block_states[3].at("facing_direction")) == 2);
 }
 
+void testTileRendering()
+{
+    auto dir = std::filesystem::temp_directory_path() / "live_map_tile_render_test";
+    std::filesystem::remove_all(dir);
+
+    livemap::LiveMapSettings settings;
+    settings.tile_data_dir = dir.string();
+    settings.tile_min_zoom = -1;
+    settings.r2_key_prefix = "map-tiles/v2";
+
+    livemap::ChunkSnapshot snapshot;
+    snapshot.world = "Bedrock level";
+    snapshot.dimension = "Overworld";
+    snapshot.chunk_x = -1;
+    snapshot.chunk_z = 2;
+    snapshot.palette = {"minecraft:grass_block", "minecraft:redstone_wire", "minecraft:air"};
+    snapshot.blocks.fill(0);
+    snapshot.heights.fill(64);
+    snapshot.block_states[0] = {{"redstone_signal", 12}};
+    snapshot.blocks[0] = 1;
+    snapshot.overlay_blocks.fill(2);
+    snapshot.overlay_heights.fill(-64);
+    snapshot.updated_at_ms = 123;
+
+    const auto image = livemap::renderChunkTile(snapshot);
+    assert(image.width == 256);
+    assert(image.height == 256);
+    bool saw_alpha = false;
+    for (std::size_t index = 3; index < image.pixels.size(); index += 4) {
+        if (image.pixels[index] != 0) {
+            saw_alpha = true;
+            break;
+        }
+    }
+    assert(saw_alpha);
+
+    const auto result = livemap::renderChunkSnapshotsToTiles(settings, {snapshot});
+    assert(result.ok);
+    assert(result.chunks.size() == 1);
+    assert(result.tiles.size() == 6);
+    assert(std::filesystem::exists(livemap::tilePngPath(settings, "Bedrock level", "Overworld", 4, -1, 2)));
+    assert(std::filesystem::exists(livemap::tilePngPath(settings, "Bedrock level", "Overworld", 3, -1, 1)));
+    assert(livemap::renderedTileFilesExistForChunk(settings, {"Bedrock level", "Overworld", -1, 2}));
+    assert(livemap::tileR2Key(settings, "Bedrock level", "Overworld", 4, -1, 2) ==
+           "map-tiles/v2/Bedrock_level/Overworld/z4/-1/2.png");
+    const auto json = livemap::serializeTilesReady(result);
+    assert(json.find("\"type\":\"tiles_ready\"") != std::string::npos);
+    assert(json.find("\"zoom\":-1") != std::string::npos);
+
+    std::filesystem::remove(livemap::tilePngPath(settings, "Bedrock level", "Overworld", 3, -1, 1));
+    assert(!livemap::renderedTileFilesExistForChunk(settings, {"Bedrock level", "Overworld", -1, 2}));
+
+    const auto rerendered = livemap::renderChunkSnapshotsToTiles(settings, {snapshot});
+    assert(rerendered.ok);
+    assert(livemap::renderedTileFilesExistForChunk(settings, {"Bedrock level", "Overworld", -1, 2}));
+
+    std::filesystem::remove(livemap::tileRawPath(settings, "Bedrock level", "Overworld", 4, -1, 2));
+    assert(!livemap::renderedTileFilesExistForChunk(settings, {"Bedrock level", "Overworld", -1, 2}));
+
+    std::filesystem::remove_all(dir);
+}
+
 void testChunkBaselineIndex()
 {
     const auto path = std::filesystem::temp_directory_path() / "live_map_chunk_baselines_test.tsv";
@@ -456,72 +526,6 @@ void testChunkBaselineIndex()
     assert(loaded.skipped_lines == 1);
     assert(loaded.baselines.size() == 1);
     std::filesystem::remove(path);
-}
-
-void testChunkSnapshotStoreAndMapTileRendering()
-{
-    const auto dir = std::filesystem::temp_directory_path() / "live_map_tile_snapshot_cache_test";
-    std::filesystem::remove_all(dir);
-
-    auto snapshot = makeBaselineTestSnapshot();
-    snapshot.chunk_x = 0;
-    snapshot.chunk_z = 0;
-    snapshot.updated_at_ms = 123;
-
-    livemap::ChunkSnapshotStore store(dir);
-    std::string error;
-    assert(store.put(snapshot, &error));
-    const auto loaded = store.get({"world", "Overworld", 0, 0});
-    assert(loaded.has_value());
-    assert(loaded->palette == snapshot.palette);
-    assert(loaded->blocks[3] == snapshot.blocks[3]);
-    assert(loaded->heights[3] == snapshot.heights[3]);
-    assert(std::get<int>(loaded->block_states[3].at("facing_direction")) == 1);
-
-    const auto refs = livemap::mapTilesForChunk({"world", "Overworld", 0, 0});
-    assert(refs.size() == 5);
-    assert(refs.front().zoom == -1);
-    assert(refs.back().zoom == 3);
-    const auto negative_refs = livemap::mapTilesForChunk({"world", "Overworld", -1, -17});
-    assert(negative_refs[0].zoom == -1 && negative_refs[0].tile_x == -1 && negative_refs[0].tile_z == -1);
-    assert(negative_refs[4].zoom == 3 && negative_refs[4].tile_x == -1 && negative_refs[4].tile_z == -9);
-
-    const auto tiles = livemap::renderMapTilesForSnapshots(dir, {snapshot}, &error);
-    assert(tiles.size() == 5);
-    assert(tiles.front().source_version == 123);
-    assert(tiles.front().png.size() > 8);
-    assert(tiles.front().png[0] == 137);
-    assert(tiles.front().png[1] == 80);
-    assert(tiles.front().png[2] == 78);
-    assert(tiles.front().png[3] == 71);
-
-    auto same_tile_snapshot = snapshot;
-    same_tile_snapshot.chunk_x = 1;
-    same_tile_snapshot.updated_at_ms = 124;
-    const auto deduped_tiles = livemap::renderMapTilesForSnapshots(dir, {snapshot, same_tile_snapshot}, &error);
-    assert(deduped_tiles.size() == 5);
-
-    const auto empty_dir = std::filesystem::temp_directory_path() / "live_map_empty_tile_snapshot_cache_test";
-    std::filesystem::remove_all(empty_dir);
-    livemap::ChunkSnapshot empty_snapshot;
-    empty_snapshot.world = "world";
-    empty_snapshot.dimension = "Overworld";
-    empty_snapshot.palette = {"minecraft:air"};
-    empty_snapshot.blocks.fill(0);
-    empty_snapshot.heights.fill(-64);
-    empty_snapshot.overlay_blocks.fill(0);
-    empty_snapshot.overlay_heights.fill(-64);
-    empty_snapshot.updated_at_ms = 125;
-    assert(livemap::renderMapTilesForSnapshots(empty_dir, {empty_snapshot}, &error).empty());
-    std::filesystem::remove_all(empty_dir);
-
-    const auto json = livemap::serializeRenderedChunkBatch({snapshot}, tiles, true);
-    assert(json.find("\"storage\":\"region\"") != std::string::npos);
-    assert(json.find("\"tiles\":[") != std::string::npos);
-    assert(json.find("\"pngBase64\":\"") != std::string::npos);
-    assert(json.find("\"zoom\":3") != std::string::npos);
-
-    std::filesystem::remove_all(dir);
 }
 
 void testSettingsLegacyKeys()
@@ -594,15 +598,11 @@ void testSettingsDirtyBatchDefaults()
     const auto path = std::filesystem::temp_directory_path() / "live_map_dirty_batch_defaults_test.json";
     std::filesystem::remove(path);
     const auto settings = livemap::loadSettings(path);
+    assert(settings.player_seed_interval_seconds == 60);
+    assert(settings.max_seed_chunks_per_pulse == 4);
     assert(settings.dirty_block_push_seconds == 60);
     assert(settings.max_dirty_blocks_per_push == 2048);
     assert(settings.max_dirty_chunks_per_push == 64);
-    assert(settings.map_tile_render_enabled);
-    assert(settings.map_tile_render_threads == 1);
-    assert(settings.map_tile_render_flush_seconds == 15);
-    assert(settings.map_tile_upload_batch_size == 8);
-    assert(settings.max_tile_bundle_bytes == 2097152);
-    assert(settings.tile_snapshot_cache_dir == "tile_snapshot_cache");
 }
 
 void testSettingsNewKeysOverrideLegacyKeys()
@@ -617,6 +617,20 @@ void testSettingsNewKeysOverrideLegacyKeys()
             << "  \"max_tiles_per_refresh\": 64,\n"
             << "  \"http_timeout_seconds\": 2,\n"
             << "  \"land_config_file\": \"/tmp/land.json\",\n"
+            << "  \"local_server_url\": \"http://127.0.0.1:9001\",\n"
+            << "  \"tile_data_dir\": \"/tmp/live-map-tiles\",\n"
+            << "  \"tile_min_zoom\": -2,\n"
+            << "  \"tile_max_zoom\": 4,\n"
+            << "  \"render_worker_threads\": 99,\n"
+            << "  \"r2_enabled\": true,\n"
+            << "  \"r2_endpoint\": \"https://account.r2.cloudflarestorage.com\",\n"
+            << "  \"r2_bucket\": \"bucket\",\n"
+            << "  \"r2_region\": \"auto\",\n"
+            << "  \"r2_key_prefix\": \"map-tiles/v2\",\n"
+            << "  \"r2_max_concurrent_uploads\": 99,\n"
+            << "  \"r2_max_uploads_per_minute\": 9999,\n"
+            << "  \"r2_retry_count\": 99,\n"
+            << "  \"r2_retry_backoff_ms\": 1,\n"
             << "  \"land_push_seconds\": 120,\n"
             << "  \"upload_chunks\": true,\n"
             << "  \"upload_tiles\": false,\n"
@@ -631,6 +645,20 @@ void testSettingsNewKeysOverrideLegacyKeys()
     assert(settings.chunk_upload_batch_size == 8);
     assert(settings.http_timeout_seconds == 5);
     assert(settings.land_config_file == "/tmp/land.json");
+    assert(settings.local_server_url == "http://127.0.0.1:9001");
+    assert(settings.tile_data_dir == "/tmp/live-map-tiles");
+    assert(settings.tile_min_zoom == -2);
+    assert(settings.tile_max_zoom == 4);
+    assert(settings.render_worker_threads == 8);
+    assert(settings.r2_enabled);
+    assert(settings.r2_endpoint == "https://account.r2.cloudflarestorage.com");
+    assert(settings.r2_bucket == "bucket");
+    assert(settings.r2_region == "auto");
+    assert(settings.r2_key_prefix == "map-tiles/v2");
+    assert(settings.r2_max_concurrent_uploads == 4);
+    assert(settings.r2_max_uploads_per_minute == 600);
+    assert(settings.r2_retry_count == 10);
+    assert(settings.r2_retry_backoff_ms == 100);
     assert(settings.land_push_seconds == 120);
     assert(settings.upload_chunks);
     assert(!settings.auto_seed_chunks);
@@ -691,9 +719,12 @@ int main()
     testLatestUploadSlot();
     testProtocol();
     testBase64();
+    testPngEncoding();
+    testSha256AndHmac();
+    testR2SigningAndRateLimit();
     testChunkSnapshotFingerprint();
     testChunkBaselineIndex();
-    testChunkSnapshotStoreAndMapTileRendering();
+    testTileRendering();
     testSettingsLegacyKeys();
     testSettingsDirtyBatchDefaults();
     testSettingsNewKeysOverrideLegacyKeys();

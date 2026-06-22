@@ -115,13 +115,4 @@ struct BlockColumnUpdate {
     BlockStateMap overlay_state;
 };
 
-struct BlockUpdateBatch {
-    std::string world;
-    std::string dimension;
-    int chunk_x{};
-    int chunk_z{};
-    std::vector<BlockColumnUpdate> updates;
-    std::int64_t updated_at_ms{};
-};
-
 }  // namespace livemap

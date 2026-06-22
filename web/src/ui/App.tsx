@@ -27,9 +27,34 @@ export function App() {
 
   useEffect(() => {
     listWorlds()
-      .then(setWorlds)
+      .then((nextWorlds) => {
+        setWorlds(nextWorlds);
+        setError("");
+      })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }, []);
+
+  useEffect(() => {
+    if (!live.tilesReady) {
+      return;
+    }
+    let cancelled = false;
+    listWorlds()
+      .then((nextWorlds) => {
+        if (!cancelled) {
+          setWorlds(nextWorlds);
+          setError("");
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [live.tilesReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,9 +98,7 @@ export function App() {
           players={selectedPlayers}
           lands={publicLands}
           worldMeta={selectedWorldMeta}
-          chunkReady={live.chunkReady}
-          chunksReady={live.chunksReady}
-          blockUpdates={live.blockUpdates}
+          tilesReady={live.tilesReady}
           focusTarget={focusTarget}
         />
         <div className="map-hud" aria-label="地图状态">

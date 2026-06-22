@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { PlayerList } from "../src/ui/PlayerList";
 import { LandList } from "../src/ui/LandList";
-import { coordinateCopyText } from "../src/ui/MapCanvas";
+import { coordinateCopyText, mergeMapBounds } from "../src/ui/MapCanvas";
 import type { LandClaim } from "../src/api";
 
 describe("MapCanvas coordinate helpers", () => {
@@ -14,11 +14,29 @@ describe("MapCanvas coordinate helpers", () => {
   it("falls back to y=0 before block height is loaded", () => {
     expect(coordinateCopyText({ x: -12, height: Number.NaN, z: 35 })).toBe("-12, 0, 35");
   });
+
+  it("expands map bounds with live player bounds", () => {
+    expect(
+      mergeMapBounds(
+        { minChunkX: 0, maxChunkX: 1, minChunkZ: 0, maxChunkZ: 1, minBlockX: 0, maxBlockX: 31, minBlockZ: 0, maxBlockZ: 31 },
+        { minChunkX: -4, maxChunkX: -3, minChunkZ: 5, maxChunkZ: 6, minBlockX: -64, maxBlockX: -33, minBlockZ: 80, maxBlockZ: 111 },
+      ),
+    ).toEqual({
+      minChunkX: -4,
+      maxChunkX: 1,
+      minChunkZ: 0,
+      maxChunkZ: 6,
+      minBlockX: -64,
+      maxBlockX: 31,
+      minBlockZ: 0,
+      maxBlockZ: 111,
+    });
+  });
 });
 
 describe("PlayerList", () => {
   it("shows online player coordinates", () => {
-    render(
+    const { container } = render(
       <PlayerList
         players={[
           {
@@ -31,6 +49,8 @@ describe("PlayerList", () => {
             z: -8.6,
             yaw: 0,
             pitch: 0,
+            avatarHash: "abc123",
+            avatarUrl: "/api/players/1/avatar.png?_=abc123",
             updatedAt: 1,
           },
         ]}
@@ -39,6 +59,7 @@ describe("PlayerList", () => {
 
     expect(screen.getByText("Wing")).toBeInTheDocument();
     expect(screen.getByText("12, 64, -9")).toBeInTheDocument();
+    expect(container.querySelector(".avatar img")).toHaveAttribute("src", "/api/players/1/avatar.png?_=abc123");
   });
 
   it("selects a player from the list", () => {

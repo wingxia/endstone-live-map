@@ -1,7 +1,7 @@
 import { Clipboard, ClipboardCheck } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { segmentKey, type BlockUpdatesMessage, type ChunkReadyMessage, type ChunksReadyMessage, type LandClaim, type PlayerState, type WorldMeta } from "../api";
+import { playerAvatarUrl, segmentKey, type LandClaim, type PlayerState, type TilesReadyMessage, type WorldMeta } from "../api";
 import { blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "./coords";
 import { createChunkGridLayer, INITIAL_MAP_ZOOM, MIN_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
@@ -25,13 +25,11 @@ interface MapCanvasProps {
   players: PlayerState[];
   lands: LandClaim[];
   worldMeta: WorldMeta | null;
-  chunkReady: ChunkReadyMessage | null;
-  chunksReady: ChunksReadyMessage | null;
-  blockUpdates: BlockUpdatesMessage | null;
+  tilesReady: TilesReadyMessage | null;
   focusTarget: { x: number; z: number; nonce: number } | null;
 }
 
-export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkReady, chunksReady, blockUpdates, focusTarget }: MapCanvasProps) {
+export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesReady, focusTarget }: MapCanvasProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const stateRef = useRef<{
     map: import("leaflet").Map;
@@ -62,7 +60,9 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
         minZoom: MIN_MAP_ZOOM,
         maxZoom: INITIAL_MAP_ZOOM,
       }).setView([0, 0], INITIAL_MAP_ZOOM);
-
+      if (navigator.webdriver) {
+        (window as unknown as { __endstoneLiveMapLeaflet?: import("leaflet").Map }).__endstoneLiveMapLeaflet = map;
+      }
       L.control.zoom({ position: "bottomright" }).addTo(map);
       const chunkLayer = createChunkGridLayer(L, world, dimension).addTo(map);
 
@@ -117,8 +117,9 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
     }
     const playerBounds = players.length > 0 ? boundsForPlayers(players) : null;
     const meta = isWorldMetaForMap(worldMeta, world, dimension) ? worldMeta : null;
+    const knownBounds = mergeMapBounds(meta?.bounds || null, playerBounds);
     const autoFitKey = autoFitKeyFor(world, dimension, meta, playerBounds);
-    state.chunkLayer.setKnownBounds(meta?.bounds || null, meta?.updatedAt);
+    state.chunkLayer.setKnownBounds(knownBounds, meta?.updatedAt);
     if (!meta && !playerBounds) {
       state.chunkLayer.setActive(false);
       if (autoFitKeyRef.current !== autoFitKey) {
@@ -131,8 +132,8 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
       if (playerBounds) {
         state.map.fitBounds(
           [
-            minecraftToLeaflet(playerBounds.minX, playerBounds.maxZ),
-            minecraftToLeaflet(playerBounds.maxX, playerBounds.minZ),
+            minecraftToLeaflet(playerBounds.minBlockX, playerBounds.maxBlockZ),
+            minecraftToLeaflet(playerBounds.maxBlockX, playerBounds.minBlockZ),
           ],
           { animate: false, padding: [24, 24], maxZoom: INITIAL_MAP_ZOOM },
         );
@@ -146,22 +147,10 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
   }, [dimension, mapReady, players, world, worldMeta]);
 
   useEffect(() => {
-    if (chunkReady) {
-      stateRef.current?.chunkLayer.refreshChunk(chunkReady);
+    if (tilesReady) {
+      stateRef.current?.chunkLayer.refreshTiles(tilesReady);
     }
-  }, [chunkReady]);
-
-  useEffect(() => {
-    if (chunksReady) {
-      stateRef.current?.chunkLayer.refreshChunks(chunksReady);
-    }
-  }, [chunksReady]);
-
-  useEffect(() => {
-    if (blockUpdates) {
-      stateRef.current?.chunkLayer.applyBlockUpdates(blockUpdates);
-    }
-  }, [blockUpdates]);
+  }, [tilesReady]);
 
   useEffect(() => {
     const state = stateRef.current;
@@ -238,12 +227,14 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, chunkRe
       state.layers.clearLayers();
 
       for (const player of players) {
-        L.circleMarker(minecraftToLeaflet(player.x, player.z), {
-          radius: 7,
-          color: "#111827",
-          weight: 2,
-          fillColor: "#46d9a5",
-          fillOpacity: 0.95,
+        L.marker(minecraftToLeaflet(player.x, player.z), {
+          icon: L.divIcon({
+            className: "player-marker",
+            html: playerMarkerHtml(player),
+            iconSize: [36, 48],
+            iconAnchor: [18, 42],
+          }),
+          keyboard: false,
         })
           .bindTooltip(`${escapeHtml(player.name)} (${Math.round(player.x)}, ${Math.round(player.y)}, ${Math.round(player.z)})`, {
             permanent: false,
@@ -409,14 +400,43 @@ function autoFitKeyFor(world: string, dimension: string, meta: WorldMeta | null,
   return `${prefix}/empty`;
 }
 
-function boundsForPlayers(players: PlayerState[]) {
+function boundsForPlayers(players: PlayerState[]): WorldMeta["bounds"] {
   const xs = players.map((player) => player.x);
   const zs = players.map((player) => player.z);
+  const minBlockX = Math.floor(Math.min(...xs) - LIVE_PLAYER_PADDING_BLOCKS);
+  const maxBlockX = Math.ceil(Math.max(...xs) + LIVE_PLAYER_PADDING_BLOCKS);
+  const minBlockZ = Math.floor(Math.min(...zs) - LIVE_PLAYER_PADDING_BLOCKS);
+  const maxBlockZ = Math.ceil(Math.max(...zs) + LIVE_PLAYER_PADDING_BLOCKS);
+  const minChunk = blockToChunk(minBlockX, minBlockZ);
+  const maxChunk = blockToChunk(maxBlockX, maxBlockZ);
   return {
-    minX: Math.floor(Math.min(...xs) - LIVE_PLAYER_PADDING_BLOCKS),
-    maxX: Math.ceil(Math.max(...xs) + LIVE_PLAYER_PADDING_BLOCKS),
-    minZ: Math.floor(Math.min(...zs) - LIVE_PLAYER_PADDING_BLOCKS),
-    maxZ: Math.ceil(Math.max(...zs) + LIVE_PLAYER_PADDING_BLOCKS),
+    minChunkX: minChunk.chunkX,
+    maxChunkX: maxChunk.chunkX,
+    minChunkZ: minChunk.chunkZ,
+    maxChunkZ: maxChunk.chunkZ,
+    minBlockX,
+    maxBlockX,
+    minBlockZ,
+    maxBlockZ,
+  };
+}
+
+export function mergeMapBounds(left: WorldMeta["bounds"] | null, right: WorldMeta["bounds"] | null): WorldMeta["bounds"] | null {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  return {
+    minChunkX: Math.min(left.minChunkX, right.minChunkX),
+    maxChunkX: Math.max(left.maxChunkX, right.maxChunkX),
+    minChunkZ: Math.min(left.minChunkZ, right.minChunkZ),
+    maxChunkZ: Math.max(left.maxChunkZ, right.maxChunkZ),
+    minBlockX: Math.min(left.minBlockX, right.minBlockX),
+    maxBlockX: Math.max(left.maxBlockX, right.maxBlockX),
+    minBlockZ: Math.min(left.minBlockZ, right.minBlockZ),
+    maxBlockZ: Math.max(left.maxBlockZ, right.maxBlockZ),
   };
 }
 
@@ -424,6 +444,16 @@ function landTooltip(land: LandClaim) {
   const size = land.minX === land.maxX && land.minZ === land.maxZ ? "点位" : `${land.minX}, ${land.minZ} 到 ${land.maxX}, ${land.maxZ}`;
   const parent = land.parent ? `<br/>父领地 ${escapeHtml(land.parent)}` : "";
   return `${escapeHtml(land.name)}<br/>所属 ${escapeHtml(land.owner)}<br/>范围 ${size}<br/>TP ${land.teleport.x}, ${land.teleport.y}, ${land.teleport.z}<br/>成员 ${land.members.length}${parent}`;
+}
+
+function playerMarkerHtml(player: PlayerState) {
+  const avatar = playerAvatarUrl(player);
+  const initial = escapeHtml((player.name || "?").slice(0, 1).toUpperCase());
+  const name = escapeHtml(player.name || "Player");
+  const avatarHtml = avatar
+    ? `<img class="player-marker-avatar" src="${escapeAttribute(avatar)}" alt="" loading="lazy" />`
+    : `<span class="player-marker-fallback">${initial}</span>`;
+  return `<span class="player-marker-frame">${avatarHtml}</span><span class="player-marker-name">${name}</span>`;
 }
 
 function escapeHtml(value: string) {
@@ -437,4 +467,8 @@ function escapeHtml(value: string) {
     };
     return entities[char];
   });
+}
+
+function escapeAttribute(value: string) {
+  return escapeHtml(value);
 }

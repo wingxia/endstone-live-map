@@ -1,4 +1,4 @@
-import type { ChunkSnapshot, LandClaim, PlayerState, WorldMeta } from "./api";
+import type { LandClaim, PlayerState, WorldMeta } from "./api";
 
 const MOCK_WORLD = "Bedrock level";
 
@@ -84,8 +84,6 @@ export const mockLands: LandClaim[] = [
   },
 ];
 
-export const mockChunks: ChunkSnapshot[] = createMockChunks();
-
 export const mockWorlds: WorldMeta[] = [
   {
     version: 1,
@@ -108,27 +106,3 @@ export const mockWorlds: WorldMeta[] = [
     topBlocks: { "minecraft:grass_block": 52000, "minecraft:water": 11000 },
   },
 ];
-
-function createMockChunks(): ChunkSnapshot[] {
-  const chunks: ChunkSnapshot[] = [];
-  for (let chunkZ = -8; chunkZ <= 8; chunkZ += 1) {
-    for (let chunkX = -8; chunkX <= 8; chunkX += 1) {
-      const palette = ["minecraft:grass_block", "minecraft:water", "minecraft:sand", "minecraft:stone", "minecraft:spruce_log"];
-      const blocks: number[] = [];
-      const heights: number[] = [];
-      for (let localZ = 0; localZ < 16; localZ += 1) {
-        for (let localX = 0; localX < 16; localX += 1) {
-          const x = chunkX * 16 + localX;
-          const z = chunkZ * 16 + localZ;
-          const ridge = Math.sin(x / 18) + Math.cos(z / 21);
-          const river = Math.abs(Math.sin((x + z) / 30)) < 0.08;
-          const block = river ? 1 : ridge > 1.25 ? 3 : Math.abs(x) < 7 && Math.abs(z) < 7 ? 2 : (x + z) % 19 === 0 ? 4 : 0;
-          blocks.push(block);
-          heights.push(block === 1 ? 62 : Math.round(66 + ridge * 5));
-        }
-      }
-      chunks.push({ world: MOCK_WORLD, dimension: "Overworld", chunkX, chunkZ, palette, blocks, heights, updatedAt: Date.now() });
-    }
-  }
-  return chunks;
-}
