@@ -166,7 +166,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       const internals = this as unknown as GridLayerInternals;
       let refreshed = false;
       for (const tile of Object.values(internals._tiles || {})) {
-        if (!tile.current || !changedChunks.some((chunk) => tileIntersectsChunk(tile.coords, chunk))) {
+        if (!changedChunks.some((chunk) => tileIntersectsChunk(tile.coords, chunk))) {
           continue;
         }
         refreshed = true;
@@ -183,7 +183,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     private redrawVisibleImageTiles() {
       const internals = this as unknown as GridLayerInternals;
       for (const record of Object.values(internals._tiles || {})) {
-        if (!record.current || !(record.el instanceof HTMLImageElement)) {
+        if (!(record.el instanceof HTMLImageElement)) {
           continue;
         }
         record.el.classList.remove("chunk-image-tile-missing");
