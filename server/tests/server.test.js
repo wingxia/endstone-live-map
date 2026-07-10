@@ -29,6 +29,17 @@ describe("local live map server", () => {
     expect(cleanSegment("Bedrock level")).toBe("Bedrock_level");
   });
 
+  it("advertises the generated low-zoom tile floor", async () => {
+    const response = await fetch(`${baseUrl}/api/config`);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      tileSize: 256,
+      minZoom: -8,
+      nativeMinZoom: -8,
+      maxZoom: 4,
+    });
+  });
+
   it("protects plugin endpoints with the configured token", async () => {
     const unauthorized = await fetch(`${baseUrl}/api/plugin/tiles`, { method: "POST", body: "{}" });
     expect(unauthorized.status).toBe(401);

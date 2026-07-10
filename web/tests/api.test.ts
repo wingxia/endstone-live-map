@@ -105,6 +105,8 @@ describe("api helpers", () => {
       minChunkZ: -32,
       maxChunkZ: -1,
     });
+    expect(isImageTileZoom(-9)).toBe(false);
+    expect(isImageTileZoom(-8)).toBe(true);
     expect(isImageTileZoom(-1)).toBe(true);
     expect(isImageTileZoom(4)).toBe(true);
     expect(

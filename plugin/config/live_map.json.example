@@ -7,7 +7,7 @@
   "land_config_file": "/vol1/1000/bedrock_server/plugins/land/land.json",
   "tile_data_dir": "map-data",
   "dimensions": ["Overworld", "Nether", "TheEnd"],
-  "tile_min_zoom": -1,
+  "tile_min_zoom": -8,
   "tile_max_zoom": 4,
   "render_worker_threads": 2,
   "scan_radius_chunks": 8,

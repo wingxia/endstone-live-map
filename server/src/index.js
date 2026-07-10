@@ -55,7 +55,14 @@ export async function handleRequest(state, request, response) {
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/config") {
-    json(response, 200, { tileSize: 256, minZoom: -1, maxZoom: 4, defaultWorld: "Bedrock level", dimensions: ["Overworld", "Nether", "TheEnd"] });
+    json(response, 200, {
+      tileSize: 256,
+      minZoom: -8,
+      nativeMinZoom: -8,
+      maxZoom: 4,
+      defaultWorld: "Bedrock level",
+      dimensions: ["Overworld", "Nether", "TheEnd"],
+    });
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/worlds") {

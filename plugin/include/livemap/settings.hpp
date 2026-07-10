@@ -20,7 +20,7 @@ struct LiveMapSettings {
     std::string r2_region = "auto";
     std::string r2_key_prefix = "map-tiles/v2";
     std::vector<std::string> dimensions = {"Overworld"};
-    int tile_min_zoom = -1;
+    int tile_min_zoom = -8;
     int tile_max_zoom = 4;
     int render_worker_threads = 2;
     int scan_radius_chunks = 8;

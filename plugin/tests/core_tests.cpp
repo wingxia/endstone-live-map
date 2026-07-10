@@ -436,7 +436,7 @@ void testTileRendering()
 
     livemap::LiveMapSettings settings;
     settings.tile_data_dir = dir.string();
-    settings.tile_min_zoom = -1;
+    settings.tile_min_zoom = -8;
     settings.r2_key_prefix = "map-tiles/v2";
 
     livemap::ChunkSnapshot snapshot;
@@ -468,7 +468,7 @@ void testTileRendering()
     const auto result = livemap::renderChunkSnapshotsToTiles(settings, {snapshot});
     assert(result.ok);
     assert(result.chunks.size() == 1);
-    assert(result.tiles.size() == 6);
+    assert(result.tiles.size() == 13);
     assert(std::filesystem::exists(livemap::tilePngPath(settings, "Bedrock level", "Overworld", 4, -1, 2)));
     assert(std::filesystem::exists(livemap::tilePngPath(settings, "Bedrock level", "Overworld", 3, -1, 1)));
     assert(livemap::renderedTileFilesExistForChunk(settings, {"Bedrock level", "Overworld", -1, 2}));
@@ -476,7 +476,7 @@ void testTileRendering()
            "map-tiles/v2/Bedrock_level/Overworld/z4/-1/2.png");
     const auto json = livemap::serializeTilesReady(result);
     assert(json.find("\"type\":\"tiles_ready\"") != std::string::npos);
-    assert(json.find("\"zoom\":-1") != std::string::npos);
+    assert(json.find("\"zoom\":-8") != std::string::npos);
 
     std::filesystem::remove(livemap::tilePngPath(settings, "Bedrock level", "Overworld", 3, -1, 1));
     assert(!livemap::renderedTileFilesExistForChunk(settings, {"Bedrock level", "Overworld", -1, 2}));
@@ -600,6 +600,7 @@ void testSettingsDirtyBatchDefaults()
     const auto settings = livemap::loadSettings(path);
     assert(settings.player_seed_interval_seconds == 60);
     assert(settings.max_seed_chunks_per_pulse == 4);
+    assert(settings.tile_min_zoom == -8);
     assert(settings.dirty_block_push_seconds == 60);
     assert(settings.max_dirty_blocks_per_push == 2048);
     assert(settings.max_dirty_chunks_per_push == 64);
@@ -619,7 +620,7 @@ void testSettingsNewKeysOverrideLegacyKeys()
             << "  \"land_config_file\": \"/tmp/land.json\",\n"
             << "  \"local_server_url\": \"http://127.0.0.1:9001\",\n"
             << "  \"tile_data_dir\": \"/tmp/live-map-tiles\",\n"
-            << "  \"tile_min_zoom\": -2,\n"
+            << "  \"tile_min_zoom\": -99,\n"
             << "  \"tile_max_zoom\": 4,\n"
             << "  \"render_worker_threads\": 99,\n"
             << "  \"r2_enabled\": true,\n"
@@ -647,7 +648,7 @@ void testSettingsNewKeysOverrideLegacyKeys()
     assert(settings.land_config_file == "/tmp/land.json");
     assert(settings.local_server_url == "http://127.0.0.1:9001");
     assert(settings.tile_data_dir == "/tmp/live-map-tiles");
-    assert(settings.tile_min_zoom == -2);
+    assert(settings.tile_min_zoom == -8);
     assert(settings.tile_max_zoom == 4);
     assert(settings.render_worker_threads == 8);
     assert(settings.r2_enabled);

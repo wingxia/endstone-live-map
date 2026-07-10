@@ -48,12 +48,12 @@ test("refreshes visible tiles and world metadata after live tile updates", async
   expect(requests.legacy.length).toBe(0);
 });
 
-test("uses generated PNG tiles for every zoom level from z4 through z-1", async ({ page }) => {
+test("uses generated PNG tiles for every zoom level from z4 through z-8", async ({ page }) => {
   const requests = await mockLiveMap(page, { players: false });
   await page.goto("/");
   await expect(page.getByTestId("map-canvas")).toBeVisible();
   await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("/api/map-tiles/Bedrock_level/Overworld/z4/")))).toBe(true);
-  for (const zoom of ["z3", "z2", "z1", "z0", "z-1"]) {
+  for (const zoom of ["z3", "z2", "z1", "z0", "z-1", "z-2", "z-3", "z-4", "z-5", "z-6", "z-7", "z-8"]) {
     await page.evaluate((zoomLabel) => {
       const zoomNumber = Number(String(zoomLabel).slice(1));
       const leafletMap = (window as unknown as { __endstoneLiveMapLeaflet?: { setZoom?: (zoom: number, options?: { animate?: boolean }) => void } }).__endstoneLiveMapLeaflet;
@@ -61,6 +61,27 @@ test("uses generated PNG tiles for every zoom level from z4 through z-1", async 
     }, zoom);
     await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes(`/api/map-tiles/Bedrock_level/Overworld/${zoom}/`)))).toBe(true);
   }
+  expect(requests.legacy.length).toBe(0);
+});
+
+test("keeps map tiles visible while zooming out beyond the generated tile floor", async ({ page }) => {
+  const requests = await mockLiveMap(page, { players: false });
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("/api/map-tiles/Bedrock_level/Overworld/z4/")))).toBe(true);
+
+  await page.evaluate(() => {
+    const leafletMap = (window as unknown as { __endstoneLiveMapLeaflet?: { setZoom?: (zoom: number, options?: { animate?: boolean }) => void } }).__endstoneLiveMapLeaflet;
+    leafletMap?.setZoom?.(-8, { animate: false });
+  });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as unknown as { __endstoneLiveMapLeaflet?: { getZoom?: () => number } }).__endstoneLiveMapLeaflet?.getZoom?.()),
+    )
+    .toBe(-8);
+  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("/api/map-tiles/Bedrock_level/Overworld/z-8/")))).toBe(true);
+  expect(requests.tiles.some((url) => /\/z-9\//.test(url))).toBe(false);
   expect(requests.legacy.length).toBe(0);
 });
 

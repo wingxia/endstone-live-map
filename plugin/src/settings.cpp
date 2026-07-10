@@ -162,7 +162,7 @@ LiveMapSettings loadSettings(const std::filesystem::path &path)
     settings.upload_lands = boolValue(source, "upload_lands", settings.upload_lands);
     settings.r2_enabled = boolValue(source, "r2_enabled", settings.r2_enabled);
 
-    settings.tile_min_zoom = std::clamp(settings.tile_min_zoom, -4, 4);
+    settings.tile_min_zoom = std::clamp(settings.tile_min_zoom, -8, 4);
     settings.tile_max_zoom = std::clamp(settings.tile_max_zoom, settings.tile_min_zoom, 4);
     settings.render_worker_threads = std::clamp(settings.render_worker_threads, 1, 8);
     settings.scan_radius_chunks = std::clamp(settings.scan_radius_chunks, 0, 16);
@@ -204,7 +204,7 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"land_config_file\": \"/vol1/1000/bedrock_server/plugins/land/land.json\",\n"
         << "  \"tile_data_dir\": \"map-data\",\n"
         << "  \"dimensions\": [\"Overworld\", \"Nether\", \"TheEnd\"],\n"
-        << "  \"tile_min_zoom\": -1,\n"
+        << "  \"tile_min_zoom\": -8,\n"
         << "  \"tile_max_zoom\": 4,\n"
         << "  \"render_worker_threads\": 2,\n"
         << "  \"scan_radius_chunks\": 8,\n"

@@ -9,7 +9,7 @@ const TILE_SIZE = 256;
 const MAX_ZOOM = 4;
 const TILE_KEEP_BUFFER = 2;
 
-export const MIN_MAP_ZOOM = -1;
+export const MIN_MAP_ZOOM = -8;
 export const INITIAL_MAP_ZOOM = 4;
 
 interface ChunkLayerOptions {
