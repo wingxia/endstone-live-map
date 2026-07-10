@@ -491,6 +491,136 @@ void testTileRendering()
     std::filesystem::remove_all(dir);
 }
 
+livemap::ChunkSnapshot makeTilePyramidSnapshot(int chunk_x, int chunk_z, std::int64_t updated_at_ms)
+{
+    livemap::ChunkSnapshot snapshot;
+    snapshot.world = "Bedrock level";
+    snapshot.dimension = "Overworld";
+    snapshot.chunk_x = chunk_x;
+    snapshot.chunk_z = chunk_z;
+    snapshot.palette = {"minecraft:grass_block", "minecraft:air"};
+    snapshot.blocks.fill(0);
+    snapshot.heights.fill(64);
+    snapshot.overlay_blocks.fill(1);
+    snapshot.overlay_heights.fill(-64);
+    snapshot.updated_at_ms = updated_at_ms;
+    return snapshot;
+}
+
+void testTilePyramidBatchingAndRepair()
+{
+    auto dir = std::filesystem::temp_directory_path() / "live_map_tile_pyramid_repair_test";
+    std::filesystem::remove_all(dir);
+
+    livemap::LiveMapSettings settings;
+    settings.tile_data_dir = dir.string();
+    settings.tile_min_zoom = 3;
+
+    const auto adjacent = livemap::renderChunkSnapshotsToTiles(
+        settings, {makeTilePyramidSnapshot(0, 0, 100), makeTilePyramidSnapshot(1, 0, 101)});
+    assert(adjacent.ok);
+    assert(adjacent.chunks.size() == 2);
+    assert(adjacent.tiles.size() == 3);
+    const auto parent = livemap::readRawRgba(
+        livemap::tileRawPath(settings, "Bedrock level", "Overworld", 3, 0, 0),
+        livemap::kMapTileSize, livemap::kMapTileSize);
+    const auto alpha_at = [&parent](int x, int y) {
+        return parent.pixels[(static_cast<std::size_t>(y) * parent.width + static_cast<std::size_t>(x)) * 4 + 3];
+    };
+    assert(alpha_at(64, 64) > 0);
+    assert(alpha_at(192, 64) > 0);
+
+    std::filesystem::remove_all(dir);
+    settings.tile_min_zoom = -1;
+    const std::vector<livemap::ChunkSnapshot> historical = {
+        makeTilePyramidSnapshot(-9, 4, 200),
+        makeTilePyramidSnapshot(20, -17, 201),
+        makeTilePyramidSnapshot(21, -17, 202),
+    };
+    const auto historical_render = livemap::renderChunkSnapshotsToTiles(settings, historical);
+    assert(historical_render.ok);
+    for (const auto &snapshot : historical) {
+        assert(livemap::renderedTileFilesExistForChunk(
+            settings, {snapshot.world, snapshot.dimension, snapshot.chunk_x, snapshot.chunk_z}));
+    }
+
+    settings.tile_min_zoom = -4;
+    for (const auto &snapshot : historical) {
+        assert(!livemap::renderedTileFilesExistForChunk(
+            settings, {snapshot.world, snapshot.dimension, snapshot.chunk_x, snapshot.chunk_z}));
+    }
+
+    const auto repair = livemap::repairMissingTilePyramid(settings);
+    assert(repair.ok);
+    assert(repair.tiles.size() == 6);
+    for (const auto &tile : repair.tiles) {
+        assert(tile.zoom <= -2);
+        assert(tile.has_pixels);
+    }
+    for (const auto &snapshot : historical) {
+        assert(livemap::renderedTileFilesExistForChunk(
+            settings, {snapshot.world, snapshot.dimension, snapshot.chunk_x, snapshot.chunk_z}));
+    }
+    const auto repair_json = livemap::serializeTilesReady(repair);
+    assert(repair_json.find("\"chunks\":[]") != std::string::npos);
+    assert(repair_json.find("\"updatedAt\":0") == std::string::npos);
+
+    const auto no_op_repair = livemap::repairMissingTilePyramid(settings);
+    assert(no_op_repair.ok);
+    assert(no_op_repair.tiles.empty());
+
+    const auto damaged_png = livemap::tilePngPath(settings, "Bedrock level", "Overworld", -3, -1, 0);
+    const auto damaged_raw = livemap::tileRawPath(settings, "Bedrock level", "Overworld", -3, -1, 0);
+    std::filesystem::remove(damaged_png);
+    {
+        std::ofstream out(damaged_raw, std::ios::binary | std::ios::trunc);
+        out.put('\0');
+    }
+    assert(!livemap::renderedTileFilesExistForChunk(
+        settings, {historical[0].world, historical[0].dimension, historical[0].chunk_x, historical[0].chunk_z}));
+    const auto damaged_repair = livemap::repairMissingTilePyramid(settings);
+    assert(damaged_repair.ok);
+    assert(damaged_repair.tiles.size() == 2);
+    assert(damaged_repair.tiles[0].zoom == -3);
+    assert(damaged_repair.tiles[1].zoom == -4);
+    assert(std::filesystem::file_size(damaged_raw) ==
+           static_cast<std::uintmax_t>(livemap::kMapTileSize) * livemap::kMapTileSize * 4);
+
+    std::filesystem::remove_all(dir);
+
+    settings.tile_min_zoom = -4;
+    const auto first_branch = livemap::renderChunkSnapshotsToTiles(settings, {makeTilePyramidSnapshot(0, 0, 300)});
+    assert(first_branch.ok);
+    const auto shared_ancestor_path =
+        livemap::tileRawPath(settings, "Bedrock level", "Overworld", -3, 0, 0);
+    const auto before = livemap::readRawRgba(shared_ancestor_path, livemap::kMapTileSize, livemap::kMapTileSize);
+    const auto alpha_pixels = [](const livemap::RgbaImage &image) {
+        std::size_t count = 0;
+        for (std::size_t index = 3; index < image.pixels.size(); index += 4) {
+            count += image.pixels[index] == 0 ? 0 : 1;
+        }
+        return count;
+    };
+    const auto before_alpha = alpha_pixels(before);
+
+    settings.tile_min_zoom = -1;
+    const auto second_branch =
+        livemap::renderChunkSnapshotsToTiles(settings, {makeTilePyramidSnapshot(64, 0, 301)});
+    assert(second_branch.ok);
+    settings.tile_min_zoom = -4;
+    const auto propagated_repair = livemap::repairMissingTilePyramid(settings);
+    assert(propagated_repair.ok);
+    assert(propagated_repair.tiles.size() == 3);
+    assert(propagated_repair.tiles[0].zoom == -2);
+    assert(propagated_repair.tiles[1].zoom == -3);
+    assert(propagated_repair.tiles[2].zoom == -4);
+    const auto after = livemap::readRawRgba(shared_ancestor_path, livemap::kMapTileSize, livemap::kMapTileSize);
+    assert(alpha_pixels(after) > before_alpha);
+    assert(livemap::repairMissingTilePyramid(settings).tiles.empty());
+
+    std::filesystem::remove_all(dir);
+}
+
 void testChunkBaselineIndex()
 {
     const auto path = std::filesystem::temp_directory_path() / "live_map_chunk_baselines_test.tsv";
@@ -726,6 +856,7 @@ int main()
     testChunkSnapshotFingerprint();
     testChunkBaselineIndex();
     testTileRendering();
+    testTilePyramidBatchingAndRepair();
     testSettingsLegacyKeys();
     testSettingsDirtyBatchDefaults();
     testSettingsNewKeysOverrideLegacyKeys();

@@ -50,6 +50,7 @@ struct TileRenderResult {
 [[nodiscard]] RgbaImage renderChunkTile(const ChunkSnapshot &snapshot);
 [[nodiscard]] TileRenderResult renderChunkSnapshotsToTiles(const LiveMapSettings &settings,
                                                            const std::vector<ChunkSnapshot> &snapshots);
+[[nodiscard]] TileRenderResult repairMissingTilePyramid(const LiveMapSettings &settings);
 [[nodiscard]] std::string serializeTilesReady(const TileRenderResult &result);
 
 }  // namespace livemap

@@ -7,7 +7,8 @@ Endstone Bedrock 服务器实时网页地图。当前版本把地图渲染迁回
 - 在网页上显示服务器地图，支持缩放、拖动、坐标 HUD 和移动端布局。
 - 实时显示在线玩家位置。
 - 保留公开领地显示：领地列表搜索、矩形/点位覆盖、传送点标记、点击聚焦、按维度过滤。
-- 在服务器本地生成 `z4` 基础瓦片，并从 `z4` 递归生成 `z3..z-8` 低缩放瓦片。
+- 在服务器本地生成 `z4` 基础瓦片；每批更新会先写完全部 `z4`，再按层去重生成 `z3..z-8` 父瓦片。
+- 插件启动和配置重载时会扫描现有 `z4` 金字塔并自动补齐缺失缩放层，调整 `tile_min_zoom` 不需要重新采样历史区块。
 - 每 60 秒扫描在线玩家附近已加载区块；对应区域已有完整本地瓦片且区块指纹未变时跳过，玩家改动会进入脏区块缓存并强制重采样。
 - 可选把生成完成的 PNG 瓦片直接上传到 Cloudflare R2，键格式为 `map-tiles/v2/<world>/<dimension>/z<zoom>/<tileX>/<tileZ>.png`。
 - Worker 现在只保留可选边缘能力：健康检查、从 R2 读取公开瓦片、受 token 保护的清理接口。
@@ -75,6 +76,7 @@ npm run server
 /livemap render-chunk <chunkX> <chunkZ>
 /livemap render-near [radius]
 /livemap render-area <minX> <minZ> <maxX> <maxZ>
+/livemap repair-pyramid
 /livemap status
 /livemap reload
 ```

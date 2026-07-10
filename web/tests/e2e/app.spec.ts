@@ -38,7 +38,18 @@ test("refreshes visible tiles and world metadata after live tile updates", async
       JSON.stringify({
         type: "tiles_ready",
         updatedAt: 999,
-        chunks: [{ world: "Bedrock level", dimension: "Overworld", chunkX: 0, chunkZ: 0, updatedAt: 999 }],
+        chunks: [],
+        tiles: [
+          {
+            world: "Bedrock level",
+            dimension: "Overworld",
+            zoom: 4,
+            tileX: 0,
+            tileZ: 0,
+            updatedAt: 999,
+            hasPixels: true,
+          },
+        ],
       }),
     );
   });

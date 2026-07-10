@@ -8,8 +8,12 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <map>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -25,6 +29,22 @@ struct Rgba {
     std::uint8_t b{};
     std::uint8_t a = 255;
 };
+
+using TileCoordinate = std::pair<int, int>;
+using TileGroupKey = std::pair<std::string, std::string>;
+using TileGroups = std::map<TileGroupKey, std::set<TileCoordinate>>;
+
+std::mutex &tilePyramidMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::int64_t nowMs()
+{
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+}
 
 std::string normalizedBlock(std::string_view block_id)
 {
@@ -353,6 +373,17 @@ bool fileExistsWithBytes(const std::filesystem::path &path)
     return std::filesystem::file_size(path, error) > 0 && !error;
 }
 
+bool rawTileFileIsComplete(const std::filesystem::path &path)
+{
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error)) {
+        return false;
+    }
+    constexpr std::uintmax_t expected_size =
+        static_cast<std::uintmax_t>(kMapTileSize) * kMapTileSize * 4;
+    return std::filesystem::file_size(path, error) == expected_size && !error;
+}
+
 Rgba average2x2(const RgbaImage &image, int x, int y)
 {
     int count = 0;
@@ -425,6 +456,174 @@ void writeTileFiles(const LiveMapSettings &settings, const RenderedTile &tile, c
     }
 }
 
+bool parseTileCoordinate(std::string_view text, int *coordinate)
+{
+    try {
+        std::size_t consumed = 0;
+        const auto value = std::stoi(std::string(text), &consumed);
+        if (consumed != text.size()) {
+            return false;
+        }
+        *coordinate = value;
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+std::set<TileCoordinate> rawTileCoordinates(const std::filesystem::path &zoom_path)
+{
+    std::set<TileCoordinate> coordinates;
+    if (!std::filesystem::is_directory(zoom_path)) {
+        return coordinates;
+    }
+    for (const auto &x_entry : std::filesystem::directory_iterator(zoom_path)) {
+        if (!x_entry.is_directory()) {
+            continue;
+        }
+        int tile_x = 0;
+        if (!parseTileCoordinate(x_entry.path().filename().string(), &tile_x)) {
+            continue;
+        }
+        for (const auto &z_entry : std::filesystem::directory_iterator(x_entry.path())) {
+            if (z_entry.path().extension() != ".rgba" || !rawTileFileIsComplete(z_entry.path())) {
+                continue;
+            }
+            int tile_z = 0;
+            if (parseTileCoordinate(z_entry.path().stem().string(), &tile_z)) {
+                coordinates.emplace(tile_x, tile_z);
+            }
+        }
+    }
+    return coordinates;
+}
+
+TileGroups baseTileGroups(const LiveMapSettings &settings)
+{
+    TileGroups groups;
+    const auto tile_root = std::filesystem::path(settings.tile_data_dir) / "tiles";
+    if (!std::filesystem::is_directory(tile_root)) {
+        return groups;
+    }
+    for (const auto &world_entry : std::filesystem::directory_iterator(tile_root)) {
+        if (!world_entry.is_directory()) {
+            continue;
+        }
+        for (const auto &dimension_entry : std::filesystem::directory_iterator(world_entry.path())) {
+            if (!dimension_entry.is_directory()) {
+                continue;
+            }
+            auto coordinates = rawTileCoordinates(dimension_entry.path() / ("z" + std::to_string(kMapTileBaseZoom)));
+            if (!coordinates.empty()) {
+                groups.emplace(TileGroupKey{world_entry.path().filename().string(),
+                                            dimension_entry.path().filename().string()},
+                               std::move(coordinates));
+            }
+        }
+    }
+    return groups;
+}
+
+TileGroups parentGroupsFor(const TileGroups &child_groups)
+{
+    TileGroups parent_groups;
+    for (const auto &[group, child_coordinates] : child_groups) {
+        auto &parent_coordinates = parent_groups[group];
+        for (const auto &[child_x, child_z] : child_coordinates) {
+            parent_coordinates.emplace(floorDiv(child_x, 2), floorDiv(child_z, 2));
+        }
+    }
+    return parent_groups;
+}
+
+RenderedTile renderParentTile(const LiveMapSettings &settings, const TileGroupKey &group, int source_zoom, int zoom,
+                              int parent_x, int parent_z, std::int64_t updated_at_ms)
+{
+    const auto &[world, dimension] = group;
+    auto parent_image = composeParentTile(settings, world, dimension, source_zoom, parent_x, parent_z);
+    RenderedTile parent;
+    parent.world = world;
+    parent.dimension = dimension;
+    parent.zoom = zoom;
+    parent.tile_x = parent_x;
+    parent.tile_z = parent_z;
+    parent.updated_at_ms = updated_at_ms;
+    parent.png_path = tilePngPath(settings, world, dimension, zoom, parent_x, parent_z);
+    parent.r2_key = tileR2Key(settings, world, dimension, zoom, parent_x, parent_z);
+    parent.has_pixels = hasPixels(parent_image);
+    writeTileFiles(settings, parent, parent_image);
+    return parent;
+}
+
+bool hasChangedChild(const std::set<TileCoordinate> &changed_children, int parent_x, int parent_z)
+{
+    for (int child_dz = 0; child_dz < 2; ++child_dz) {
+        for (int child_dx = 0; child_dx < 2; ++child_dx) {
+            if (changed_children.contains({parent_x * 2 + child_dx, parent_z * 2 + child_dz})) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void renderParentLevels(const LiveMapSettings &settings, TileGroups affected_children, std::int64_t updated_at_ms,
+                        TileRenderResult *result)
+{
+    int child_zoom = kMapTileBaseZoom;
+    for (int zoom = kMapTileBaseZoom - 1; zoom >= settings.tile_min_zoom; --zoom) {
+        auto affected_parents = parentGroupsFor(affected_children);
+        for (const auto &[group, parent_coordinates] : affected_parents) {
+            for (const auto &[parent_x, parent_z] : parent_coordinates) {
+                result->tiles.push_back(
+                    renderParentTile(settings, group, child_zoom, zoom, parent_x, parent_z, updated_at_ms));
+            }
+        }
+
+        affected_children = std::move(affected_parents);
+        child_zoom = zoom;
+        if (affected_children.empty()) {
+            break;
+        }
+    }
+}
+
+void repairParentLevels(const LiveMapSettings &settings, TileGroups source_groups, std::int64_t updated_at_ms,
+                        TileRenderResult *result)
+{
+    TileGroups changed_children;
+    int child_zoom = kMapTileBaseZoom;
+    for (int zoom = kMapTileBaseZoom - 1; zoom >= settings.tile_min_zoom; --zoom) {
+        auto expected_parents = parentGroupsFor(source_groups);
+        TileGroups changed_parents;
+        for (const auto &[group, parent_coordinates] : expected_parents) {
+            const auto &[world, dimension] = group;
+            const auto changed = changed_children.find(group);
+            for (const auto &[parent_x, parent_z] : parent_coordinates) {
+                const auto png_path = tilePngPath(settings, world, dimension, zoom, parent_x, parent_z);
+                const auto raw_path = tileRawPath(settings, world, dimension, zoom, parent_x, parent_z);
+                const bool child_changed =
+                    changed != changed_children.end() && hasChangedChild(changed->second, parent_x, parent_z);
+                if (!child_changed && fileExistsWithBytes(png_path) && rawTileFileIsComplete(raw_path)) {
+                    continue;
+                }
+
+                result->tiles.push_back(
+                    renderParentTile(settings, group, child_zoom, zoom, parent_x, parent_z, updated_at_ms));
+                changed_parents[group].emplace(parent_x, parent_z);
+            }
+        }
+
+        source_groups = std::move(expected_parents);
+        changed_children = std::move(changed_parents);
+        child_zoom = zoom;
+        if (source_groups.empty()) {
+            break;
+        }
+    }
+}
+
 }  // namespace
 
 std::string cleanSegment(std::string_view value)
@@ -477,7 +676,7 @@ bool renderedTileFilesExistForChunk(const LiveMapSettings &settings, const Chunk
     int tile_z = coord.z;
     for (int zoom = kMapTileBaseZoom; zoom >= settings.tile_min_zoom; --zoom) {
         if (!fileExistsWithBytes(tilePngPath(settings, coord.world, coord.dimension, zoom, tile_x, tile_z)) ||
-            !fileExistsWithBytes(tileRawPath(settings, coord.world, coord.dimension, zoom, tile_x, tile_z))) {
+            !rawTileFileIsComplete(tileRawPath(settings, coord.world, coord.dimension, zoom, tile_x, tile_z))) {
             return false;
         }
         tile_x = floorDiv(tile_x, 2);
@@ -518,13 +717,21 @@ TileRenderResult renderChunkSnapshotsToTiles(const LiveMapSettings &settings, co
 {
     TileRenderResult result;
     result.ok = true;
+    std::scoped_lock pyramid_lock(tilePyramidMutex());
     try {
+        std::map<ChunkCoord, const ChunkSnapshot *> latest_snapshots;
         for (const auto &snapshot : snapshots) {
             if (isEmptyChunkSnapshot(snapshot)) {
                 continue;
             }
+            latest_snapshots[{snapshot.world, snapshot.dimension, snapshot.chunk_x, snapshot.chunk_z}] = &snapshot;
+        }
+
+        TileGroups affected_base_tiles;
+        for (const auto &[coord, snapshot_ptr] : latest_snapshots) {
+            const auto &snapshot = *snapshot_ptr;
             RenderedChunk chunk;
-            chunk.coord = {snapshot.world, snapshot.dimension, snapshot.chunk_x, snapshot.chunk_z};
+            chunk.coord = coord;
             chunk.fingerprint = fingerprintChunkSnapshot(snapshot);
             chunk.updated_at_ms = snapshot.updated_at_ms;
             result.chunks.push_back(chunk);
@@ -542,34 +749,10 @@ TileRenderResult renderChunkSnapshotsToTiles(const LiveMapSettings &settings, co
             base.has_pixels = hasPixels(image);
             writeTileFiles(settings, base, image);
             result.tiles.push_back(base);
-
-            int child_zoom = kMapTileBaseZoom;
-            int child_x = snapshot.chunk_x;
-            int child_z = snapshot.chunk_z;
-            for (int zoom = kMapTileBaseZoom - 1; zoom >= settings.tile_min_zoom; --zoom) {
-                const int parent_x = floorDiv(child_x, 2);
-                const int parent_z = floorDiv(child_z, 2);
-                auto parent_image = composeParentTile(settings, snapshot.world, snapshot.dimension, child_zoom, parent_x,
-                                                      parent_z);
-                RenderedTile parent;
-                parent.world = snapshot.world;
-                parent.dimension = snapshot.dimension;
-                parent.zoom = zoom;
-                parent.tile_x = parent_x;
-                parent.tile_z = parent_z;
-                parent.updated_at_ms = snapshot.updated_at_ms;
-                parent.png_path = tilePngPath(settings, parent.world, parent.dimension, parent.zoom, parent.tile_x,
-                                              parent.tile_z);
-                parent.r2_key = tileR2Key(settings, parent.world, parent.dimension, parent.zoom, parent.tile_x,
-                                          parent.tile_z);
-                parent.has_pixels = hasPixels(parent_image);
-                writeTileFiles(settings, parent, parent_image);
-                result.tiles.push_back(parent);
-                child_zoom = zoom;
-                child_x = parent_x;
-                child_z = parent_z;
-            }
+            affected_base_tiles[{snapshot.world, snapshot.dimension}].emplace(snapshot.chunk_x, snapshot.chunk_z);
         }
+
+        renderParentLevels(settings, std::move(affected_base_tiles), nowMs(), &result);
     }
     catch (const std::exception &exception) {
         result.ok = false;
@@ -582,11 +765,33 @@ TileRenderResult renderChunkSnapshotsToTiles(const LiveMapSettings &settings, co
     return result;
 }
 
+TileRenderResult repairMissingTilePyramid(const LiveMapSettings &settings)
+{
+    TileRenderResult result;
+    result.ok = true;
+    std::scoped_lock pyramid_lock(tilePyramidMutex());
+    try {
+        repairParentLevels(settings, baseTileGroups(settings), nowMs(), &result);
+    }
+    catch (const std::exception &exception) {
+        result.ok = false;
+        result.error = exception.what();
+    }
+    catch (...) {
+        result.ok = false;
+        result.error = "unknown tile pyramid repair error";
+    }
+    return result;
+}
+
 std::string serializeTilesReady(const TileRenderResult &result)
 {
     std::int64_t updated_at = 0;
     for (const auto &chunk : result.chunks) {
         updated_at = std::max(updated_at, chunk.updated_at_ms);
+    }
+    for (const auto &tile : result.tiles) {
+        updated_at = std::max(updated_at, tile.updated_at_ms);
     }
     std::ostringstream out;
     out << "{\"type\":\"tiles_ready\",\"updatedAt\":" << updated_at << ",\"chunks\":[";

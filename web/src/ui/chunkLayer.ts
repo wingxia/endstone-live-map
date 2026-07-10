@@ -108,11 +108,12 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
 
     refreshTiles(message: TilesReadyMessage) {
       const chunks = message.chunks.filter((chunk) => sameWorldDimension(chunk.world, chunk.dimension, this.worldName, this.dimensionName));
-      if (chunks.length === 0) {
+      const tiles = (message.tiles || []).filter((tile) => sameWorldDimension(tile.world, tile.dimension, this.worldName, this.dimensionName));
+      if (chunks.length === 0 && tiles.length === 0) {
         return;
       }
       this.imageTileVersion = message.updatedAt || Date.now();
-      this.refreshVisibleTilesForChunks(chunks);
+      this.refreshVisibleTilesForUpdates(chunks, tiles);
     }
 
     getBlockInfo(x: number, z: number): BlockInfo | null {
@@ -162,11 +163,18 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       return mapImageTileUrl(this.worldName, this.dimensionName, coords.z, coords.x, coords.y, this.imageTileVersion);
     }
 
-    private refreshVisibleTilesForChunks(changedChunks: Array<{ chunkX: number; chunkZ: number }>) {
+    private refreshVisibleTilesForUpdates(
+      changedChunks: Array<{ chunkX: number; chunkZ: number }>,
+      changedTiles: Array<{ zoom: number; tileX: number; tileZ: number }>,
+    ) {
       const internals = this as unknown as GridLayerInternals;
       let refreshed = false;
       for (const tile of Object.values(internals._tiles || {})) {
-        if (!changedChunks.some((chunk) => tileIntersectsChunk(tile.coords, chunk))) {
+        const matchesChunk = changedChunks.some((chunk) => tileIntersectsChunk(tile.coords, chunk));
+        const matchesTile = changedTiles.some(
+          (changed) => changed.zoom === tile.coords.z && changed.tileX === tile.coords.x && changed.tileZ === tile.coords.y,
+        );
+        if (!matchesChunk && !matchesTile) {
           continue;
         }
         refreshed = true;

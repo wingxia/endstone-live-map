@@ -210,6 +210,7 @@ struct UploadJob {
         PlayerSnapshot,
         ChunkBatch,
         Lands,
+        TilePyramidRepair,
     };
 
     Kind kind{};
@@ -405,6 +406,30 @@ private:
 
     livemap::TransportResult performJob(const UploadJob &job) const
     {
+        if (job.kind == UploadJob::Kind::TilePyramidRepair) {
+            auto repair = livemap::repairMissingTilePyramid(settings_);
+            if (!repair.ok) {
+                return {.ok = false,
+                        .error = repair.error.empty() ? "tile pyramid repair failed" : repair.error};
+            }
+
+            const auto r2 = livemap::uploadRenderedTilesToR2(settings_, repair.tiles);
+            if (!r2.ok) {
+                return {.ok = false, .error = r2.error.empty() ? "repaired tile R2 upload failed" : r2.error};
+            }
+
+            if (repair.tiles.empty()) {
+                return {.ok = true, .body = "{\"repairedTiles\":0,\"r2Uploaded\":0}"};
+            }
+            auto notify = livemap::postPluginJson(settings_, "/api/plugin/tiles",
+                                                  livemap::serializeTilesReady(repair));
+            if (!notify.ok) {
+                return notify;
+            }
+            notify.body = "{\"repairedTiles\":" + std::to_string(repair.tiles.size()) +
+                          ",\"r2Uploaded\":" + std::to_string(r2.uploaded) + "}";
+            return notify;
+        }
         if (job.kind != UploadJob::Kind::ChunkBatch) {
             return livemap::postPluginJson(settings_, job.path, job.json);
         }
@@ -437,6 +462,8 @@ private:
             return livemap::UploadPriority::Low;
         case UploadJob::Kind::PlayerSnapshot:
             return livemap::UploadPriority::High;
+        case UploadJob::Kind::TilePyramidRepair:
+            return livemap::UploadPriority::Low;
         }
         return livemap::UploadPriority::Normal;
     }
@@ -611,6 +638,9 @@ public:
         upload_dispatcher_ =
             std::make_unique<UploadDispatcher>(settings_, static_cast<std::size_t>(settings_.max_upload_queue_size));
         player_dispatcher_ = std::make_unique<LatestUploadDispatcher>(settings_, "/api/plugin/live");
+        if (!enqueueUpload({UploadJob::Kind::TilePyramidRepair})) {
+            background_log_.warning("Failed to queue startup tile pyramid repair.");
+        }
         active_ = true;
         listener_ = std::make_unique<LiveMapListener>(*this);
         registerEvent(&LiveMapListener::onBlockPlace, *listener_, endstone::EventPriority::Monitor, true);
@@ -766,6 +796,17 @@ public:
             return true;
         }
 
+        if (!args.empty() && args[0] == "repair-pyramid") {
+            if (enqueueUpload({UploadJob::Kind::TilePyramidRepair})) {
+                sender.sendMessage("Queued live map tile pyramid repair.");
+                background_log_.info("Queued manual live map tile pyramid repair.");
+            }
+            else {
+                sender.sendMessage("Could not queue tile pyramid repair because the render queue is full.");
+            }
+            return true;
+        }
+
         if (!args.empty() && (args[0] == "render-near" || args[0] == "render")) {
             int radius = settings_.scan_radius_chunks;
             if (args.size() >= 2) {
@@ -824,6 +865,9 @@ public:
         upload_dispatcher_ =
             std::make_unique<UploadDispatcher>(settings_, static_cast<std::size_t>(settings_.max_upload_queue_size));
         player_dispatcher_ = std::make_unique<LatestUploadDispatcher>(settings_, "/api/plugin/live");
+        if (!enqueueUpload({UploadJob::Kind::TilePyramidRepair})) {
+            background_log_.warning("Failed to queue tile pyramid repair after settings reload.");
+        }
         background_log_.info("Reloaded live map settings; localServer=", settings_.local_server_url,
                              " tileDataDir=", settings_.tile_data_dir, " r2Enabled=", settings_.r2_enabled, ".");
     }
@@ -1652,6 +1696,10 @@ private:
                     background_log_.info("Uploaded ", result.update_count, " land claim(s) HTTP ",
                                          result.transport.response_code, ".");
                 }
+                else if (result.kind == UploadJob::Kind::TilePyramidRepair) {
+                    background_log_.info("Completed live map tile pyramid repair response=",
+                                         responseSnippet(result.transport.body), ".");
+                }
                 continue;
             }
 
@@ -1682,6 +1730,12 @@ private:
                     }
                     continue;
                 }
+            }
+            if (result.kind == UploadJob::Kind::TilePyramidRepair) {
+                getLogger().error("Failed to repair live map tile pyramid HTTP {} curl {} error={} body={}",
+                                  result.transport.response_code, result.transport.curl_code, result.transport.error,
+                                  responseSnippet(result.transport.body));
+                continue;
             }
             if (active_) {
                 for (const auto &chunk : result.chunks) {
@@ -1858,11 +1912,11 @@ ENDSTONE_PLUGIN("live_map", "0.1.0", LiveMapPlugin)
     authors = {"Wing Xia"};
 
     command("livemap")
-        .description("Inspect or queue live map sampling")
+        .description("Inspect, repair, or queue live map sampling")
         .usages("/livemap", "/livemap <render-near> [radius: int]",
                 "/livemap <render-chunk> <chunkX: int> <chunkZ: int>",
                 "/livemap <render-area> <minX: int> <minZ: int> <maxX: int> <maxZ: int>",
-                "/livemap <reload>")
+                "/livemap <repair-pyramid>", "/livemap <reload>")
         .permissions("livemap.command");
 
     permission("livemap.command")

@@ -2,14 +2,62 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
 
 namespace livemap {
 namespace {
 
 constexpr std::array<std::uint8_t, 8> kPngSignature = {137, 80, 78, 71, 13, 10, 26, 10};
+std::atomic_uint64_t temporary_file_sequence{0};
+
+bool writeBytesAtomic(const std::filesystem::path &path, const std::uint8_t *bytes, std::size_t size,
+                      std::string_view description, std::string *error)
+{
+    auto temporary = path;
+    temporary += ".tmp-" + std::to_string(temporary_file_sequence.fetch_add(1, std::memory_order_relaxed));
+    try {
+        std::filesystem::create_directories(path.parent_path());
+        {
+            std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                throw std::runtime_error("failed to open temporary " + std::string(description) + " path");
+            }
+            out.write(reinterpret_cast<const char *>(bytes), static_cast<std::streamsize>(size));
+            out.flush();
+            if (!out) {
+                throw std::runtime_error("failed to write temporary " + std::string(description));
+            }
+        }
+
+        std::error_code rename_error;
+        std::filesystem::rename(temporary, path, rename_error);
+#ifdef _WIN32
+        if (rename_error) {
+            std::error_code remove_error;
+            std::filesystem::remove(path, remove_error);
+            rename_error.clear();
+            std::filesystem::rename(temporary, path, rename_error);
+        }
+#endif
+        if (rename_error) {
+            throw std::runtime_error("failed to replace " + std::string(description) + ": " + rename_error.message());
+        }
+        return true;
+    }
+    catch (const std::exception &exception) {
+        std::error_code cleanup_error;
+        std::filesystem::remove(temporary, cleanup_error);
+        if (error != nullptr) {
+            *error = exception.what();
+        }
+        return false;
+    }
+}
 
 void appendUint32(std::vector<std::uint8_t> &out, std::uint32_t value)
 {
@@ -127,17 +175,8 @@ std::vector<std::uint8_t> encodePngRgba(const RgbaImage &image)
 bool writePngRgba(const std::filesystem::path &path, const RgbaImage &image, std::string *error)
 {
     try {
-        std::filesystem::create_directories(path.parent_path());
         const auto encoded = encodePngRgba(image);
-        std::ofstream out(path, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            if (error != nullptr) {
-                *error = "failed to open png path";
-            }
-            return false;
-        }
-        out.write(reinterpret_cast<const char *>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
-        return static_cast<bool>(out);
+        return writeBytesAtomic(path, encoded.data(), encoded.size(), "png", error);
     }
     catch (const std::exception &exception) {
         if (error != nullptr) {
@@ -149,24 +188,7 @@ bool writePngRgba(const std::filesystem::path &path, const RgbaImage &image, std
 
 bool writeRawRgba(const std::filesystem::path &path, const RgbaImage &image, std::string *error)
 {
-    try {
-        std::filesystem::create_directories(path.parent_path());
-        std::ofstream out(path, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            if (error != nullptr) {
-                *error = "failed to open raw rgba path";
-            }
-            return false;
-        }
-        out.write(reinterpret_cast<const char *>(image.pixels.data()), static_cast<std::streamsize>(image.pixels.size()));
-        return static_cast<bool>(out);
-    }
-    catch (const std::exception &exception) {
-        if (error != nullptr) {
-            *error = exception.what();
-        }
-        return false;
-    }
+    return writeBytesAtomic(path, image.pixels.data(), image.pixels.size(), "raw rgba", error);
 }
 
 RgbaImage readRawRgba(const std::filesystem::path &path, int width, int height)
