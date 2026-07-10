@@ -24,6 +24,8 @@ export function createLiveMapServer(options = {}) {
     dataDir,
     pluginToken,
     webDir,
+    worldIndex: null,
+    worldIndexPromise: null,
   };
 
   const server = http.createServer((request, response) => {
@@ -66,7 +68,7 @@ export async function handleRequest(state, request, response) {
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/worlds") {
-    json(response, 200, { worlds: await readWorlds(state.dataDir) });
+    json(response, 200, { worlds: await readWorlds(state) });
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/players") {
@@ -118,7 +120,7 @@ export async function handleRequest(state, request, response) {
       return;
     }
     const body = await readJsonBody(request);
-    await updateWorldsFromTiles(state.dataDir, body);
+    await updateWorldsFromTiles(state, body);
     broadcast(state, JSON.stringify(body));
     json(response, 200, { ok: true, chunks: Array.isArray(body.chunks) ? body.chunks.length : 0, sockets: state.sockets.size });
     return;
@@ -254,19 +256,179 @@ function avatarFile(dataDir, playerId) {
   return path.join(dataDir, "avatars", `${cleanSegment(playerId)}.png`);
 }
 
-async function readWorlds(dataDir) {
-  const state = await readState(dataDir);
-  return Object.values(state.worlds || {}).map((world) => ({
-    version: 2,
-    world: world.world,
-    dimension: world.dimension,
-    status: "live",
-    chunkCount: Object.keys(world.chunks || {}).length,
-    importedAt: world.importedAt || world.updatedAt || 0,
-    updatedAt: world.updatedAt || 0,
-    bounds: world.bounds || null,
-    topBlocks: {},
-  }));
+async function readWorlds(serverState) {
+  const index = await ensureWorldIndex(serverState);
+  return [...index.values()]
+    .map((entry) => ({
+      version: 2,
+      world: entry.world,
+      dimension: entry.dimension,
+      status: "live",
+      chunkCount: entry.chunks.size,
+      importedAt: entry.importedAt || entry.updatedAt || 0,
+      updatedAt: entry.updatedAt || 0,
+      bounds: entry.bounds || null,
+      sampleChunks: sampleChunksFor(entry),
+      topBlocks: {},
+    }))
+    .sort(compareWorldMeta);
+}
+
+async function ensureWorldIndex(serverState) {
+  if (serverState.worldIndex) {
+    return serverState.worldIndex;
+  }
+  if (!serverState.worldIndexPromise) {
+    serverState.worldIndexPromise = buildWorldIndex(serverState.dataDir).then((index) => {
+      serverState.worldIndex = index;
+      return index;
+    });
+  }
+  try {
+    return await serverState.worldIndexPromise;
+  } finally {
+    serverState.worldIndexPromise = null;
+  }
+}
+
+async function buildWorldIndex(dataDir) {
+  const persisted = await readState(dataDir);
+  const persistedWorlds = Object.values(persisted.worlds || {});
+  const canonicalWorldNames = new Map(
+    persistedWorlds.map((entry) => [cleanSegment(entry.world), String(entry.world)]),
+  );
+  const persistedByKey = new Map(
+    persistedWorlds.map((entry) => [`${cleanSegment(entry.world)}/${cleanSegment(entry.dimension)}`, entry]),
+  );
+  const index = new Map();
+  const tilesRoot = path.join(dataDir, "tiles");
+
+  let worldDirectories = [];
+  try {
+    worldDirectories = (await fs.readdir(tilesRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  for (const worldDirectory of worldDirectories) {
+    const worldSegment = cleanSegment(worldDirectory.name);
+    const worldName = canonicalWorldNames.get(worldSegment) || worldDirectory.name;
+    const worldPath = path.join(tilesRoot, worldDirectory.name);
+    const dimensionDirectories = (await fs.readdir(worldPath, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+    for (const dimensionDirectory of dimensionDirectories) {
+      const dimensionName = dimensionDirectory.name;
+      const key = `${worldSegment}/${cleanSegment(dimensionName)}`;
+      const persistedEntry = persistedByKey.get(key);
+      const entry = getOrCreateWorldIndexEntry(index, persistedEntry?.world || worldName, persistedEntry?.dimension || dimensionName, persistedEntry);
+      await addBaseTileChunks(entry, path.join(worldPath, dimensionDirectory.name, "z4"));
+    }
+  }
+
+  for (const persistedEntry of persistedWorlds) {
+    const entry = getOrCreateWorldIndexEntry(index, persistedEntry.world, persistedEntry.dimension, persistedEntry);
+    for (const coordinate of Object.keys(persistedEntry.chunks || {})) {
+      const [chunkX, chunkZ] = coordinate.split(",").map(Number);
+      if (Number.isFinite(chunkX) && Number.isFinite(chunkZ)) {
+        addWorldIndexChunk(entry, chunkX, chunkZ, persistedEntry.chunks[coordinate]);
+      }
+    }
+  }
+  return index;
+}
+
+function getOrCreateWorldIndexEntry(index, worldName, dimensionName, persistedEntry = null) {
+  const key = `${cleanSegment(worldName)}/${cleanSegment(dimensionName)}`;
+  let entry = index.get(key);
+  if (!entry) {
+    entry = {
+      world: String(worldName),
+      dimension: String(dimensionName),
+      importedAt: Number(persistedEntry?.importedAt || persistedEntry?.updatedAt || 0),
+      updatedAt: Number(persistedEntry?.updatedAt || 0),
+      bounds: persistedEntry?.bounds || null,
+      chunks: new Set(),
+    };
+    index.set(key, entry);
+  } else if (persistedEntry) {
+    entry.world = String(persistedEntry.world || entry.world);
+    entry.dimension = String(persistedEntry.dimension || entry.dimension);
+    entry.importedAt = Number(persistedEntry.importedAt || entry.importedAt || 0);
+    entry.updatedAt = Math.max(entry.updatedAt, Number(persistedEntry.updatedAt || 0));
+    entry.bounds = expandBounds(entry.bounds, persistedEntry.bounds);
+  } else if (entry.world === cleanSegment(entry.world) && String(worldName) !== cleanSegment(worldName)) {
+    entry.world = String(worldName);
+  }
+  return entry;
+}
+
+async function addBaseTileChunks(entry, zoomPath) {
+  let xDirectories = [];
+  try {
+    xDirectories = (await fs.readdir(zoomPath, { withFileTypes: true })).filter((item) => item.isDirectory());
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  for (const xDirectory of xDirectories) {
+    const chunkX = Number(xDirectory.name);
+    if (!Number.isInteger(chunkX)) {
+      continue;
+    }
+    const files = await fs.readdir(path.join(zoomPath, xDirectory.name), { withFileTypes: true });
+    for (const file of files) {
+      if (!file.isFile() || path.extname(file.name) !== ".png") {
+        continue;
+      }
+      const chunkZ = Number(path.basename(file.name, ".png"));
+      if (Number.isInteger(chunkZ)) {
+        addWorldIndexChunk(entry, chunkX, chunkZ, 0);
+      }
+    }
+  }
+}
+
+function addWorldIndexChunk(entry, chunkX, chunkZ, updatedAt) {
+  entry.chunks.add(`${chunkX},${chunkZ}`);
+  entry.updatedAt = Math.max(entry.updatedAt, Number(updatedAt || 0));
+  entry.bounds = expandBounds(entry.bounds, {
+    minChunkX: chunkX,
+    maxChunkX: chunkX,
+    minChunkZ: chunkZ,
+    maxChunkZ: chunkZ,
+    minBlockX: chunkX * 16,
+    maxBlockX: chunkX * 16 + 15,
+    minBlockZ: chunkZ * 16,
+    maxBlockZ: chunkZ * 16 + 15,
+  });
+}
+
+function sampleChunksFor(entry) {
+  if (!entry.bounds || entry.chunks.size === 0) {
+    return [];
+  }
+  const centerX = (entry.bounds.minChunkX + entry.bounds.maxChunkX) / 2;
+  const centerZ = (entry.bounds.minChunkZ + entry.bounds.maxChunkZ) / 2;
+  return [...entry.chunks]
+    .map((coordinate) => {
+      const [chunkX, chunkZ] = coordinate.split(",").map(Number);
+      return { chunkX, chunkZ };
+    })
+    .sort((left, right) =>
+      ((left.chunkX - centerX) ** 2 + (left.chunkZ - centerZ) ** 2) -
+      ((right.chunkX - centerX) ** 2 + (right.chunkZ - centerZ) ** 2),
+    )
+    .slice(0, 32);
+}
+
+function compareWorldMeta(left, right) {
+  const dimensionOrder = new Map([["Overworld", 0], ["Nether", 1], ["TheEnd", 2]]);
+  return String(left.world).localeCompare(String(right.world)) ||
+    (dimensionOrder.get(left.dimension) ?? 99) - (dimensionOrder.get(right.dimension) ?? 99) ||
+    String(left.dimension).localeCompare(String(right.dimension));
 }
 
 async function readState(dataDir) {
@@ -282,12 +444,13 @@ async function writeState(dataDir, state) {
   await fs.writeFile(path.join(dataDir, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
 }
 
-async function updateWorldsFromTiles(dataDir, payload) {
+async function updateWorldsFromTiles(serverState, payload) {
   const chunks = Array.isArray(payload.chunks) ? payload.chunks : [];
   if (chunks.length === 0) {
     return;
   }
-  const state = await readState(dataDir);
+  const worldIndex = await ensureWorldIndex(serverState);
+  const state = await readState(serverState.dataDir);
   state.version = 2;
   state.worlds ||= {};
   const now = Number(payload.updatedAt || Date.now());
@@ -310,6 +473,12 @@ async function updateWorldsFromTiles(dataDir, payload) {
     });
     entry.updatedAt = Math.max(Number(entry.updatedAt || 0), Number(chunk.updatedAt || now));
     entry.chunks[`${chunkX},${chunkZ}`] = Number(chunk.updatedAt || now);
+    addWorldIndexChunk(
+      getOrCreateWorldIndexEntry(worldIndex, worldName, dimensionName, entry),
+      chunkX,
+      chunkZ,
+      chunk.updatedAt || now,
+    );
     const chunkBounds = {
       minChunkX: chunkX,
       maxChunkX: chunkX,
@@ -322,10 +491,13 @@ async function updateWorldsFromTiles(dataDir, payload) {
     };
     entry.bounds = expandBounds(entry.bounds, chunkBounds);
   }
-  await writeState(dataDir, state);
+  await writeState(serverState.dataDir, state);
 }
 
 function expandBounds(current, next) {
+  if (!next) {
+    return current;
+  }
   if (!current) {
     return next;
   }

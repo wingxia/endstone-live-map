@@ -64,6 +64,49 @@ describe("local live map server", () => {
     expect(worlds.worlds[0].bounds).toMatchObject({ minChunkX: -1, maxChunkZ: 2 });
   });
 
+  it("indexes complete world bounds from existing z4 tile files", async () => {
+    await fs.writeFile(
+      path.join(tmp, "state.json"),
+      JSON.stringify({
+        version: 2,
+        worlds: {
+          "Bedrock_level/Overworld": {
+            world: "Bedrock level",
+            dimension: "Overworld",
+            importedAt: 5,
+            updatedAt: 10,
+            bounds: null,
+            chunks: { "0,0": 10 },
+          },
+        },
+      }),
+    );
+    for (const [dimension, chunkX, chunkZ] of [
+      ["Overworld", 0, 0],
+      ["Overworld", 64, -3],
+      ["Nether", -2, 5],
+      ["TheEnd", 7, 9],
+    ]) {
+      const tile = path.join(tmp, "tiles", "Bedrock_level", dimension, "z4", String(chunkX), `${chunkZ}.png`);
+      await fs.mkdir(path.dirname(tile), { recursive: true });
+      await fs.writeFile(tile, Buffer.from([1, 2, 3]));
+    }
+
+    const response = await fetch(`${baseUrl}/api/worlds`);
+    expect(response.status).toBe(200);
+    const { worlds } = await response.json();
+    expect(worlds).toHaveLength(3);
+    expect(worlds[0]).toMatchObject({
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkCount: 2,
+      bounds: { minChunkX: 0, maxChunkX: 64, minChunkZ: -3, maxChunkZ: 0 },
+    });
+    expect(worlds[0].sampleChunks).toEqual(expect.arrayContaining([{ chunkX: 0, chunkZ: 0 }, { chunkX: 64, chunkZ: -3 }]));
+    expect(worlds[1]).toMatchObject({ world: "Bedrock level", dimension: "Nether", chunkCount: 1 });
+    expect(worlds[2]).toMatchObject({ world: "Bedrock level", dimension: "TheEnd", chunkCount: 1 });
+  });
+
   it("stores and returns lands by world and dimension", async () => {
     const claim = {
       id: "spawn",
