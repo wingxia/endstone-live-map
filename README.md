@@ -149,7 +149,7 @@ Node 服务默认监听 `127.0.0.1:8000`，环境变量：
 - `GET /api/worlds`
 - `GET /api/lands?world=<world>&dimension=<dimension>`
 - `GET /api/players`
-- `GET /api/map-tiles/<world>/<dimension>/z<zoom>/<tileX>/<tileZ>.png`
+- `GET /api/local-map-tiles/<world>/<dimension>/z<zoom>/<tileX>/<tileZ>.png`
 - `GET /api/live` WebSocket
 
 地图瓦片是可变资源：本地服务和 Worker 会返回需要重新验证的缓存头，缺失瓦片占位图不会缓存。前端收到 `tiles_ready` 后会带版本参数刷新可见瓦片并重新读取 `/api/worlds`。

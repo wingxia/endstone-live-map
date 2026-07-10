@@ -19,7 +19,7 @@ test("renders the operational map shell from local PNG tiles only", async ({ pag
   await expect(page.getByTestId("map-canvas")).toBeVisible();
   await expect(page.getByLabel("地图状态")).toContainText("在线");
   await expect(page.getByLabel("地图状态")).toContainText("领地");
-  await expect.poll(() => requests.tiles.some((url) => url.includes("/api/map-tiles/Bedrock_level/Overworld/z4/"))).toBe(true);
+  await expect.poll(() => requests.tiles.some((url) => url.includes("/api/local-map-tiles/Bedrock_level/Overworld/z4/"))).toBe(true);
   await expect.poll(() => page.locator("img.chunk-image-tile").count()).toBeGreaterThan(0);
   expect(requests.legacy.length).toBe(0);
 });
@@ -52,14 +52,14 @@ test("uses generated PNG tiles for every zoom level from z4 through z-8", async 
   const requests = await mockLiveMap(page, { players: false });
   await page.goto("/");
   await expect(page.getByTestId("map-canvas")).toBeVisible();
-  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("/api/map-tiles/Bedrock_level/Overworld/z4/")))).toBe(true);
+  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("/api/local-map-tiles/Bedrock_level/Overworld/z4/")))).toBe(true);
   for (const zoom of ["z3", "z2", "z1", "z0", "z-1", "z-2", "z-3", "z-4", "z-5", "z-6", "z-7", "z-8"]) {
     await page.evaluate((zoomLabel) => {
       const zoomNumber = Number(String(zoomLabel).slice(1));
       const leafletMap = (window as unknown as { __endstoneLiveMapLeaflet?: { setZoom?: (zoom: number, options?: { animate?: boolean }) => void } }).__endstoneLiveMapLeaflet;
       leafletMap?.setZoom?.(zoomNumber, { animate: false });
     }, zoom);
-    await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes(`/api/map-tiles/Bedrock_level/Overworld/${zoom}/`)))).toBe(true);
+    await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes(`/api/local-map-tiles/Bedrock_level/Overworld/${zoom}/`)))).toBe(true);
   }
   expect(requests.legacy.length).toBe(0);
 });
@@ -68,7 +68,7 @@ test("keeps map tiles visible while zooming out beyond the generated tile floor"
   const requests = await mockLiveMap(page, { players: false });
   await page.goto("/");
   await expect(page.getByTestId("map-canvas")).toBeVisible();
-  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("/api/map-tiles/Bedrock_level/Overworld/z4/")))).toBe(true);
+  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("/api/local-map-tiles/Bedrock_level/Overworld/z4/")))).toBe(true);
 
   await page.evaluate(() => {
     const leafletMap = (window as unknown as { __endstoneLiveMapLeaflet?: { setZoom?: (zoom: number, options?: { animate?: boolean }) => void } }).__endstoneLiveMapLeaflet;
@@ -80,7 +80,7 @@ test("keeps map tiles visible while zooming out beyond the generated tile floor"
       page.evaluate(() => (window as unknown as { __endstoneLiveMapLeaflet?: { getZoom?: () => number } }).__endstoneLiveMapLeaflet?.getZoom?.()),
     )
     .toBe(-8);
-  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("/api/map-tiles/Bedrock_level/Overworld/z-8/")))).toBe(true);
+  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("/api/local-map-tiles/Bedrock_level/Overworld/z-8/")))).toBe(true);
   expect(requests.tiles.some((url) => /\/z-9\//.test(url))).toBe(false);
   expect(requests.legacy.length).toBe(0);
 });
@@ -233,7 +233,7 @@ async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
       }),
     });
   });
-  await page.route("**/api/map-tiles/**", async (route: Route) => {
+  await page.route("**/api/local-map-tiles/**", async (route: Route) => {
     requests.tiles.push(route.request().url());
     await route.fulfill({ contentType: "image/png", body: GREEN_TILE_PNG });
   });

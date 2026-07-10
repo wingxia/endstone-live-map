@@ -123,7 +123,7 @@ export function mapImageTileUrl(world: string, dimension: string, zoom: number, 
     params.set("_", String(cacheBust));
   }
   const suffix = params.toString();
-  return `/api/map-tiles/${segmentKey(world)}/${segmentKey(dimension)}/z${zoom}/${tileX}/${tileZ}.png${suffix ? `?${suffix}` : ""}`;
+  return `/api/local-map-tiles/${segmentKey(world)}/${segmentKey(dimension)}/z${zoom}/${tileX}/${tileZ}.png${suffix ? `?${suffix}` : ""}`;
 }
 
 export function playerAvatarUrl(player: Pick<PlayerState, "id" | "avatarHash" | "avatarUrl">): string {

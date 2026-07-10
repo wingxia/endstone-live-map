@@ -83,7 +83,7 @@ export async function handleRequest(state, request, response) {
     json(response, 200, await readLandFile(state.dataDir, world, dimension));
     return;
   }
-  if (request.method === "GET" && url.pathname.startsWith("/api/map-tiles/")) {
+  if (request.method === "GET" && (url.pathname.startsWith("/api/map-tiles/") || url.pathname.startsWith("/api/local-map-tiles/"))) {
     await serveTile(state, request, url.pathname, response);
     return;
   }
@@ -376,7 +376,7 @@ function landFile(dataDir, world, dimension) {
 }
 
 async function serveTile(state, request, pathname, response) {
-  const match = /^\/api\/map-tiles\/([^/]+)\/([^/]+)\/z(-?\d+)\/(-?\d+)\/(-?\d+)\.png$/.exec(pathname);
+  const match = /^\/api\/(?:local-)?map-tiles\/([^/]+)\/([^/]+)\/z(-?\d+)\/(-?\d+)\/(-?\d+)\.png$/.exec(pathname);
   if (!match) {
     json(response, 404, { error: "invalid_tile_path" });
     return;

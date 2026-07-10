@@ -90,19 +90,22 @@ describe("local live map server", () => {
     await fs.mkdir(path.dirname(tileFile), { recursive: true });
     await fs.writeFile(tileFile, Buffer.from([1, 2, 3]));
 
-    const existing = await fetch(`${baseUrl}/api/map-tiles/Bedrock_level/Overworld/z4/0/0.png`);
+    const existing = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/0/0.png`);
     expect(existing.status).toBe(200);
     expect(existing.headers.get("content-type")).toContain("image/png");
     expect(existing.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
     expect(existing.headers.get("etag")).toBeTruthy();
     expect(Buffer.from(await existing.arrayBuffer())).toEqual(Buffer.from([1, 2, 3]));
 
-    const revalidated = await fetch(`${baseUrl}/api/map-tiles/Bedrock_level/Overworld/z4/0/0.png`, {
+    const revalidated = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/0/0.png`, {
       headers: { "If-None-Match": existing.headers.get("etag") },
     });
     expect(revalidated.status).toBe(304);
 
-    const missing = await fetch(`${baseUrl}/api/map-tiles/Bedrock_level/Overworld/z4/9/9.png`);
+    const legacyPath = await fetch(`${baseUrl}/api/map-tiles/Bedrock_level/Overworld/z4/0/0.png`);
+    expect(legacyPath.status).toBe(200);
+
+    const missing = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/9/9.png`);
     expect(missing.status).toBe(200);
     expect(missing.headers.get("cache-control")).toBe("no-store");
   });
