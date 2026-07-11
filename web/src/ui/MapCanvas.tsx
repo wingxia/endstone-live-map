@@ -15,7 +15,6 @@ interface CoordinateState {
   localX: number;
   localZ: number;
   height: number;
-  block: string;
   locked: boolean;
 }
 
@@ -92,7 +91,7 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
       map.on("click", (event) => updateCoordinate(event, true));
       map.on("mouseout", () => {
         if (!lockedRef.current) {
-          setCoordinate((current) => ({ ...current, block: "移出地图", height: Number.NaN }));
+          setCoordinate((current) => ({ ...current, height: Number.NaN }));
         }
       });
     }
@@ -305,10 +304,6 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
             {coordinate.localX}, {coordinate.localZ}
           </strong>
         </div>
-        <div className="coordinate-block">
-          <span>方块</span>
-          <strong>{coordinate.block}</strong>
-        </div>
       </div>
     </>
   );
@@ -329,7 +324,6 @@ function buildCoordinateState(
     localX: position.localX,
     localZ: position.localZ,
     height: block?.height ?? Number.NaN,
-    block: block?.block || "未加载",
     locked,
   };
 }

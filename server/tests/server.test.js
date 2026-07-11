@@ -29,6 +29,11 @@ describe("local live map server", () => {
     expect(cleanSegment("Bedrock level")).toBe("Bedrock_level");
   });
 
+  it("keeps reverse-proxy origin connections open beyond the tunnel idle window", () => {
+    expect(server.keepAliveTimeout).toBe(95_000);
+    expect(server.headersTimeout).toBe(100_000);
+  });
+
   it("advertises the generated low-zoom tile floor", async () => {
     const response = await fetch(`${baseUrl}/api/config`);
     expect(response.status).toBe(200);
