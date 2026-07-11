@@ -1,4 +1,4 @@
-import { LandPlot, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import type { LandClaim } from "../api";
@@ -48,7 +48,6 @@ export function LandList({ lands, onSelectLand }: LandListProps) {
                     TP {land.teleport.x}, {land.teleport.y}, {land.teleport.z}
                   </em>
                 </span>
-                <LandPlot className="trailing-icon" size={16} aria-hidden="true" />
               </button>
             </li>
           ))}

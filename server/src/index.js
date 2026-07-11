@@ -34,6 +34,14 @@ export function createLiveMapServer(options = {}) {
     });
   });
 
+  // cloudflared keeps a pool of persistent origin connections. Node's short
+  // default keep-alive window can close an idle socket just as the tunnel
+  // reuses it, surfacing as a transient origin EOF and a public 502. Keep the
+  // origin connection alive beyond the proxy idle window and leave enough
+  // time for the next request headers to arrive.
+  server.keepAliveTimeout = 95_000;
+  server.headersTimeout = 100_000;
+
   server.on("upgrade", (request, socket) => {
     if (new URL(request.url || "/", "http://localhost").pathname !== "/api/live") {
       socket.destroy();

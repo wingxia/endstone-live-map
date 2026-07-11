@@ -134,6 +134,8 @@ test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
 
   await expect(page.getByTestId("map-canvas")).toBeVisible();
   await expect(page.getByTestId("coordinate-copy")).toBeVisible();
+  await expect(page.getByTestId("coordinate-hud")).not.toContainText("已渲染瓦片");
+  expect(await page.locator(".coordinate-block").count()).toBe(0);
   await expect(page.locator(".player-marker-frame")).toBeVisible();
   expect(await elementsOverlap(page, ".map-hud", ".coordinate-hud")).toBe(false);
   expect(await hudMapCoverage(page)).toBeLessThan(0.26);

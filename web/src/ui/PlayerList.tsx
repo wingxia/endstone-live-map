@@ -1,5 +1,3 @@
-import { UserRound } from "lucide-react";
-
 import { playerAvatarUrl, type PlayerState } from "../api";
 
 interface PlayerListProps {
@@ -30,7 +28,6 @@ export function PlayerList({ players, onSelectPlayer }: PlayerListProps) {
                 {Math.round(player.x)}, {Math.round(player.y)}, {Math.round(player.z)}
               </small>
             </span>
-            <UserRound className="trailing-icon" size={16} aria-hidden="true" />
           </button>
         </li>
       ))}

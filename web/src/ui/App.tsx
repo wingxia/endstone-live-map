@@ -1,4 +1,4 @@
-import { LandPlot, Layers, LocateFixed, RadioTower } from "lucide-react";
+import { Flame, LandPlot, LocateFixed, Orbit, RadioTower, TreePine } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { fetchLands, listWorlds, segmentKey, type LandClaim, type WorldMeta } from "../api";
@@ -9,6 +9,11 @@ import { PlayerList } from "./PlayerList";
 
 const DEFAULT_WORLD = "Bedrock level";
 const DEFAULT_DIMENSION = "Overworld";
+const DIMENSIONS = [
+  { id: "Overworld", label: "主世界", Icon: TreePine },
+  { id: "Nether", label: "下界", Icon: Flame },
+  { id: "TheEnd", label: "末地", Icon: Orbit },
+] as const;
 
 interface MapFocusTarget {
   x: number;
@@ -123,25 +128,28 @@ export function App() {
 
       <aside className="side-panel" aria-label="地图信息面板">
         <header className="panel-header">
-          <div>
-            <h1>Endstone Live Map</h1>
-            <p className={live.connected ? "status status-online" : "status"}>
-              <RadioTower size={15} aria-hidden="true" />
-              {live.connected ? "实时连接" : "等待连接"}
-            </p>
+          <div className="panel-title-row">
+            <div>
+              <h1>Endstone Live Map</h1>
+              <p className={live.connected ? "status status-online" : "status"}>
+                <RadioTower size={15} aria-hidden="true" />
+                {live.connected ? "实时连接" : "等待连接"}
+              </p>
+            </div>
           </div>
           <div className="dimension-tabs" role="tablist" aria-label="维度">
-            {["Overworld", "Nether", "TheEnd"].map((dimension) => (
+            {DIMENSIONS.map(({ id, label, Icon }) => (
               <button
-                key={dimension}
+                key={id}
                 type="button"
                 role="tab"
-                aria-selected={selectedDimension === dimension}
-                className={selectedDimension === dimension ? "active" : ""}
-                onClick={() => setSelectedDimension(dimension)}
+                aria-selected={selectedDimension === id}
+                aria-label={`${label}（${id}）`}
+                className={selectedDimension === id ? "active" : ""}
+                onClick={() => setSelectedDimension(id)}
               >
-                <Layers size={15} aria-hidden="true" />
-                {dimension}
+                <Icon size={15} aria-hidden="true" strokeWidth={1.8} />
+                {label}
               </button>
             ))}
           </div>
