@@ -92,6 +92,7 @@ export function App() {
 
   const selectedWorldMeta = worlds.find((world) => world.dimension === selectedDimension && segmentKey(world.world) === segmentKey(DEFAULT_WORLD)) || null;
   const selectedPlayers = live.players.filter((player) => player.dimension === selectedDimension);
+  const selectedDimensionLabel = DIMENSIONS.find(({ id }) => id === selectedDimension)?.label ?? selectedDimension;
   const publicLands = useMemo(() => lands.filter((land) => land.publicTeleport === true), [lands]);
 
   return (
@@ -109,7 +110,7 @@ export function App() {
         <div className="map-hud" aria-label="地图状态">
           <div className="map-hud-item map-hud-dimension">
             <span>维度</span>
-            <strong>{selectedDimension}</strong>
+            <strong>{selectedDimensionLabel}</strong>
           </div>
           <div className="map-hud-item">
             <span>区块</span>

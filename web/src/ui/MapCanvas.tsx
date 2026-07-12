@@ -289,10 +289,6 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
           </em>
         </button>
         <div>
-          <span>Y</span>
-          <strong>{Number.isFinite(coordinate.height) ? coordinate.height : "--"}</strong>
-        </div>
-        <div>
           <span>区块</span>
           <strong>
             {coordinate.chunkX}, {coordinate.chunkZ}

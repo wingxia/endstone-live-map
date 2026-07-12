@@ -138,7 +138,15 @@ test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
   expect(await page.locator(".coordinate-block").count()).toBe(0);
   await expect(page.locator(".player-marker-frame")).toBeVisible();
   expect(await elementsOverlap(page, ".map-hud", ".coordinate-hud")).toBe(false);
-  expect(await hudMapCoverage(page)).toBeLessThan(0.26);
+  const mapHud = await page.locator(".map-hud").boundingBox();
+  const coordinateHud = await page.getByTestId("coordinate-hud").boundingBox();
+  expect(mapHud).not.toBeNull();
+  expect(coordinateHud).not.toBeNull();
+  expect(mapHud!.width).toBeLessThanOrEqual(260);
+  expect(mapHud!.height).toBeLessThanOrEqual(52);
+  expect(coordinateHud!.width).toBeLessThanOrEqual(270);
+  expect(coordinateHud!.height).toBeLessThanOrEqual(62);
+  expect(await hudMapCoverage(page)).toBeLessThan(0.13);
 });
 
 async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
@@ -226,7 +234,7 @@ async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
             world: "Bedrock level",
             dimension: "Overworld",
             status: "live",
-            chunkCount: 81,
+            chunkCount: 10971,
             importedAt: 1,
             updatedAt: 10,
             bounds: {
