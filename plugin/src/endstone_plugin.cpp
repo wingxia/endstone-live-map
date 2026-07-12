@@ -921,6 +921,19 @@ private:
     bool deferSeedChunk(const livemap::ChunkCoord &coord, bool force)
     {
         std::scoped_lock lock(state_mutex_);
+        // Chunk load events and the seed pulse run independently. The chunk may
+        // finish loading after pulsePlayerSeedQueue() checks it but before this
+        // method records the deferred work. Requeue atomically in that case so
+        // the work cannot miss the one load event and remain deferred forever.
+        if (loaded_chunks_.find(coord) != loaded_chunks_.end()) {
+            if (force) {
+                queued_seed_chunks_.erase(coord);
+            }
+            if (queued_seed_chunks_.insert(coord).second) {
+                seed_queue_.push_back({coord, nowMs(), force});
+            }
+            return false;
+        }
         auto found = deferred_seed_chunks_.find(coord);
         if (found == deferred_seed_chunks_.end()) {
             deferred_seed_chunks_.emplace(coord, force);
@@ -984,8 +997,31 @@ private:
                 }
             }
         }
-        std::scoped_lock lock(state_mutex_);
-        loaded_chunks_ = std::move(loaded);
+        std::size_t recovered = 0;
+        {
+            std::scoped_lock lock(state_mutex_);
+            loaded_chunks_ = std::move(loaded);
+            for (auto deferred = deferred_seed_chunks_.begin(); deferred != deferred_seed_chunks_.end();) {
+                if (loaded_chunks_.find(deferred->first) == loaded_chunks_.end()) {
+                    ++deferred;
+                    continue;
+                }
+                const auto coord = deferred->first;
+                const auto force = deferred->second;
+                deferred = deferred_seed_chunks_.erase(deferred);
+                if (force) {
+                    queued_seed_chunks_.erase(coord);
+                }
+                if (queued_seed_chunks_.insert(coord).second) {
+                    seed_queue_.push_back({coord, nowMs(), force});
+                    ++recovered;
+                }
+            }
+        }
+        if (recovered > 0) {
+            background_log_.info("Recovered ", recovered,
+                                 " deferred live map base chunk(s) after reconciling loaded chunks.");
+        }
     }
 
     void handleChunkLoad(const endstone::Chunk &chunk)
@@ -1184,10 +1220,6 @@ private:
                 nowMs(),
             });
         }
-        if (players.empty()) {
-            return;
-        }
-
         if (player_dispatcher_ == nullptr) {
             background_log_.warning("Dropped live map player snapshot because player upload dispatcher is unavailable.");
             return;
@@ -1753,6 +1785,13 @@ private:
             return;
         }
 
+        const auto current_ms = nowMs();
+        if (current_ms >= next_loaded_chunk_refresh_ms_) {
+            refreshLoadedChunks();
+            next_loaded_chunk_refresh_ms_ =
+                current_ms + static_cast<std::int64_t>(std::max(5, settings_.chunk_refresh_seconds)) * 1000;
+        }
+
         const auto newly_queued = queuePlayerSeedAreas();
         if (newly_queued > 0) {
             background_log_.info("Queued ", newly_queued, " player-radius live map base chunk(s).");
@@ -1861,6 +1900,7 @@ private:
     std::size_t dropped_pending_chunk_uploads_ = 0;
     std::int64_t last_chunk_cache_log_ms_ = 0;
     std::int64_t last_chunk_pending_log_ms_ = 0;
+    std::int64_t next_loaded_chunk_refresh_ms_ = 0;
 };
 
 void LiveMapListener::onBlockPlace(endstone::BlockPlaceEvent &event)

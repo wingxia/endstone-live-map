@@ -127,6 +127,22 @@ test("shows player avatar markers, public land overlays, and coordinate copy", a
   expect(requests.legacy.length).toBe(0);
 });
 
+test("removes player markers when the plugin publishes an empty online snapshot", async ({ page }) => {
+  await installMockLiveSocket(page);
+  await mockLiveMap(page);
+  await page.goto("/");
+
+  await expect(page.locator(".player-marker-name", { hasText: "Wing" })).toBeVisible();
+  await page.evaluate(() => {
+    (window as unknown as { __liveMapSocketSend: (data: string) => void }).__liveMapSocketSend(
+      JSON.stringify({ type: "player_snapshot", players: [] }),
+    );
+  });
+
+  await expect(page.locator(".player-marker-name", { hasText: "Wing" })).toHaveCount(0);
+  await expect(page.getByText("当前维度没有在线玩家")).toBeVisible();
+});
+
 test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await mockLiveMap(page);
@@ -138,7 +154,16 @@ test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
   expect(await page.locator(".coordinate-block").count()).toBe(0);
   await expect(page.locator(".player-marker-frame")).toBeVisible();
   expect(await elementsOverlap(page, ".map-hud", ".coordinate-hud")).toBe(false);
-  expect(await hudMapCoverage(page)).toBeLessThan(0.26);
+  const mapHud = await page.locator(".map-hud").boundingBox();
+  const coordinateHud = await page.getByTestId("coordinate-hud").boundingBox();
+  expect(mapHud).not.toBeNull();
+  expect(coordinateHud).not.toBeNull();
+  expect(mapHud!.width).toBeLessThanOrEqual(260);
+  expect(mapHud!.height).toBeLessThanOrEqual(52);
+  expect(coordinateHud!.width).toBeLessThanOrEqual(270);
+  expect(coordinateHud!.height).toBeLessThanOrEqual(54);
+  await expect(page.getByTestId("coordinate-hud")).not.toContainText("复制坐标");
+  expect(await hudMapCoverage(page)).toBeLessThan(0.13);
 });
 
 async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
@@ -226,7 +251,7 @@ async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
             world: "Bedrock level",
             dimension: "Overworld",
             status: "live",
-            chunkCount: 81,
+            chunkCount: 10971,
             importedAt: 1,
             updatedAt: 10,
             bounds: {

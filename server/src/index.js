@@ -9,6 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, "../..");
 const WEB_DIST_DIR = path.join(ROOT_DIR, "web", "dist");
 const DEFAULT_DATA_DIR = path.join(ROOT_DIR, "plugin-data", "live_map");
+const DEFAULT_PLAYER_STALE_AFTER_MS = 15_000;
 const EMPTY_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4AWMAAQAABQABNtCI3QAAAABJRU5ErkJggg==",
   "base64",
@@ -20,6 +21,11 @@ export function createLiveMapServer(options = {}) {
   const webDir = path.resolve(options.webDir || WEB_DIST_DIR);
   const state = {
     players: [],
+    playersReceivedAt: 0,
+    playerStaleAfterMs: Math.max(
+      1_000,
+      numberOr(options.playerStaleAfterMs ?? process.env.LIVE_MAP_PLAYER_STALE_AFTER_MS, DEFAULT_PLAYER_STALE_AFTER_MS),
+    ),
     sockets: new Set(),
     dataDir,
     pluginToken,
@@ -80,7 +86,7 @@ export async function handleRequest(state, request, response) {
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/players") {
-    json(response, 200, { players: state.players });
+    json(response, 200, { players: currentPlayers(state) });
     return;
   }
   if (request.method === "GET" && /^\/api\/players\/[^/]+\/avatar\.png$/.test(url.pathname)) {
@@ -104,6 +110,7 @@ export async function handleRequest(state, request, response) {
     }
     const body = await readJsonBody(request);
     state.players = await normalizePlayers(state.dataDir, Array.isArray(body.players) ? body.players : []);
+    state.playersReceivedAt = Date.now();
     broadcast(state, JSON.stringify({ type: "player_snapshot", players: state.players }));
     json(response, 200, { ok: true, players: state.players.length });
     return;
@@ -135,6 +142,17 @@ export async function handleRequest(state, request, response) {
   }
 
   await serveStatic(state.webDir, url.pathname, response);
+}
+
+function currentPlayers(state, now = Date.now()) {
+  if (
+    state.players.length > 0 &&
+    state.playersReceivedAt > 0 &&
+    now - state.playersReceivedAt >= state.playerStaleAfterMs
+  ) {
+    state.players = [];
+  }
+  return state.players;
 }
 
 function corsHeaders(extra = {}) {

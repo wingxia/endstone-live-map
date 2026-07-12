@@ -320,6 +320,7 @@ void testProtocol()
     assert(json.find("\"avatarHash\":\"avatarhash\"") != std::string::npos);
     assert(json.find("\"avatarPngBase64\":\"iVBORw0KGgo=\"") != std::string::npos);
     assert(json.find("\"z\":-8.25") != std::string::npos);
+    assert(livemap::serializePlayerSnapshot({}) == "{\"type\":\"player_snapshot\",\"players\":[]}");
 
     const auto heartbeat = livemap::serializeHeartbeat("vvnas", 7);
     assert(heartbeat == "{\"type\":\"heartbeat\",\"serverId\":\"vvnas\",\"updatedAt\":7}");

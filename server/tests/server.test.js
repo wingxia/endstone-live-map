@@ -203,4 +203,27 @@ describe("local live map server", () => {
     expect(avatar.headers.get("content-type")).toContain("image/png");
     expect(Buffer.from(await avatar.arrayBuffer())).toEqual(bytes);
   });
+
+  it("expires a player snapshot when the plugin stops refreshing it", async () => {
+    const created = createLiveMapServer({
+      dataDir: tmp,
+      pluginToken: "secret",
+      webDir: tmp,
+      playerStaleAfterMs: 1_000,
+    });
+    await new Promise((resolve) => created.server.listen(0, "127.0.0.1", resolve));
+    const address = created.server.address();
+    const staleBaseUrl = `http://127.0.0.1:${address.port}`;
+
+    await fetch(`${staleBaseUrl}/api/plugin/live`, {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ players: [{ id: "left", name: "Left Player" }] }),
+    });
+    expect((await (await fetch(`${staleBaseUrl}/api/players`)).json()).players).toHaveLength(1);
+
+    created.state.playersReceivedAt -= 1_001;
+    expect((await (await fetch(`${staleBaseUrl}/api/players`)).json()).players).toEqual([]);
+    await new Promise((resolve) => created.server.close(resolve));
+  });
 });
