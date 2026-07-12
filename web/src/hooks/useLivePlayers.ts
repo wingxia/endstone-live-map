@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 
 import { liveUrl, type LandsUpdatedMessage, type LiveMessage, type PlayerState, type TilesReadyMessage } from "../api";
 
+const PLAYER_SNAPSHOT_STALE_AFTER_MS = 15_000;
+
 interface UseLivePlayersResult {
   players: PlayerState[];
   tilesReady: TilesReadyMessage | null;
@@ -18,7 +20,14 @@ export function useLivePlayers(): UseLivePlayersResult {
   useEffect(() => {
     let closed = false;
     let retryTimer = 0;
+    let staleTimer = 0;
+    let lastPlayerSnapshotAt = 0;
     let socket: WebSocket | null = null;
+
+    const replacePlayers = (players: PlayerState[]) => {
+      lastPlayerSnapshotAt = Date.now();
+      setPlayersById(new Map(players.map((player) => [player.id, player])));
+    };
 
     const connect = () => {
       if (import.meta.env.DEV) {
@@ -33,7 +42,7 @@ export function useLivePlayers(): UseLivePlayersResult {
         .then((response) => (response.ok ? response.json() : { players: [] }))
         .then((data: { players?: PlayerState[] }) => {
           if (!closed && Array.isArray(data.players)) {
-            setPlayersById(new Map(data.players.map((player) => [player.id, player])));
+            replacePlayers(data.players);
           }
         })
         .catch(() => {
@@ -51,7 +60,7 @@ export function useLivePlayers(): UseLivePlayersResult {
       socket.addEventListener("message", (event) => {
         const message = JSON.parse(String(event.data)) as LiveMessage;
         if (message.type === "player_snapshot" && message.players) {
-          setPlayersById(new Map(message.players.map((player) => [player.id, player])));
+          replacePlayers(message.players);
         }
         if (message.type === "tiles_ready" && Array.isArray(message.chunks)) {
           setTilesReady(message as TilesReadyMessage);
@@ -62,10 +71,17 @@ export function useLivePlayers(): UseLivePlayersResult {
       });
     };
 
+    staleTimer = window.setInterval(() => {
+      if (lastPlayerSnapshotAt > 0 && Date.now() - lastPlayerSnapshotAt >= PLAYER_SNAPSHOT_STALE_AFTER_MS) {
+        lastPlayerSnapshotAt = 0;
+        setPlayersById(new Map());
+      }
+    }, 1000);
     connect();
     return () => {
       closed = true;
       window.clearTimeout(retryTimer);
+      window.clearInterval(staleTimer);
       socket?.close();
     };
   }, []);

@@ -1,4 +1,3 @@
-import { Clipboard, ClipboardCheck } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { playerAvatarUrl, segmentKey, type LandClaim, type PlayerState, type TilesReadyMessage, type WorldMeta } from "../api";
@@ -283,10 +282,6 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
           <strong>
             X {coordinate.x}, Z {coordinate.z}
           </strong>
-          <em>
-            {copyState === "copied" ? <ClipboardCheck size={14} aria-hidden="true" /> : <Clipboard size={14} aria-hidden="true" />}
-            {copyLabel}
-          </em>
         </button>
         <div>
           <span>区块</span>
