@@ -1,3 +1,4 @@
+import { House } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { playerAvatarUrl, segmentKey, type LandClaim, type PlayerState, type TilesReadyMessage, type WorldMeta } from "../api";
@@ -5,6 +6,7 @@ import { blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "./coords";
 import { createChunkGridLayer, INITIAL_MAP_ZOOM, MIN_MAP_ZOOM, type ChunkLayerHandle } from "./chunkLayer";
 
 const LIVE_PLAYER_PADDING_BLOCKS = 96;
+const MAP_BOUNDS_PADDING_BLOCKS = 16;
 
 interface CoordinateState {
   x: number;
@@ -40,6 +42,7 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const lockedRef = useRef(false);
   const autoFitKeyRef = useRef("");
+  const homeViewsRef = useRef(new Map<string, { center: [number, number]; zoom: number }>());
 
   useEffect(() => {
     let cancelled = false;
@@ -57,6 +60,7 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
         attributionControl: false,
         minZoom: MIN_MAP_ZOOM,
         maxZoom: INITIAL_MAP_ZOOM,
+        maxBoundsViscosity: 1,
       }).setView([0, 0], INITIAL_MAP_ZOOM);
       if (navigator.webdriver) {
         (window as unknown as { __endstoneLiveMapLeaflet?: import("leaflet").Map }).__endstoneLiveMapLeaflet = map;
@@ -116,12 +120,19 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
     const playerBounds = players.length > 0 ? boundsForPlayers(players) : null;
     const meta = isWorldMetaForMap(worldMeta, world, dimension) ? worldMeta : null;
     const knownBounds = mergeMapBounds(meta?.bounds || null, playerBounds);
+    const navigationBounds = meta?.bounds || playerBounds;
     const autoFitKey = autoFitKeyFor(world, dimension, meta, playerBounds);
     state.chunkLayer.setKnownBounds(knownBounds, meta?.updatedAt);
+    state.map.setMaxBounds(
+      navigationBounds
+        ? leafletMaxBoundsFor(navigationBounds)
+        : (null as unknown as import("leaflet").LatLngBoundsExpression),
+    );
     if (!meta && !playerBounds) {
       state.chunkLayer.setActive(false);
       if (autoFitKeyRef.current !== autoFitKey) {
         state.map.setView([0, 0], INITIAL_MAP_ZOOM, { animate: false });
+        saveHomeView(homeViewsRef.current, world, dimension, state.map);
         autoFitKeyRef.current = autoFitKey;
       }
       return;
@@ -139,6 +150,7 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
         const initialCenter = meta ? initialCenterForMeta(meta) : { x: 0, z: 0 };
         state.map.setView(minecraftToLeaflet(initialCenter.x, initialCenter.z), INITIAL_MAP_ZOOM, { animate: false });
       }
+      saveHomeView(homeViewsRef.current, world, dimension, state.map);
       autoFitKeyRef.current = autoFitKey;
     }
     state.chunkLayer.setActive(true);
@@ -267,9 +279,28 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
     }
   };
 
+  const handleResetView = () => {
+    const homeView = homeViewsRef.current.get(mapViewKey(world, dimension));
+    if (!homeView || !stateRef.current) {
+      return;
+    }
+    stateRef.current.map.setView(homeView.center, homeView.zoom, { animate: true });
+  };
+
   return (
     <>
       <div ref={mapRef} className="map-canvas" data-testid="map-canvas" />
+      <button
+        type="button"
+        className="map-home-control leaflet-bar"
+        aria-label="返回初始视角"
+        title="返回初始视角"
+        data-testid="map-home-control"
+        disabled={!mapReady}
+        onClick={handleResetView}
+      >
+        <House size={17} aria-hidden="true" />
+      </button>
       <div className="coordinate-hud" data-testid="coordinate-hud" aria-label="当前地图坐标">
         <button
           type="button"
@@ -298,6 +329,20 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
       </div>
     </>
   );
+}
+
+function mapViewKey(world: string, dimension: string) {
+  return `${segmentKey(world)}/${segmentKey(dimension)}`;
+}
+
+function saveHomeView(
+  homeViews: Map<string, { center: [number, number]; zoom: number }>,
+  world: string,
+  dimension: string,
+  map: import("leaflet").Map,
+) {
+  const center = map.getCenter();
+  homeViews.set(mapViewKey(world, dimension), { center: [center.lat, center.lng], zoom: map.getZoom() });
 }
 
 function buildCoordinateState(
@@ -423,6 +468,13 @@ export function mergeMapBounds(left: WorldMeta["bounds"] | null, right: WorldMet
     minBlockZ: Math.min(left.minBlockZ, right.minBlockZ),
     maxBlockZ: Math.max(left.maxBlockZ, right.maxBlockZ),
   };
+}
+
+export function leafletMaxBoundsFor(bounds: WorldMeta["bounds"]): import("leaflet").LatLngBoundsExpression {
+  return [
+    minecraftToLeaflet(bounds.minBlockX - MAP_BOUNDS_PADDING_BLOCKS, bounds.maxBlockZ + MAP_BOUNDS_PADDING_BLOCKS),
+    minecraftToLeaflet(bounds.maxBlockX + MAP_BOUNDS_PADDING_BLOCKS, bounds.minBlockZ - MAP_BOUNDS_PADDING_BLOCKS),
+  ];
 }
 
 function landTooltip(land: LandClaim) {

@@ -32,6 +32,10 @@ test("refreshes visible tiles and world metadata after live tile updates", async
 
   await expect(page.getByTestId("map-canvas")).toBeVisible();
   await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("_=10")))).toBe(true);
+  const unchangedTile = await visibleTileSources(page).then((sources) =>
+    sources.find((url) => url.includes("/z4/") && !url.includes("/z4/0/0.png")),
+  );
+  expect(unchangedTile).toBeTruthy();
 
   await page.evaluate(() => {
     (window as unknown as { __liveMapSocketSend: (data: string) => void }).__liveMapSocketSend(
@@ -55,8 +59,38 @@ test("refreshes visible tiles and world metadata after live tile updates", async
   });
 
   await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("_=999")))).toBe(true);
+  await expect.poll(() => visibleTileSources(page).then((sources) => sources.includes(unchangedTile!))).toBe(true);
   await expect.poll(() => requests.worlds).toBeGreaterThan(1);
   expect(requests.legacy.length).toBe(0);
+});
+
+test("constrains navigation to explored bounds and restores the initial view", async ({ page }) => {
+  await mockLiveMap(page, { players: false });
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+
+  await expect.poll(() => leafletView(page).then(({ zoom }) => zoom)).toBe(4);
+  const initial = await leafletView(page);
+
+  await page.evaluate(() => {
+    const map = (window as unknown as {
+      __endstoneLiveMapLeaflet?: { setView?: (center: [number, number], zoom: number, options?: { animate?: boolean }) => void };
+    }).__endstoneLiveMapLeaflet;
+    map?.setView?.([50_000, 50_000], 4, { animate: false });
+  });
+  await expect.poll(() => leafletView(page).then(({ lat, lng }) => Math.max(Math.abs(lat), Math.abs(lng)))).toBeLessThan(500);
+
+  await page.evaluate(() => {
+    const map = (window as unknown as {
+      __endstoneLiveMapLeaflet?: { setView?: (center: [number, number], zoom: number, options?: { animate?: boolean }) => void };
+    }).__endstoneLiveMapLeaflet;
+    map?.setView?.([32, 32], 2, { animate: false });
+  });
+  await expect.poll(() => leafletView(page).then(({ zoom }) => zoom)).toBe(2);
+  await page.getByRole("button", { name: "返回初始视角" }).click();
+  await expect.poll(() => leafletView(page).then(({ zoom }) => zoom)).toBe(initial.zoom);
+  await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat - initial.lat))).toBeLessThan(0.01);
+  await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng - initial.lng))).toBeLessThan(0.01);
 });
 
 test("uses generated PNG tiles for every zoom level from z4 through z-8", async ({ page }) => {
@@ -349,6 +383,16 @@ async function visibleTileSources(page: Page) {
       })
       .map((image) => image.src),
   );
+}
+
+async function leafletView(page: Page) {
+  return page.evaluate(() => {
+    const map = (window as unknown as {
+      __endstoneLiveMapLeaflet?: { getCenter?: () => { lat: number; lng: number }; getZoom?: () => number };
+    }).__endstoneLiveMapLeaflet;
+    const center = map?.getCenter?.() || { lat: Number.NaN, lng: Number.NaN };
+    return { lat: center.lat, lng: center.lng, zoom: map?.getZoom?.() ?? Number.NaN };
+  });
 }
 
 async function hudMapCoverage(page: Page) {

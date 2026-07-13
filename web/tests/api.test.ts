@@ -7,6 +7,8 @@ import {
   chunkFetchRanges,
   chunkRangeForTile,
   fallbackTextureColor,
+  imageTileKey,
+  imageTileKeysForChunk,
   isImageTileZoom,
   lowZoomTileCoverage,
   slabHalfForState,
@@ -132,6 +134,10 @@ describe("api helpers", () => {
       { minChunkX: -1, maxChunkX: -1, minChunkZ: 2, maxChunkZ: 2 },
       { minChunkX: 0, maxChunkX: 0, minChunkZ: 2, maxChunkZ: 2 },
     ]);
+    expect(imageTileKeysForChunk({ chunkX: -1, chunkZ: 2 })).toHaveLength(13);
+    expect(imageTileKeysForChunk({ chunkX: -1, chunkZ: 2 })).toContain(imageTileKey({ x: -1, y: 2, z: 4 }));
+    expect(imageTileKeysForChunk({ chunkX: -1, chunkZ: 2 })).toContain(imageTileKey({ x: -1, y: 1, z: 3 }));
+    expect(imageTileKeysForChunk({ chunkX: -1, chunkZ: 2 })).toContain(imageTileKey({ x: -1, y: 0, z: -8 }));
   });
 
   it("keeps block and map coordinate helpers stable", () => {

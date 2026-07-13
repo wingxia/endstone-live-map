@@ -100,7 +100,7 @@ export async function handleRequest(state, request, response) {
     return;
   }
   if (request.method === "GET" && (url.pathname.startsWith("/api/map-tiles/") || url.pathname.startsWith("/api/local-map-tiles/"))) {
-    await serveTile(state, request, url.pathname, response);
+    await serveTile(state, request, url, response);
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/plugin/live") {
@@ -573,8 +573,8 @@ function landFile(dataDir, world, dimension) {
   return path.join(dataDir, "lands", world, `${dimension}.json`);
 }
 
-async function serveTile(state, request, pathname, response) {
-  const match = /^\/api\/(?:local-)?map-tiles\/([^/]+)\/([^/]+)\/z(-?\d+)\/(-?\d+)\/(-?\d+)\.png$/.exec(pathname);
+async function serveTile(state, request, url, response) {
+  const match = /^\/api\/(?:local-)?map-tiles\/([^/]+)\/([^/]+)\/z(-?\d+)\/(-?\d+)\/(-?\d+)\.png$/.exec(url.pathname);
   if (!match) {
     json(response, 404, { error: "invalid_tile_path" });
     return;
@@ -591,7 +591,7 @@ async function serveTile(state, request, pathname, response) {
   const lastModified = stats.mtime.toUTCString();
   const headers = corsHeaders({
     "Content-Type": "image/png",
-    "Cache-Control": "public, max-age=0, must-revalidate",
+    "Cache-Control": url.searchParams.has("_") ? "public, max-age=31536000, immutable" : "public, max-age=0, must-revalidate",
     ETag: etag,
     "Last-Modified": lastModified,
   });
