@@ -31,7 +31,6 @@ interface LeafletTileRecord {
 
 interface GridLayerInternals {
   _tiles?: Record<string, LeafletTileRecord>;
-  _update?: () => void;
 }
 
 export interface ChunkLayerHandle extends GridLayer {
@@ -72,7 +71,8 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     private dimensionName = dimension;
     private knownBounds = options.bounds || null;
     private active = false;
-    private imageTileVersion: string | number = 0;
+    private baseImageTileVersion: string | number | undefined;
+    private imageTileVersions = new Map<string, string | number>();
 
     setActive(active: boolean) {
       if (this.active === active) {
@@ -85,13 +85,13 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     setKnownBounds(bounds: ChunkLayerBounds | null, tileVersion?: string | number) {
       const boundsChanged = !sameBounds(this.knownBounds, bounds);
       this.knownBounds = bounds;
-      const versionChanged = tileVersion !== undefined && this.imageTileVersion !== tileVersion;
-      if (versionChanged) {
-        this.imageTileVersion = tileVersion;
+      const versionInitialized = tileVersion !== undefined && this.baseImageTileVersion === undefined;
+      if (versionInitialized) {
+        this.baseImageTileVersion = tileVersion;
       }
       if (boundsChanged) {
         this.redraw();
-      } else if (versionChanged) {
+      } else if (versionInitialized) {
         this.redrawVisibleImageTiles();
       }
     }
@@ -102,7 +102,8 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       }
       this.worldName = nextWorld;
       this.dimensionName = nextDimension;
-      this.imageTileVersion = Date.now();
+      this.baseImageTileVersion = undefined;
+      this.imageTileVersions.clear();
       this.redraw();
     }
 
@@ -112,8 +113,23 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       if (chunks.length === 0 && tiles.length === 0) {
         return;
       }
-      this.imageTileVersion = message.updatedAt || Date.now();
-      this.refreshVisibleTilesForUpdates(chunks, tiles);
+      const changedKeys = new Set<string>();
+      if (tiles.length > 0) {
+        for (const tile of tiles) {
+          const key = imageTileKey({ x: tile.tileX, y: tile.tileZ, z: tile.zoom });
+          this.imageTileVersions.set(key, tile.updatedAt || message.updatedAt || Date.now());
+          changedKeys.add(key);
+        }
+      } else {
+        const legacyVersion = message.updatedAt || Date.now();
+        for (const chunk of chunks) {
+          for (const key of imageTileKeysForChunk(chunk)) {
+            this.imageTileVersions.set(key, legacyVersion);
+            changedKeys.add(key);
+          }
+        }
+      }
+      this.refreshVisibleTilesForUpdates(changedKeys);
     }
 
     getBlockInfo(x: number, z: number): BlockInfo | null {
@@ -160,31 +176,20 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     }
 
     private imageTileSrc(coords: Coords) {
-      return mapImageTileUrl(this.worldName, this.dimensionName, coords.z, coords.x, coords.y, this.imageTileVersion);
+      const version = this.imageTileVersions.get(imageTileKey(coords)) ?? this.baseImageTileVersion;
+      return mapImageTileUrl(this.worldName, this.dimensionName, coords.z, coords.x, coords.y, version);
     }
 
-    private refreshVisibleTilesForUpdates(
-      changedChunks: Array<{ chunkX: number; chunkZ: number }>,
-      changedTiles: Array<{ zoom: number; tileX: number; tileZ: number }>,
-    ) {
+    private refreshVisibleTilesForUpdates(changedKeys: Set<string>) {
       const internals = this as unknown as GridLayerInternals;
-      let refreshed = false;
       for (const tile of Object.values(internals._tiles || {})) {
-        const matchesChunk = changedChunks.some((chunk) => tileIntersectsChunk(tile.coords, chunk));
-        const matchesTile = changedTiles.some(
-          (changed) => changed.zoom === tile.coords.z && changed.tileX === tile.coords.x && changed.tileZ === tile.coords.y,
-        );
-        if (!matchesChunk && !matchesTile) {
+        if (!changedKeys.has(imageTileKey(tile.coords))) {
           continue;
         }
-        refreshed = true;
         if (tile.el instanceof HTMLImageElement) {
           tile.el.classList.remove("chunk-image-tile-missing");
           tile.el.src = this.imageTileSrc(tile.coords);
         }
-      }
-      if (!refreshed) {
-        internals._update?.call(this);
       }
     }
 
@@ -209,6 +214,25 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     keepBuffer: TILE_KEEP_BUFFER,
     className: "chunk-grid-layer",
   }) as ChunkLayerHandle;
+}
+
+export function imageTileKey(coords: Pick<Coords, "x" | "y" | "z">) {
+  return `${coords.z}/${coords.x}/${coords.y}`;
+}
+
+export function imageTileKeysForChunk(chunk: { chunkX: number; chunkZ: number }) {
+  const keys: string[] = [];
+  for (let zoom = MIN_MAP_ZOOM; zoom <= MAX_ZOOM; zoom += 1) {
+    const chunksPerTile = 2 ** (MAX_ZOOM - zoom);
+    keys.push(
+      imageTileKey({
+        x: Math.floor(chunk.chunkX / chunksPerTile),
+        y: Math.floor(chunk.chunkZ / chunksPerTile),
+        z: zoom,
+      }),
+    );
+  }
+  return keys;
 }
 
 export function chunkRangeForTile(coords: Pick<Coords, "x" | "y" | "z">): TileChunkRange {
@@ -255,11 +279,6 @@ export function tileIntersectsChunkBounds(coords: Pick<Coords, "x" | "y" | "z">,
   }
   const range = lowZoomTileCoverage(coords);
   return !(range.maxChunkX < bounds.minChunkX || range.minChunkX > bounds.maxChunkX || range.maxChunkZ < bounds.minChunkZ || range.minChunkZ > bounds.maxChunkZ);
-}
-
-function tileIntersectsChunk(coords: Pick<Coords, "x" | "y" | "z">, chunk: { chunkX: number; chunkZ: number }) {
-  const range = chunkRangeForTile(coords);
-  return chunk.chunkX >= range.minChunkX && chunk.chunkX <= range.maxChunkX && chunk.chunkZ >= range.minChunkZ && chunk.chunkZ <= range.maxChunkZ;
 }
 
 export function chunkFetchRanges(chunks: Array<{ chunkX: number; chunkZ: number }>): ChunkFetchRange[] {

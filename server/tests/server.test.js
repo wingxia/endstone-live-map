@@ -150,12 +150,21 @@ describe("local live map server", () => {
     });
     expect(revalidated.status).toBe(304);
 
+    const versioned = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/0/0.png?_=123`);
+    expect(versioned.status).toBe(200);
+    expect(versioned.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(versioned.headers.get("etag")).toBeTruthy();
+
     const legacyPath = await fetch(`${baseUrl}/api/map-tiles/Bedrock_level/Overworld/z4/0/0.png`);
     expect(legacyPath.status).toBe(200);
 
     const missing = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/9/9.png`);
     expect(missing.status).toBe(200);
     expect(missing.headers.get("cache-control")).toBe("no-store");
+
+    const versionedMissing = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/9/9.png?_=123`);
+    expect(versionedMissing.status).toBe(200);
+    expect(versionedMissing.headers.get("cache-control")).toBe("no-store");
   });
 
   it("caches player avatars from plugin snapshots and serves lightweight player state", async () => {
