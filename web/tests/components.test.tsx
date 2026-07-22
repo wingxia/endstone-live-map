@@ -59,7 +59,13 @@ describe("PlayerList", () => {
 
     expect(screen.getByText("Wing")).toBeInTheDocument();
     expect(screen.getByText("12, 64, -9")).toBeInTheDocument();
-    expect(container.querySelector(".avatar img")).toHaveAttribute("src", "/api/players/1/avatar.png?_=abc123");
+    const image = container.querySelector<HTMLImageElement>(".avatar img");
+    const fallback = container.querySelector<HTMLElement>(".avatar span");
+    expect(image).toHaveAttribute("src", "/api/players/1/avatar.png?_=abc123");
+    expect(fallback).toHaveAttribute("hidden");
+    fireEvent.error(image!);
+    expect(image?.hidden).toBe(true);
+    expect(fallback?.hidden).toBe(false);
   });
 
   it("selects a player from the list", () => {

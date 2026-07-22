@@ -1,5 +1,6 @@
 #include "livemap/baseline.hpp"
 #include "livemap/base64.hpp"
+#include "livemap/avatar.hpp"
 #include "livemap/chunk.hpp"
 #include "livemap/land.hpp"
 #include "livemap/map_blocks.hpp"
@@ -21,6 +22,51 @@
 #include <vector>
 
 namespace {
+
+void setRgbaPixel(livemap::RgbaImage &image, int x, int y, std::uint8_t red, std::uint8_t green,
+                  std::uint8_t blue, std::uint8_t alpha)
+{
+    const auto offset = (static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width) +
+                         static_cast<std::size_t>(x)) *
+                        4;
+    image.pixels[offset] = red;
+    image.pixels[offset + 1] = green;
+    image.pixels[offset + 2] = blue;
+    image.pixels[offset + 3] = alpha;
+}
+
+void fillSkinRegion(livemap::RgbaImage &image, int x, int y, int size, std::uint8_t red, std::uint8_t green,
+                    std::uint8_t blue, std::uint8_t alpha)
+{
+    for (int py = y; py < y + size; ++py) {
+        for (int px = x; px < x + size; ++px) {
+            setRgbaPixel(image, px, py, red, green, blue, alpha);
+        }
+    }
+}
+
+void testPlayerAvatarRendering()
+{
+    auto skin64 = livemap::makeRgbaImage(64, 64);
+    fillSkinRegion(skin64, 8, 8, 8, 255, 0, 0, 255);
+    const auto avatar64 = livemap::renderPlayerAvatar(skin64, 32);
+    assert(avatar64.has_value());
+    assert(avatar64->pixels[0] == 255 && avatar64->pixels[1] == 0 && avatar64->pixels[3] == 255);
+
+    auto skin128 = livemap::makeRgbaImage(128, 128);
+    fillSkinRegion(skin128, 16, 16, 16, 0, 255, 0, 255);
+    fillSkinRegion(skin128, 80, 16, 16, 0, 0, 255, 128);
+    const auto avatar128 = livemap::renderPlayerAvatar(skin128, 32);
+    assert(avatar128.has_value());
+    assert(avatar128->pixels[0] == 0);
+    assert(avatar128->pixels[1] >= 126 && avatar128->pixels[1] <= 127);
+    assert(avatar128->pixels[2] >= 128 && avatar128->pixels[2] <= 129);
+    assert(avatar128->pixels[3] == 255);
+
+    const auto transparent = livemap::renderPlayerAvatar(livemap::makeRgbaImage(64, 64), 32);
+    assert(!transparent.has_value());
+    assert(!livemap::renderPlayerAvatar(livemap::makeRgbaImage(96, 96), 32).has_value());
+}
 
 void testTileMath()
 {
@@ -840,6 +886,7 @@ void testDirtyBlockChunkLimitedDrain()
 
 int main()
 {
+    testPlayerAvatarRendering();
     testTileMath();
     testChunkMath();
     testEmptyChunkSnapshotDetection();

@@ -211,6 +211,7 @@ describe("local live map server", () => {
     expect(avatar.status).toBe(200);
     expect(avatar.headers.get("content-type")).toContain("image/png");
     expect(Buffer.from(await avatar.arrayBuffer())).toEqual(bytes);
+    expect((await fetch(`${baseUrl}/api/players/missing/avatar.png`)).status).toBe(404);
   });
 
   it("expires a player snapshot when the plugin stops refreshing it", async () => {
