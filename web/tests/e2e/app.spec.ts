@@ -135,6 +135,7 @@ test("shows player avatar markers, public land overlays, and coordinate copy", a
   await page.goto("/");
 
   await expect(page.locator(".player-marker-avatar")).toBeVisible();
+  await expect(page.locator(".player-marker-fallback")).toBeHidden();
   await expect(page.locator(".player-marker-name", { hasText: "Wing" })).toBeVisible();
   await expect(page.getByRole("button", { name: /主城区/ })).toBeVisible();
   await expect.poll(() => requests.avatars.length).toBeGreaterThan(0);

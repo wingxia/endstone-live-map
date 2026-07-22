@@ -481,6 +481,10 @@ h2 svg {
   image-rendering: pixelated;
 }
 
+.avatar [hidden] {
+  display: none !important;
+}
+
 .land-avatar {
   border-radius: 8px;
   background: #203644;
@@ -688,6 +692,10 @@ h2 svg {
   font-size: 14px;
   font-weight: 800;
   line-height: 1;
+}
+
+.player-marker-frame [hidden] {
+  display: none !important;
 }
 
 .player-marker-name {
