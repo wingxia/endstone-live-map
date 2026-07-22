@@ -73,6 +73,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     private active = false;
     private baseImageTileVersion: string | number | undefined;
     private imageTileVersions = new Map<string, string | number>();
+    private pendingImageTileSources = new WeakMap<HTMLImageElement, string>();
 
     setActive(active: boolean) {
       if (this.active === active) {
@@ -90,7 +91,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
         this.baseImageTileVersion = tileVersion;
       }
       if (boundsChanged) {
-        this.redraw();
+        this.refreshVisibleTilesForBounds();
       } else if (versionInitialized) {
         this.redrawVisibleImageTiles();
       }
@@ -145,6 +146,32 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       if (!this.active || !tileIntersectsChunkBounds(coords, this.knownBounds)) {
         return this.createBlankTile(done);
       }
+      const image = this.createImageTileElement();
+      image.onload = () => {
+        if (image.naturalWidth < 2 || image.naturalHeight < 2) {
+          image.classList.add("chunk-image-tile-missing");
+        }
+        image.onload = null;
+        image.onerror = null;
+        done(undefined, image);
+      };
+      image.onerror = () => {
+        image.classList.add("chunk-image-tile-missing");
+        image.onload = null;
+        image.onerror = null;
+        done(undefined, image);
+      };
+      image.src = this.imageTileSrc(coords);
+      return image;
+    }
+
+    private createBlankTile(done: DoneCallback): HTMLElement {
+      const tile = this.createBlankTileElement();
+      window.setTimeout(() => done(undefined, tile), 0);
+      return tile;
+    }
+
+    private createImageTileElement() {
       const image = document.createElement("img");
       image.width = TILE_SIZE;
       image.height = TILE_SIZE;
@@ -152,26 +179,14 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       image.decoding = "async";
       image.draggable = false;
       image.className = "chunk-tile chunk-image-tile";
-      image.src = this.imageTileSrc(coords);
-      image.onload = () => {
-        if (image.naturalWidth < 2 || image.naturalHeight < 2) {
-          image.classList.add("chunk-image-tile-missing");
-        }
-        done(undefined, image);
-      };
-      image.onerror = () => {
-        image.classList.add("chunk-image-tile-missing");
-        done(undefined, image);
-      };
       return image;
     }
 
-    private createBlankTile(done: DoneCallback): HTMLElement {
+    private createBlankTileElement() {
       const tile = document.createElement("div");
       tile.className = "chunk-tile chunk-image-tile chunk-image-tile-missing";
       tile.style.width = `${TILE_SIZE}px`;
       tile.style.height = `${TILE_SIZE}px`;
-      window.setTimeout(() => done(undefined, tile), 0);
       return tile;
     }
 
@@ -187,8 +202,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
           continue;
         }
         if (tile.el instanceof HTMLImageElement) {
-          tile.el.classList.remove("chunk-image-tile-missing");
-          tile.el.src = this.imageTileSrc(tile.coords);
+          this.preloadImageTileReplacement(tile.el, tile.coords);
         }
       }
     }
@@ -199,9 +213,89 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
         if (!(record.el instanceof HTMLImageElement)) {
           continue;
         }
-        record.el.classList.remove("chunk-image-tile-missing");
-        record.el.src = this.imageTileSrc(record.coords);
+        this.preloadImageTileReplacement(record.el, record.coords);
       }
+    }
+
+    private refreshVisibleTilesForBounds() {
+      const internals = this as unknown as GridLayerInternals;
+      for (const record of Object.values(internals._tiles || {})) {
+        const shouldShowImage = this.active && tileIntersectsChunkBounds(record.coords, this.knownBounds);
+        if (shouldShowImage && !(record.el instanceof HTMLImageElement)) {
+          this.replaceBlankTileWhenReady(record);
+        } else if (!shouldShowImage && record.el instanceof HTMLImageElement) {
+          const blank = this.createBlankTileElement();
+          record.el.replaceWith(blank);
+          record.el = blank;
+        }
+      }
+    }
+
+    private replaceBlankTileWhenReady(record: LeafletTileRecord) {
+      const blank = record.el;
+      const image = this.createImageTileElement();
+      image.onload = async () => {
+        if (image.naturalWidth < 2 || image.naturalHeight < 2) {
+          return;
+        }
+        try {
+          await image.decode?.();
+        } catch {
+          return;
+        }
+        if (record.el !== blank || !blank.isConnected) {
+          return;
+        }
+        image.onload = null;
+        image.onerror = null;
+        blank.replaceWith(image);
+        record.el = image;
+      };
+      image.onerror = () => {
+        image.onload = null;
+        image.onerror = null;
+      };
+      image.src = this.imageTileSrc(record.coords);
+    }
+
+    private preloadImageTileReplacement(image: HTMLImageElement, coords: Coords) {
+      const source = this.imageTileSrc(coords);
+      const absoluteSource = new URL(source, document.baseURI).toString();
+      if (image.src === absoluteSource) {
+        return;
+      }
+      this.pendingImageTileSources.set(image, absoluteSource);
+      const replacement = new Image();
+      replacement.decoding = "async";
+      const discardReplacement = () => {
+        replacement.onload = null;
+        replacement.onerror = null;
+        if (this.pendingImageTileSources.get(image) === absoluteSource) {
+          this.pendingImageTileSources.delete(image);
+        }
+      };
+      replacement.onload = async () => {
+        if (replacement.naturalWidth < 2 || replacement.naturalHeight < 2) {
+          discardReplacement();
+          return;
+        }
+        try {
+          await replacement.decode?.();
+        } catch {
+          discardReplacement();
+          return;
+        }
+        if (this.pendingImageTileSources.get(image) !== absoluteSource || !image.isConnected) {
+          return;
+        }
+        replacement.onload = null;
+        replacement.onerror = null;
+        this.pendingImageTileSources.delete(image);
+        image.classList.remove("chunk-image-tile-missing");
+        image.src = absoluteSource;
+      };
+      replacement.onerror = discardReplacement;
+      replacement.src = absoluteSource;
     }
   }
 
