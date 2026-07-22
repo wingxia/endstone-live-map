@@ -270,8 +270,8 @@ async function servePlayerAvatar(state, pathname, response) {
   const playerId = decodeURIComponent(match[1]);
   const file = avatarFile(state.dataDir, playerId);
   if (!existsSync(file)) {
-    response.writeHead(200, corsHeaders({ "Content-Type": "image/png", "Cache-Control": "public, max-age=30" }));
-    response.end(EMPTY_PNG);
+    response.writeHead(404, corsHeaders({ "Cache-Control": "no-store" }));
+    response.end();
     return;
   }
   response.writeHead(200, corsHeaders({ "Content-Type": "image/png", "Cache-Control": "public, max-age=31536000, immutable" }));

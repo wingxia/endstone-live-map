@@ -237,7 +237,7 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
       state.layers.clearLayers();
 
       for (const player of players) {
-        L.marker(minecraftToLeaflet(player.x, player.z), {
+        const marker = L.marker(minecraftToLeaflet(player.x, player.z), {
           icon: L.divIcon({
             className: "player-marker",
             html: playerMarkerHtml(player),
@@ -245,11 +245,23 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
             iconAnchor: [18, 42],
           }),
           keyboard: false,
-        })
-          .bindTooltip(`${escapeHtml(player.name)} (${Math.round(player.x)}, ${Math.round(player.y)}, ${Math.round(player.z)})`, {
-            permanent: false,
-          })
-          .addTo(state.layers);
+        }).bindTooltip(`${escapeHtml(player.name)} (${Math.round(player.x)}, ${Math.round(player.y)}, ${Math.round(player.z)})`, {
+          permanent: false,
+        });
+        marker.on("add", () => {
+          const element = marker.getElement();
+          const image = element?.querySelector<HTMLImageElement>(".player-marker-avatar");
+          const fallback = element?.querySelector<HTMLElement>(".player-marker-fallback");
+          image?.addEventListener(
+            "error",
+            () => {
+              image.hidden = true;
+              if (fallback) fallback.hidden = false;
+            },
+            { once: true },
+          );
+        });
+        marker.addTo(state.layers);
       }
     }
 
@@ -488,7 +500,7 @@ function playerMarkerHtml(player: PlayerState) {
   const initial = escapeHtml((player.name || "?").slice(0, 1).toUpperCase());
   const name = escapeHtml(player.name || "Player");
   const avatarHtml = avatar
-    ? `<img class="player-marker-avatar" src="${escapeAttribute(avatar)}" alt="" loading="lazy" />`
+    ? `<img class="player-marker-avatar" src="${escapeAttribute(avatar)}" alt="" loading="lazy" /><span class="player-marker-fallback" hidden>${initial}</span>`
     : `<span class="player-marker-fallback">${initial}</span>`;
   return `<span class="player-marker-frame">${avatarHtml}</span><span class="player-marker-name">${name}</span>`;
 }
