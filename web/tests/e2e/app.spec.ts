@@ -26,16 +26,30 @@ test("renders the operational map shell from local PNG tiles only", async ({ pag
 
 test("refreshes visible tiles and world metadata after live tile updates", async ({ page }) => {
   await installMockLiveSocket(page);
-  const requests = await mockLiveMap(page, { players: false });
+  const requests = await mockLiveMap(page, {
+    players: false,
+    expandWorldBoundsAfterFirstFetch: true,
+    versionedTileDelayMs: 400,
+  });
 
   await page.goto("/");
 
   await expect(page.getByTestId("map-canvas")).toBeVisible();
   await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("_=10")))).toBe(true);
+  await page.evaluate(() => {
+    const map = (window as unknown as {
+      __endstoneLiveMapLeaflet?: { setView?: (center: [number, number], zoom: number, options?: { animate?: boolean }) => void };
+    }).__endstoneLiveMapLeaflet;
+    map?.setView?.([16, -16], 4, { animate: false });
+  });
+  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("/z4/0/0.png")))).toBe(true);
   const unchangedTile = await visibleTileSources(page).then((sources) =>
     sources.find((url) => url.includes("/z4/") && !url.includes("/z4/0/0.png")),
   );
+  const changedTile = await visibleTileSources(page).then((sources) => sources.find((url) => url.includes("/z4/0/0.png")));
   expect(unchangedTile).toBeTruthy();
+  expect(changedTile).toBeTruthy();
+  const userView = await leafletView(page);
 
   await page.evaluate(() => {
     (window as unknown as { __liveMapSocketSend: (data: string) => void }).__liveMapSocketSend(
@@ -58,9 +72,13 @@ test("refreshes visible tiles and world metadata after live tile updates", async
     );
   });
 
+  await page.waitForTimeout(100);
+  await expect.poll(() => visibleTileSources(page).then((sources) => sources.includes(changedTile!))).toBe(true);
+  expect(await leafletView(page)).toEqual(userView);
   await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("_=999")))).toBe(true);
   await expect.poll(() => visibleTileSources(page).then((sources) => sources.includes(unchangedTile!))).toBe(true);
   await expect.poll(() => requests.worlds).toBeGreaterThan(1);
+  expect(await leafletView(page)).toEqual(userView);
   expect(requests.legacy.length).toBe(0);
 });
 
@@ -200,7 +218,10 @@ test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
   expect(await hudMapCoverage(page)).toBeLessThan(0.13);
 });
 
-async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
+async function mockLiveMap(
+  page: Page,
+  options: { players?: boolean; expandWorldBoundsAfterFirstFetch?: boolean; versionedTileDelayMs?: number } = {},
+) {
   const includePlayers = options.players !== false;
   const requests = { tiles: [] as string[], avatars: [] as string[], legacy: [] as string[], worlds: 0 };
   page.on("request", (request) => {
@@ -276,6 +297,7 @@ async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
   });
   await page.route("**/api/worlds", async (route) => {
     requests.worlds += 1;
+    const expanded = options.expandWorldBoundsAfterFirstFetch === true && requests.worlds > 1;
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
@@ -287,16 +309,16 @@ async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
             status: "live",
             chunkCount: 10971,
             importedAt: 1,
-            updatedAt: 10,
+            updatedAt: expanded ? 999 : 10,
             bounds: {
-              minChunkX: -4,
-              maxChunkX: 4,
-              minChunkZ: -4,
-              maxChunkZ: 4,
-              minBlockX: -64,
-              maxBlockX: 79,
-              minBlockZ: -64,
-              maxBlockZ: 79,
+              minChunkX: expanded ? -8 : -4,
+              maxChunkX: expanded ? 8 : 4,
+              minChunkZ: expanded ? -8 : -4,
+              maxChunkZ: expanded ? 8 : 4,
+              minBlockX: expanded ? -128 : -64,
+              maxBlockX: expanded ? 143 : 79,
+              minBlockZ: expanded ? -128 : -64,
+              maxBlockZ: expanded ? 143 : 79,
             },
             sampleChunks: [{ chunkX: 0, chunkZ: 0 }],
             topBlocks: {},
@@ -307,6 +329,9 @@ async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
   });
   await page.route("**/api/local-map-tiles/**", async (route: Route) => {
     requests.tiles.push(route.request().url());
+    if (options.versionedTileDelayMs && route.request().url().includes("_=999")) {
+      await new Promise((resolve) => setTimeout(resolve, options.versionedTileDelayMs));
+    }
     await route.fulfill({ contentType: "image/png", body: GREEN_TILE_PNG });
   });
   await page.route("**/api/chunks?**", async (route) => {
