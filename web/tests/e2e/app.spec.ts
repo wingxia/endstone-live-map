@@ -24,6 +24,57 @@ test("renders the operational map shell from local PNG tiles only", async ({ pag
   expect(requests.legacy.length).toBe(0);
 });
 
+test("uses the newest available world when the configured default is absent", async ({ page }) => {
+  const requests = await mockLiveMap(page, { players: false, world: "ExchangeTest" });
+
+  await page.goto("/");
+
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect(page.getByLabel("地图状态")).toContainText("10,971");
+  await expect
+    .poll(() => requests.tiles.some((url) => url.includes("/api/local-map-tiles/ExchangeTest/Overworld/z4/")))
+    .toBe(true);
+  await expect
+    .poll(() => requests.lands.some((url) => url.includes("world=ExchangeTest")))
+    .toBe(true);
+});
+
+test("defers tile churn until map movement settles", async ({ page }) => {
+  await mockLiveMap(page, { players: false });
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const map = (window as unknown as {
+          __endstoneLiveMapLeaflet?: {
+            eachLayer?: (callback: (layer: { options?: Record<string, unknown> }) => void) => void;
+          };
+        }).__endstoneLiveMapLeaflet;
+        const gridLayerOptions: Array<Record<string, unknown>> = [];
+        map?.eachLayer?.((layer) => {
+          if (layer.options?.className === "chunk-grid-layer") {
+            gridLayerOptions.push(layer.options);
+          }
+        });
+        const gridOptions = gridLayerOptions[0];
+        return gridOptions
+          ? {
+              updateWhenIdle: gridOptions.updateWhenIdle,
+              updateWhenZooming: gridOptions.updateWhenZooming,
+              keepBuffer: gridOptions.keepBuffer,
+            }
+          : null;
+      }),
+    )
+    .toEqual({
+      updateWhenIdle: true,
+      updateWhenZooming: false,
+      keepBuffer: 2,
+    });
+});
+
 test("refreshes visible tiles and world metadata after live tile updates", async ({ page }) => {
   await installMockLiveSocket(page);
   const requests = await mockLiveMap(page, { players: false });
@@ -200,9 +251,10 @@ test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
   expect(await hudMapCoverage(page)).toBeLessThan(0.13);
 });
 
-async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
+async function mockLiveMap(page: Page, options: { players?: boolean; world?: string } = {}) {
   const includePlayers = options.players !== false;
-  const requests = { tiles: [] as string[], avatars: [] as string[], legacy: [] as string[], worlds: 0 };
+  const worldName = options.world ?? "Bedrock level";
+  const requests = { tiles: [] as string[], avatars: [] as string[], lands: [] as string[], legacy: [] as string[], worlds: 0 };
   page.on("request", (request) => {
     const url = request.url();
     if (url.includes("/api/chunks") || url.includes("/api/textures") || url.includes("/textures/")) {
@@ -221,7 +273,7 @@ async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
             id: "player-wing",
             name: "Wing",
             xuid: "xuid-1",
-            world: "Bedrock level",
+            world: worldName,
             dimension: "Overworld",
             x: 18,
             y: 72,
@@ -242,11 +294,12 @@ async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
     await route.fulfill({ contentType: "image/png", body: AVATAR_PNG });
   });
   await page.route("**/api/lands?**", async (route) => {
+    requests.lands.push(route.request().url());
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
         version: 1,
-        world: "Bedrock level",
+        world: worldName,
         dimension: "Overworld",
         updatedAt: 10,
         claims: [
@@ -254,7 +307,7 @@ async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
             id: "spawn",
             owner: "GieZi8670",
             name: "主城区",
-            world: "Bedrock level",
+            world: worldName,
             dimension: "Overworld",
             minX: -32,
             maxX: 48,
@@ -282,7 +335,7 @@ async function mockLiveMap(page: Page, options: { players?: boolean } = {}) {
         worlds: [
           {
             version: 2,
-            world: "Bedrock level",
+            world: worldName,
             dimension: "Overworld",
             status: "live",
             chunkCount: 10971,

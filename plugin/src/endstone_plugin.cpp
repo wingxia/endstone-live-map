@@ -31,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -91,6 +92,7 @@ struct EncodedAvatar {
 
 constexpr std::int64_t kChunkBatchRetryMinDelayMs = 30000;
 constexpr std::int64_t kChunkBatchRetryMaxDelayMs = 300000;
+constexpr std::int64_t kPlayerSuccessLogIntervalMs = 60000;
 
 std::string chunkName(const livemap::ChunkCoord &coord)
 {
@@ -243,6 +245,11 @@ public:
             std::scoped_lock lock(mutex_);
             path_ = path;
             std::filesystem::create_directories(path.parent_path());
+            std::error_code size_error;
+            bytes_written_ = std::filesystem::file_size(path, size_error);
+            if (size_error) {
+                bytes_written_ = 0;
+            }
             out_.open(path, std::ios::app);
             if (!out_) {
                 if (error != nullptr) {
@@ -292,15 +299,49 @@ private:
         if (!out_) {
             return;
         }
-        out_ << nowMs() << '\t' << level << '\t';
-        (out_ << ... << values);
-        out_ << '\n';
+        std::ostringstream line;
+        line << nowMs() << '\t' << level << '\t';
+        (line << ... << values);
+        line << '\n';
+        const auto text = line.str();
+        if (bytes_written_ > 0 && bytes_written_ + text.size() > kMaxBytes) {
+            rotateLocked();
+        }
+        if (!out_) {
+            return;
+        }
+        out_ << text;
         out_.flush();
+        bytes_written_ += text.size();
     }
 
+    void rotateLocked()
+    {
+        out_.close();
+        auto backup_path = path_;
+        backup_path += ".1";
+        std::error_code remove_error;
+        std::filesystem::remove(backup_path, remove_error);
+        std::error_code rename_error;
+        std::filesystem::rename(path_, backup_path, rename_error);
+        if (rename_error) {
+            std::error_code size_error;
+            bytes_written_ = std::filesystem::file_size(path_, size_error);
+            if (size_error) {
+                bytes_written_ = 0;
+            }
+            out_.open(path_, std::ios::app);
+            return;
+        }
+        out_.open(path_, std::ios::out | std::ios::trunc);
+        bytes_written_ = 0;
+    }
+
+    static constexpr std::uintmax_t kMaxBytes = 8U * 1024U * 1024U;
     std::mutex mutex_;
     std::filesystem::path path_;
     std::ofstream out_;
+    std::uintmax_t bytes_written_ = 0;
 };
 
 class UploadDispatcher {
@@ -419,7 +460,9 @@ private:
             }
 
             if (repair.tiles.empty()) {
-                return {.ok = true, .body = "{\"repairedTiles\":0,\"r2Uploaded\":0}"};
+                return {.ok = true,
+                        .body = "{\"repairedTiles\":0,\"optimizedPngTiles\":" +
+                                std::to_string(repair.optimized_png_tiles) + ",\"r2Uploaded\":0}"};
             }
             auto notify = livemap::postPluginJson(settings_, "/api/plugin/tiles",
                                                   livemap::serializeTilesReady(repair));
@@ -427,6 +470,7 @@ private:
                 return notify;
             }
             notify.body = "{\"repairedTiles\":" + std::to_string(repair.tiles.size()) +
+                          ",\"optimizedPngTiles\":" + std::to_string(repair.optimized_png_tiles) +
                           ",\"r2Uploaded\":" + std::to_string(r2.uploaded) + "}";
             return notify;
         }
@@ -1692,10 +1736,16 @@ private:
             const auto wait_ms = std::max<std::int64_t>(0, result.started_at_ms - result.queued_at_ms);
             const auto duration_ms = std::max<std::int64_t>(0, result.finished_at_ms - result.started_at_ms);
             if (result.transport.ok) {
-                background_log_.info("Uploaded player snapshot for ", result.update_count, " player(s) HTTP ",
-                                     result.transport.response_code, " wait=", wait_ms, "ms duration=", duration_ms,
-                                     "ms pending=", player_dispatcher_->pendingJobs(), " replaced=",
-                                     player_dispatcher_->replacedCount(), ".");
+                if (!last_player_success_log_count_.has_value() ||
+                    last_player_success_log_count_.value() != result.update_count ||
+                    result.finished_at_ms >= next_player_success_log_ms_) {
+                    background_log_.info("Uploaded player snapshot for ", result.update_count, " player(s) HTTP ",
+                                         result.transport.response_code, " wait=", wait_ms, "ms duration=", duration_ms,
+                                         "ms pending=", player_dispatcher_->pendingJobs(), " replaced=",
+                                         player_dispatcher_->replacedCount(), ".");
+                    last_player_success_log_count_ = result.update_count;
+                    next_player_success_log_ms_ = result.finished_at_ms + kPlayerSuccessLogIntervalMs;
+                }
                 continue;
             }
             getLogger().error("Failed to upload player snapshot HTTP {} curl {} error={}",
@@ -1893,6 +1943,8 @@ private:
     std::filesystem::path background_log_path_;
     std::filesystem::path baseline_index_path_;
     BackgroundLog background_log_;
+    std::optional<std::size_t> last_player_success_log_count_;
+    std::int64_t next_player_success_log_ms_ = 0;
     std::int64_t pending_chunk_cooldown_until_ms_ = 0;
     std::int64_t chunk_upload_backoff_until_ms_ = 0;
     std::int64_t chunk_upload_retry_delay_ms_ = kChunkBatchRetryMinDelayMs;

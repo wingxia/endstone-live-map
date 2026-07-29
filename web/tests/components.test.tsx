@@ -4,7 +4,20 @@ import { describe, expect, it } from "vitest";
 import { PlayerList } from "../src/ui/PlayerList";
 import { LandList } from "../src/ui/LandList";
 import { coordinateCopyText, mergeMapBounds } from "../src/ui/MapCanvas";
-import type { LandClaim } from "../src/api";
+import { selectWorldMeta } from "../src/ui/App";
+import type { LandClaim, WorldMeta } from "../src/api";
+
+describe("App world selection", () => {
+  it("falls back to the newest world in the selected dimension", () => {
+    const worlds = [
+      createWorld({ world: "ExchangeTestWorld", updatedAt: 10 }),
+      createWorld({ world: "ExchangeTest", updatedAt: 20 }),
+      createWorld({ world: "NetherWorld", dimension: "Nether", updatedAt: 30 }),
+    ];
+
+    expect(selectWorldMeta(worlds, "Overworld", "Bedrock level")?.world).toBe("ExchangeTest");
+  });
+});
 
 describe("MapCanvas coordinate helpers", () => {
   it("formats copied coordinates as bare x, y, z values", () => {
@@ -168,6 +181,30 @@ function createLand(overrides: Partial<LandClaim> = {}): LandClaim {
     nested: false,
     publicTeleport: true,
     updatedAt: 123,
+    ...overrides,
+  };
+}
+
+function createWorld(overrides: Partial<WorldMeta> = {}): WorldMeta {
+  return {
+    version: 2,
+    world: "Bedrock level",
+    dimension: "Overworld",
+    status: "live",
+    chunkCount: 1,
+    importedAt: 1,
+    updatedAt: 1,
+    bounds: {
+      minChunkX: 0,
+      maxChunkX: 0,
+      minChunkZ: 0,
+      maxChunkZ: 0,
+      minBlockX: 0,
+      maxBlockX: 15,
+      minBlockZ: 0,
+      maxBlockZ: 15,
+    },
+    topBlocks: {},
     ...overrides,
   };
 }

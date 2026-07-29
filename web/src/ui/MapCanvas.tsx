@@ -43,10 +43,16 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
   const lockedRef = useRef(false);
   const autoFitKeyRef = useRef("");
   const homeViewsRef = useRef(new Map<string, { center: [number, number]; zoom: number }>());
+  const mapSelectionRef = useRef({ world, dimension });
+  mapSelectionRef.current = { world, dimension };
 
   useEffect(() => {
     let cancelled = false;
     let readyFrame = 0;
+    let coordinateFrame = 0;
+    let mountedMap: import("leaflet").Map | null = null;
+    let pendingHover: import("leaflet").LeafletMouseEvent | null = null;
+    let dragging = false;
 
     async function mount() {
       const L = await import("leaflet");
@@ -66,11 +72,13 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
         (window as unknown as { __endstoneLiveMapLeaflet?: import("leaflet").Map }).__endstoneLiveMapLeaflet = map;
       }
       L.control.zoom({ position: "bottomright" }).addTo(map);
-      const chunkLayer = createChunkGridLayer(L, world, dimension).addTo(map);
+      const selection = mapSelectionRef.current;
+      const chunkLayer = createChunkGridLayer(L, selection.world, selection.dimension).addTo(map);
 
       const landLayers = L.layerGroup().addTo(map);
       const layers = L.layerGroup().addTo(map);
       stateRef.current = { map, layers, landLayers, chunkLayer };
+      mountedMap = map;
       readyFrame = window.requestAnimationFrame(() => {
         if (cancelled) {
           return;
@@ -86,13 +94,43 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
         setCoordinate(buildCoordinateState(point.x, point.z, block, locked));
       };
 
-      map.on("mousemove", (event) => {
-        if (!lockedRef.current) {
+      const cancelHoverCoordinate = () => {
+        pendingHover = null;
+        if (coordinateFrame) {
+          window.cancelAnimationFrame(coordinateFrame);
+          coordinateFrame = 0;
+        }
+      };
+      const flushHoverCoordinate = () => {
+        coordinateFrame = 0;
+        const event = pendingHover;
+        pendingHover = null;
+        if (event && !dragging && !lockedRef.current) {
           updateCoordinate(event, false);
         }
+      };
+      map.on("mousemove", (event) => {
+        if (dragging || lockedRef.current) {
+          return;
+        }
+        pendingHover = event;
+        if (!coordinateFrame) {
+          coordinateFrame = window.requestAnimationFrame(flushHoverCoordinate);
+        }
       });
-      map.on("click", (event) => updateCoordinate(event, true));
+      map.on("dragstart", () => {
+        dragging = true;
+        cancelHoverCoordinate();
+      });
+      map.on("dragend", () => {
+        dragging = false;
+      });
+      map.on("click", (event) => {
+        cancelHoverCoordinate();
+        updateCoordinate(event, true);
+      });
       map.on("mouseout", () => {
+        cancelHoverCoordinate();
         if (!lockedRef.current) {
           setCoordinate((current) => ({ ...current, height: Number.NaN }));
         }
@@ -105,8 +143,23 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
       if (readyFrame) {
         window.cancelAnimationFrame(readyFrame);
       }
+      if (coordinateFrame) {
+        window.cancelAnimationFrame(coordinateFrame);
+      }
+      if (mountedMap) {
+        mountedMap.remove();
+        if (stateRef.current?.map === mountedMap) {
+          stateRef.current = null;
+        }
+        if (
+          navigator.webdriver &&
+          (window as unknown as { __endstoneLiveMapLeaflet?: import("leaflet").Map }).__endstoneLiveMapLeaflet === mountedMap
+        ) {
+          delete (window as unknown as { __endstoneLiveMapLeaflet?: import("leaflet").Map }).__endstoneLiveMapLeaflet;
+        }
+      }
     };
-  }, [dimension, world]);
+  }, []);
 
   useEffect(() => {
     stateRef.current?.chunkLayer.setWorldDimension(world, dimension);

@@ -3,11 +3,15 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+
+#include <zlib.h>
 
 namespace livemap {
 namespace {
@@ -79,18 +83,6 @@ std::uint32_t crc32(const std::uint8_t *data, std::size_t size)
     return crc ^ 0xFFFFFFFFU;
 }
 
-std::uint32_t adler32(const std::vector<std::uint8_t> &data)
-{
-    constexpr std::uint32_t kMod = 65521U;
-    std::uint32_t a = 1;
-    std::uint32_t b = 0;
-    for (const auto byte : data) {
-        a = (a + byte) % kMod;
-        b = (b + a) % kMod;
-    }
-    return (b << 16U) | a;
-}
-
 void appendChunk(std::vector<std::uint8_t> &out, const char type[4], const std::vector<std::uint8_t> &data)
 {
     appendUint32(out, static_cast<std::uint32_t>(data.size()));
@@ -100,30 +92,74 @@ void appendChunk(std::vector<std::uint8_t> &out, const char type[4], const std::
     appendUint32(out, crc32(out.data() + type_start, out.size() - type_start));
 }
 
-std::vector<std::uint8_t> zlibStore(const std::vector<std::uint8_t> &raw)
+std::vector<std::uint8_t> zlibCompress(const std::vector<std::uint8_t> &raw)
 {
-    std::vector<std::uint8_t> out;
-    out.reserve(raw.size() + raw.size() / 65535 + 16);
-    out.push_back(0x78);
-    out.push_back(0x01);
-
-    std::size_t offset = 0;
-    while (offset < raw.size()) {
-        const auto remaining = raw.size() - offset;
-        const auto block_size = static_cast<std::uint16_t>(std::min<std::size_t>(remaining, 65535));
-        const bool final = offset + block_size >= raw.size();
-        out.push_back(final ? 0x01 : 0x00);
-        out.push_back(static_cast<std::uint8_t>(block_size & 0xFFU));
-        out.push_back(static_cast<std::uint8_t>((block_size >> 8U) & 0xFFU));
-        const auto nlen = static_cast<std::uint16_t>(~block_size);
-        out.push_back(static_cast<std::uint8_t>(nlen & 0xFFU));
-        out.push_back(static_cast<std::uint8_t>((nlen >> 8U) & 0xFFU));
-        out.insert(out.end(), raw.begin() + static_cast<std::ptrdiff_t>(offset),
-                   raw.begin() + static_cast<std::ptrdiff_t>(offset + block_size));
-        offset += block_size;
+    if (raw.size() > std::numeric_limits<uLong>::max()) {
+        throw std::length_error("png scanline data exceeds zlib input limit");
     }
-    appendUint32(out, adler32(raw));
+
+    const auto source_size = static_cast<uLong>(raw.size());
+    uLongf compressed_size = compressBound(source_size);
+    std::vector<std::uint8_t> out(static_cast<std::size_t>(compressed_size));
+    const auto status = compress2(
+        reinterpret_cast<Bytef *>(out.data()),
+        &compressed_size,
+        reinterpret_cast<const Bytef *>(raw.data()),
+        source_size,
+        2);
+    if (status != Z_OK) {
+        throw std::runtime_error("failed to compress png scanlines with zlib: " + std::to_string(status));
+    }
+    out.resize(static_cast<std::size_t>(compressed_size));
     return out;
+}
+
+int paethPredictor(int left, int above, int upper_left)
+{
+    const auto estimate = left + above - upper_left;
+    const auto left_distance = std::abs(estimate - left);
+    const auto above_distance = std::abs(estimate - above);
+    const auto upper_left_distance = std::abs(estimate - upper_left);
+    if (left_distance <= above_distance && left_distance <= upper_left_distance) {
+        return left;
+    }
+    return above_distance <= upper_left_distance ? above : upper_left;
+}
+
+std::uint64_t filterScanline(const std::uint8_t *current, const std::uint8_t *previous, std::size_t size,
+                             std::uint8_t filter_type, std::vector<std::uint8_t> *filtered)
+{
+    constexpr std::size_t kBytesPerPixel = 4;
+    std::uint64_t score = 0;
+    filtered->resize(size);
+    for (std::size_t index = 0; index < size; ++index) {
+        const auto source = static_cast<int>(current[index]);
+        const auto left = index >= kBytesPerPixel ? static_cast<int>(current[index - kBytesPerPixel]) : 0;
+        const auto above = previous != nullptr ? static_cast<int>(previous[index]) : 0;
+        const auto upper_left =
+            previous != nullptr && index >= kBytesPerPixel ? static_cast<int>(previous[index - kBytesPerPixel]) : 0;
+        int predictor = 0;
+        switch (filter_type) {
+        case 1:
+            predictor = left;
+            break;
+        case 2:
+            predictor = above;
+            break;
+        case 3:
+            predictor = (left + above) / 2;
+            break;
+        case 4:
+            predictor = paethPredictor(left, above, upper_left);
+            break;
+        default:
+            break;
+        }
+        const auto value = static_cast<std::uint8_t>(source - predictor);
+        (*filtered)[index] = value;
+        score += std::min<unsigned int>(value, 256U - value);
+    }
+    return score;
 }
 
 }  // namespace
@@ -160,14 +196,28 @@ std::vector<std::uint8_t> encodePngRgba(const RgbaImage &image)
     appendChunk(out, "IHDR", ihdr);
 
     std::vector<std::uint8_t> raw;
-    raw.reserve(static_cast<std::size_t>(image.height) * (static_cast<std::size_t>(image.width) * 4 + 1));
+    const auto row_bytes = static_cast<std::size_t>(image.width) * 4;
+    raw.reserve(static_cast<std::size_t>(image.height) * (row_bytes + 1));
+    std::vector<std::uint8_t> candidate;
+    std::vector<std::uint8_t> best;
     for (int y = 0; y < image.height; ++y) {
-        raw.push_back(0);
-        const auto row_start = static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width) * 4;
-        raw.insert(raw.end(), image.pixels.begin() + static_cast<std::ptrdiff_t>(row_start),
-                   image.pixels.begin() + static_cast<std::ptrdiff_t>(row_start + static_cast<std::size_t>(image.width) * 4));
+        const auto row_start = static_cast<std::size_t>(y) * row_bytes;
+        const auto *current = image.pixels.data() + row_start;
+        const auto *previous = y > 0 ? current - row_bytes : nullptr;
+        std::uint64_t best_score = std::numeric_limits<std::uint64_t>::max();
+        std::uint8_t best_filter = 0;
+        for (std::uint8_t filter_type = 0; filter_type <= 4; ++filter_type) {
+            const auto score = filterScanline(current, previous, row_bytes, filter_type, &candidate);
+            if (score < best_score) {
+                best_score = score;
+                best_filter = filter_type;
+                best = candidate;
+            }
+        }
+        raw.push_back(best_filter);
+        raw.insert(raw.end(), best.begin(), best.end());
     }
-    appendChunk(out, "IDAT", zlibStore(raw));
+    appendChunk(out, "IDAT", zlibCompress(raw));
     appendChunk(out, "IEND", {});
     return out;
 }

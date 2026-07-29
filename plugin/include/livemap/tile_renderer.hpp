@@ -4,6 +4,7 @@
 #include "livemap/png.hpp"
 #include "livemap/settings.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -37,6 +38,7 @@ struct TileRenderResult {
     std::string error;
     std::vector<RenderedChunk> chunks;
     std::vector<RenderedTile> tiles;
+    std::size_t optimized_png_tiles = 0;
 };
 
 [[nodiscard]] std::string cleanSegment(std::string_view value);

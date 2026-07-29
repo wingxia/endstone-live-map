@@ -7,7 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(LIVE_MAP_WITH_ENDSTONE "Build the Endstone plugin shared library" ON)
-set(ENDSTONE_API_VERSION "0.11.3" CACHE STRING "Endstone API version")
+set(ENDSTONE_API_VERSION "0.11.6" CACHE STRING "Endstone API version")
+
+find_package(ZLIB REQUIRED)
 
 add_library(livemap_core
     src/baseline.cpp
@@ -25,6 +27,7 @@ add_library(livemap_core
 )
 target_include_directories(livemap_core PUBLIC include)
 target_compile_features(livemap_core PUBLIC cxx_std_20)
+target_link_libraries(livemap_core PUBLIC ZLIB::ZLIB)
 
 include(CTest)
 if(BUILD_TESTING)

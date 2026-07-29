@@ -10,6 +10,7 @@ const ROOT_DIR = path.resolve(__dirname, "../..");
 const WEB_DIST_DIR = path.join(ROOT_DIR, "web", "dist");
 const DEFAULT_DATA_DIR = path.join(ROOT_DIR, "plugin-data", "live_map");
 const DEFAULT_PLAYER_STALE_AFTER_MS = 15_000;
+const WORLD_INDEX_SCAN_CONCURRENCY = 32;
 const EMPTY_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4AWMAAQAABQABNtCI3QAAAABJRU5ErkJggg==",
   "base64",
@@ -375,6 +376,8 @@ function getOrCreateWorldIndexEntry(index, worldName, dimensionName, persistedEn
       updatedAt: Number(persistedEntry?.updatedAt || 0),
       bounds: persistedEntry?.bounds || null,
       chunks: new Set(),
+      sampleCacheKey: "",
+      sampleChunks: [],
     };
     index.set(key, entry);
   } else if (persistedEntry) {
@@ -399,19 +402,26 @@ async function addBaseTileChunks(entry, zoomPath) {
     }
     throw error;
   }
-  for (const xDirectory of xDirectories) {
-    const chunkX = Number(xDirectory.name);
-    if (!Number.isInteger(chunkX)) {
-      continue;
-    }
-    const files = await fs.readdir(path.join(zoomPath, xDirectory.name), { withFileTypes: true });
-    for (const file of files) {
-      if (!file.isFile() || path.extname(file.name) !== ".png") {
-        continue;
-      }
-      const chunkZ = Number(path.basename(file.name, ".png"));
-      if (Number.isInteger(chunkZ)) {
-        addWorldIndexChunk(entry, chunkX, chunkZ, 0);
+  const validDirectories = xDirectories
+    .map((directory) => ({ directory, chunkX: Number(directory.name) }))
+    .filter(({ chunkX }) => Number.isInteger(chunkX));
+  for (let offset = 0; offset < validDirectories.length; offset += WORLD_INDEX_SCAN_CONCURRENCY) {
+    const batch = validDirectories.slice(offset, offset + WORLD_INDEX_SCAN_CONCURRENCY);
+    const listings = await Promise.all(
+      batch.map(async ({ directory, chunkX }) => ({
+        chunkX,
+        files: await fs.readdir(path.join(zoomPath, directory.name), { withFileTypes: true }),
+      })),
+    );
+    for (const { chunkX, files } of listings) {
+      for (const file of files) {
+        if (!file.isFile() || path.extname(file.name) !== ".png") {
+          continue;
+        }
+        const chunkZ = Number(path.basename(file.name, ".png"));
+        if (Number.isInteger(chunkZ)) {
+          addWorldIndexChunk(entry, chunkX, chunkZ, 0);
+        }
       }
     }
   }
@@ -436,9 +446,19 @@ function sampleChunksFor(entry) {
   if (!entry.bounds || entry.chunks.size === 0) {
     return [];
   }
+  const cacheKey = [
+    entry.chunks.size,
+    entry.bounds.minChunkX,
+    entry.bounds.maxChunkX,
+    entry.bounds.minChunkZ,
+    entry.bounds.maxChunkZ,
+  ].join(":");
+  if (entry.sampleCacheKey === cacheKey) {
+    return entry.sampleChunks;
+  }
   const centerX = (entry.bounds.minChunkX + entry.bounds.maxChunkX) / 2;
   const centerZ = (entry.bounds.minChunkZ + entry.bounds.maxChunkZ) / 2;
-  return [...entry.chunks]
+  entry.sampleChunks = [...entry.chunks]
     .map((coordinate) => {
       const [chunkX, chunkZ] = coordinate.split(",").map(Number);
       return { chunkX, chunkZ };
@@ -448,6 +468,8 @@ function sampleChunksFor(entry) {
       ((right.chunkX - centerX) ** 2 + (right.chunkZ - centerZ) ** 2),
     )
     .slice(0, 32);
+  entry.sampleCacheKey = cacheKey;
+  return entry.sampleChunks;
 }
 
 function compareWorldMeta(left, right) {
@@ -581,16 +603,31 @@ async function serveTile(state, request, url, response) {
   }
   const [, world, dimension, zoom, tileX, tileZ] = match;
   const file = path.join(state.dataDir, "tiles", cleanSegment(world), cleanSegment(dimension), `z${Number(zoom)}`, String(Number(tileX)), `${Number(tileZ)}.png`);
-  if (!existsSync(file)) {
-    response.writeHead(200, corsHeaders({ "Content-Type": "image/png", "Cache-Control": "no-store" }));
+  let stats;
+  try {
+    stats = await fs.stat(file);
+    if (!stats.isFile()) {
+      stats = null;
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  if (!stats) {
+    response.writeHead(200, corsHeaders({
+      "Content-Type": "image/png",
+      "Content-Length": EMPTY_PNG.length,
+      "Cache-Control": "no-store",
+    }));
     response.end(EMPTY_PNG);
     return;
   }
-  const stats = await fs.stat(file);
   const etag = `"${stats.size.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}"`;
   const lastModified = stats.mtime.toUTCString();
   const headers = corsHeaders({
     "Content-Type": "image/png",
+    "Content-Length": stats.size,
     "Cache-Control": url.searchParams.has("_") ? "public, max-age=31536000, immutable" : "public, max-age=0, must-revalidate",
     ETag: etag,
     "Last-Modified": lastModified,
@@ -625,7 +662,14 @@ async function serveStatic(webDir, pathname, response) {
     json(response, 404, { error: "web_dist_not_found", webDir });
     return;
   }
-  response.writeHead(200, corsHeaders({ "Content-Type": contentType(file) }));
+  const stats = await fs.stat(file);
+  response.writeHead(200, corsHeaders({
+    "Content-Type": contentType(file),
+    "Content-Length": stats.size,
+    "Cache-Control": path.basename(file) === "index.html"
+      ? "no-cache"
+      : "public, max-age=31536000, immutable",
+  }));
   createReadStream(file).pipe(response);
 }
 
@@ -694,8 +738,11 @@ function webSocketTextFrame(message) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const host = process.env.LIVE_MAP_HOST || "127.0.0.1";
   const port = Number(process.env.LIVE_MAP_PORT || 8000);
-  const { server } = createLiveMapServer();
+  const { server, state } = createLiveMapServer();
   server.listen(port, host, () => {
     console.log(`endstone-live-map local server listening on http://${host}:${port}`);
+    void ensureWorldIndex(state).catch((error) => {
+      console.error(`failed to prewarm live map world index: ${error instanceof Error ? error.message : String(error)}`);
+    });
   });
 }

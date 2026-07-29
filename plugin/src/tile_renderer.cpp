@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <set>
@@ -39,6 +40,8 @@ std::mutex &tilePyramidMutex()
     static std::mutex mutex;
     return mutex;
 }
+
+constexpr auto kPngCompressionMarker = ".png-filter-zlib-v1";
 
 std::int64_t nowMs()
 {
@@ -472,6 +475,64 @@ bool parseTileCoordinate(std::string_view text, int *coordinate)
     }
 }
 
+std::size_t optimizeLegacyPngTiles(const LiveMapSettings &settings)
+{
+    const auto data_root = std::filesystem::path(settings.tile_data_dir);
+    const auto marker_path = data_root / kPngCompressionMarker;
+    if (std::filesystem::exists(marker_path)) {
+        return 0;
+    }
+
+    const auto tile_root = data_root / "tiles";
+    std::size_t optimized = 0;
+    if (std::filesystem::is_directory(tile_root)) {
+        constexpr auto kRawTileBytes =
+            static_cast<std::uintmax_t>(kMapTileSize) * static_cast<std::uintmax_t>(kMapTileSize) * 4U;
+        for (const auto &entry : std::filesystem::recursive_directory_iterator(tile_root)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".rgba" ||
+                entry.file_size() != kRawTileBytes) {
+                continue;
+            }
+
+            auto png_path = entry.path();
+            png_path.replace_extension(".png");
+            if (!std::filesystem::is_regular_file(png_path) || std::filesystem::file_size(png_path) < kRawTileBytes) {
+                continue;
+            }
+
+            const auto image = readRawRgba(entry.path(), kMapTileSize, kMapTileSize);
+            std::string error;
+            if (!writePngRgba(png_path, image, &error)) {
+                throw std::runtime_error(error.empty() ? "failed to optimize legacy tile png" : error);
+            }
+            ++optimized;
+        }
+    }
+
+    std::filesystem::create_directories(data_root);
+    auto temporary_marker = marker_path;
+    temporary_marker += ".tmp";
+    {
+        std::ofstream marker(temporary_marker, std::ios::binary | std::ios::trunc);
+        if (!marker) {
+            throw std::runtime_error("failed to create png compression marker");
+        }
+        marker << "filtered-zlib-png-v1\n";
+        marker.flush();
+        if (!marker) {
+            throw std::runtime_error("failed to write png compression marker");
+        }
+    }
+    std::error_code rename_error;
+    std::filesystem::rename(temporary_marker, marker_path, rename_error);
+    if (rename_error) {
+        std::error_code cleanup_error;
+        std::filesystem::remove(temporary_marker, cleanup_error);
+        throw std::runtime_error("failed to install png compression marker: " + rename_error.message());
+    }
+    return optimized;
+}
+
 std::set<TileCoordinate> rawTileCoordinates(const std::filesystem::path &zoom_path)
 {
     std::set<TileCoordinate> coordinates;
@@ -771,6 +832,7 @@ TileRenderResult repairMissingTilePyramid(const LiveMapSettings &settings)
     result.ok = true;
     std::scoped_lock pyramid_lock(tilePyramidMutex());
     try {
+        result.optimized_png_tiles = optimizeLegacyPngTiles(settings);
         repairParentLevels(settings, baseTileGroups(settings), nowMs(), &result);
     }
     catch (const std::exception &exception) {

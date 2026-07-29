@@ -29,6 +29,11 @@ export function App() {
   const [error, setError] = useState("");
   const [landError, setLandError] = useState("");
   const [focusTarget, setFocusTarget] = useState<MapFocusTarget | null>(null);
+  const selectedWorldMeta = useMemo(
+    () => selectWorldMeta(worlds, selectedDimension, DEFAULT_WORLD),
+    [selectedDimension, worlds],
+  );
+  const selectedWorld = selectedWorldMeta?.world ?? DEFAULT_WORLD;
 
   useEffect(() => {
     listWorlds()
@@ -66,11 +71,11 @@ export function App() {
     const cacheBust =
       live.landsUpdated &&
       live.landsUpdated.dimension === selectedDimension &&
-      segmentKey(live.landsUpdated.world) === segmentKey(DEFAULT_WORLD)
+      segmentKey(live.landsUpdated.world) === segmentKey(selectedWorld)
         ? live.landsUpdated.updatedAt
         : undefined;
 
-    fetchLands(DEFAULT_WORLD, selectedDimension, cacheBust)
+    fetchLands(selectedWorld, selectedDimension, cacheBust)
       .then((response) => {
         if (cancelled) {
           return;
@@ -88,10 +93,12 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [live.landsUpdated, selectedDimension]);
+  }, [live.landsUpdated, selectedDimension, selectedWorld]);
 
-  const selectedWorldMeta = worlds.find((world) => world.dimension === selectedDimension && segmentKey(world.world) === segmentKey(DEFAULT_WORLD)) || null;
-  const selectedPlayers = live.players.filter((player) => player.dimension === selectedDimension);
+  const selectedPlayers = live.players.filter(
+    (player) =>
+      player.dimension === selectedDimension && segmentKey(player.world) === segmentKey(selectedWorld),
+  );
   const selectedDimensionLabel = DIMENSIONS.find(({ id }) => id === selectedDimension)?.label ?? selectedDimension;
   const publicLands = useMemo(() => lands.filter((land) => land.publicTeleport === true), [lands]);
 
@@ -99,7 +106,7 @@ export function App() {
     <main className="app-shell">
       <section className="map-surface" aria-label="服务器地图">
         <MapCanvas
-          world={DEFAULT_WORLD}
+          world={selectedWorld}
           dimension={selectedDimension}
           players={selectedPlayers}
           lands={publicLands}
@@ -182,5 +189,20 @@ export function App() {
         </section>
       </aside>
     </main>
+  );
+}
+
+export function selectWorldMeta(
+  worlds: WorldMeta[],
+  dimension: string,
+  preferredWorld: string,
+): WorldMeta | null {
+  const candidates = worlds.filter((world) => world.dimension === dimension);
+  return (
+    candidates.find((world) => segmentKey(world.world) === segmentKey(preferredWorld)) ??
+    candidates.reduce<WorldMeta | null>(
+      (latest, world) => (!latest || world.updatedAt > latest.updatedAt ? world : latest),
+      null,
+    )
   );
 }

@@ -351,6 +351,52 @@ void testPngEncoding()
     assert(png[2] == 78);
     assert(png[3] == 71);
     assert(std::string(reinterpret_cast<const char *>(png.data() + 12), 4) == "IHDR");
+
+    auto tile = livemap::makeRgbaImage(livemap::kMapTileSize, livemap::kMapTileSize);
+    for (int y = 0; y < tile.height; ++y) {
+        for (int x = 0; x < tile.width; ++x) {
+            const auto offset =
+                (static_cast<std::size_t>(y) * static_cast<std::size_t>(tile.width) + static_cast<std::size_t>(x)) * 4;
+            const auto block_x = static_cast<std::uint8_t>(x / 16);
+            const auto block_y = static_cast<std::uint8_t>(y / 16);
+            tile.pixels[offset] = static_cast<std::uint8_t>(32 + block_x * 9);
+            tile.pixels[offset + 1] = static_cast<std::uint8_t>(48 + block_y * 7);
+            tile.pixels[offset + 2] = static_cast<std::uint8_t>(80 + (block_x + block_y) * 4);
+            tile.pixels[offset + 3] = 255;
+        }
+    }
+    const auto compressed_tile = livemap::encodePngRgba(tile);
+    assert(compressed_tile.size() < tile.pixels.size() / 4);
+
+    auto gradient_tile = livemap::makeRgbaImage(livemap::kMapTileSize, livemap::kMapTileSize);
+    for (int y = 0; y < gradient_tile.height; ++y) {
+        for (int x = 0; x < gradient_tile.width; ++x) {
+            const auto offset =
+                (static_cast<std::size_t>(y) * static_cast<std::size_t>(gradient_tile.width) +
+                 static_cast<std::size_t>(x)) *
+                4;
+            gradient_tile.pixels[offset] = static_cast<std::uint8_t>(x + y);
+            gradient_tile.pixels[offset + 1] = static_cast<std::uint8_t>(x * 2 + y);
+            gradient_tile.pixels[offset + 2] = static_cast<std::uint8_t>(x + y * 2);
+            gradient_tile.pixels[offset + 3] = 255;
+        }
+    }
+    const auto compressed_gradient = livemap::encodePngRgba(gradient_tile);
+    assert(compressed_gradient.size() < gradient_tile.pixels.size() / 16);
+
+    auto detailed_tile = livemap::makeRgbaImage(livemap::kMapTileSize, livemap::kMapTileSize);
+    std::uint32_t random_state = 0x12345678U;
+    for (std::size_t offset = 0; offset < detailed_tile.pixels.size(); offset += 4) {
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            random_state ^= random_state << 13U;
+            random_state ^= random_state >> 17U;
+            random_state ^= random_state << 5U;
+            detailed_tile.pixels[offset + channel] = static_cast<std::uint8_t>(random_state);
+        }
+        detailed_tile.pixels[offset + 3] = 255;
+    }
+    const auto compressed_detail = livemap::encodePngRgba(detailed_tile);
+    assert(compressed_detail.size() < detailed_tile.pixels.size());
 }
 
 void testSha256AndHmac()
@@ -569,6 +615,23 @@ void testTilePyramidBatchingAndRepair()
     const auto no_op_repair = livemap::repairMissingTilePyramid(settings);
     assert(no_op_repair.ok);
     assert(no_op_repair.tiles.empty());
+    assert(no_op_repair.optimized_png_tiles == 0);
+
+    const auto legacy_png = livemap::tilePngPath(settings, "Bedrock level", "Overworld", 4, -9, 4);
+    const auto compression_marker = std::filesystem::path(settings.tile_data_dir) / ".png-filter-zlib-v1";
+    std::filesystem::remove(compression_marker);
+    {
+        std::ofstream out(legacy_png, std::ios::binary | std::ios::trunc);
+        std::vector<char> legacy_bytes(
+            static_cast<std::size_t>(livemap::kMapTileSize) * livemap::kMapTileSize * 4 + 512, '\0');
+        out.write(legacy_bytes.data(), static_cast<std::streamsize>(legacy_bytes.size()));
+    }
+    const auto optimized_repair = livemap::repairMissingTilePyramid(settings);
+    assert(optimized_repair.ok);
+    assert(optimized_repair.optimized_png_tiles == 1);
+    assert(std::filesystem::file_size(legacy_png) <
+           static_cast<std::uintmax_t>(livemap::kMapTileSize) * livemap::kMapTileSize);
+    assert(std::filesystem::exists(compression_marker));
 
     const auto damaged_png = livemap::tilePngPath(settings, "Bedrock level", "Overworld", -3, -1, 0);
     const auto damaged_raw = livemap::tileRawPath(settings, "Bedrock level", "Overworld", -3, -1, 0);

@@ -21,7 +21,7 @@ describe("local live map server", () => {
   });
 
   afterEach(async () => {
-    await new Promise((resolve) => server.close(resolve));
+    await closeServer(server);
     await fs.rm(tmp, { recursive: true, force: true });
   });
 
@@ -32,6 +32,25 @@ describe("local live map server", () => {
   it("keeps reverse-proxy origin connections open beyond the tunnel idle window", () => {
     expect(server.keepAliveTimeout).toBe(95_000);
     expect(server.headersTimeout).toBe(100_000);
+  });
+
+  it("serves the app shell uncached and immutable hashed assets with content lengths", async () => {
+    const assetDir = path.join(tmp, "assets");
+    await fs.mkdir(assetDir, { recursive: true });
+    await fs.writeFile(path.join(tmp, "index.html"), "<!doctype html><main>map</main>");
+    await fs.writeFile(path.join(assetDir, "app-deadbeef.js"), "export const ready = true;");
+
+    const shell = await fetch(`${baseUrl}/`, { headers: { Connection: "close" } });
+    expect(shell.status).toBe(200);
+    expect(shell.headers.get("cache-control")).toBe("no-cache");
+    expect(shell.headers.get("content-length")).toBe(String(Buffer.byteLength("<!doctype html><main>map</main>")));
+    await shell.text();
+
+    const asset = await fetch(`${baseUrl}/assets/app-deadbeef.js`, { headers: { Connection: "close" } });
+    expect(asset.status).toBe(200);
+    expect(asset.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(asset.headers.get("content-length")).toBe(String(Buffer.byteLength("export const ready = true;")));
+    await asset.text();
   });
 
   it("advertises the generated low-zoom tile floor", async () => {
@@ -142,6 +161,7 @@ describe("local live map server", () => {
     expect(existing.status).toBe(200);
     expect(existing.headers.get("content-type")).toContain("image/png");
     expect(existing.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+    expect(existing.headers.get("content-length")).toBe("3");
     expect(existing.headers.get("etag")).toBeTruthy();
     expect(Buffer.from(await existing.arrayBuffer())).toEqual(Buffer.from([1, 2, 3]));
 
@@ -233,6 +253,12 @@ describe("local live map server", () => {
 
     created.state.playersReceivedAt -= 1_001;
     expect((await (await fetch(`${staleBaseUrl}/api/players`)).json()).players).toEqual([]);
-    await new Promise((resolve) => created.server.close(resolve));
+    await closeServer(created.server);
   });
 });
+
+async function closeServer(server) {
+  const closed = new Promise((resolve) => server.close(resolve));
+  server.closeAllConnections();
+  await closed;
+}
