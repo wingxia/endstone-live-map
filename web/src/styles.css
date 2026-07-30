@@ -99,12 +99,10 @@ button {
 .map-hud,
 .coordinate-hud {
   border: 1px solid var(--line-strong);
-  background: var(--glass);
+  background: rgba(14, 22, 29, 0.94);
   box-shadow:
     0 14px 36px rgba(0, 0, 0, 0.24),
     inset 0 1px rgba(255, 255, 255, 0.035);
-  backdrop-filter: blur(18px) saturate(120%);
-  -webkit-backdrop-filter: blur(18px) saturate(120%);
   animation: ui-settle 360ms var(--ease-out) both;
 }
 
@@ -266,10 +264,8 @@ button {
   overflow: auto;
   padding: 24px;
   border-left: 1px solid rgba(255, 255, 255, 0.025);
-  background: var(--glass-strong);
+  background: rgba(17, 26, 34, 0.96);
   box-shadow: inset 1px 0 rgba(255, 255, 255, 0.025);
-  backdrop-filter: blur(24px) saturate(112%);
-  -webkit-backdrop-filter: blur(24px) saturate(112%);
 }
 
 .side-panel > section {
@@ -552,10 +548,8 @@ h2 svg {
   overflow: hidden;
   border: 1px solid var(--line-strong);
   border-radius: 10px;
-  background: var(--glass);
+  background: rgba(14, 22, 29, 0.94);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
-  backdrop-filter: blur(16px) saturate(120%);
-  -webkit-backdrop-filter: blur(16px) saturate(120%);
 }
 
 .leaflet-control-zoom.leaflet-bar a {
@@ -592,12 +586,10 @@ h2 svg {
   padding: 0;
   border: 1px solid var(--line-strong);
   border-radius: 10px;
-  background: var(--glass);
+  background: rgba(14, 22, 29, 0.94);
   color: var(--text);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
   cursor: pointer;
-  backdrop-filter: blur(16px) saturate(120%);
-  -webkit-backdrop-filter: blur(16px) saturate(120%);
   transition:
     background-color 160ms ease,
     color 160ms ease;
@@ -622,11 +614,9 @@ h2 svg {
   padding: 6px 9px;
   border: 1px solid var(--line-strong);
   border-radius: 7px;
-  background: var(--glass-strong);
+  background: rgba(17, 26, 34, 0.96);
   color: var(--text);
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
 }
 
 .leaflet-tooltip::before {
@@ -698,7 +688,7 @@ h2 svg {
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 5px;
-  background: rgba(13, 19, 26, 0.8);
+  background: rgba(13, 19, 26, 0.94);
   color: #f2f7fb;
   font-size: 10px;
   font-weight: 700;
@@ -707,8 +697,6 @@ h2 svg {
   text-overflow: ellipsis;
   text-shadow: 0 1px 1px rgba(0, 0, 0, 0.5);
   white-space: nowrap;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
 }
 
 .side-panel,

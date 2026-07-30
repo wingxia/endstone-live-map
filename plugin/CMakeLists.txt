@@ -28,6 +28,7 @@ add_library(livemap_core
 target_include_directories(livemap_core PUBLIC include)
 target_compile_features(livemap_core PUBLIC cxx_std_20)
 target_link_libraries(livemap_core PUBLIC ZLIB::ZLIB)
+set_target_properties(livemap_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 include(CTest)
 if(BUILD_TESTING)

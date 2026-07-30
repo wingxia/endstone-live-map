@@ -3,7 +3,9 @@ import fs from "node:fs/promises";
 import { createReadStream, existsSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, "../..");
@@ -11,6 +13,19 @@ const WEB_DIST_DIR = path.join(ROOT_DIR, "web", "dist");
 const DEFAULT_DATA_DIR = path.join(ROOT_DIR, "plugin-data", "live_map");
 const DEFAULT_PLAYER_STALE_AFTER_MS = 15_000;
 const WORLD_INDEX_SCAN_CONCURRENCY = 32;
+const WORLD_INDEX_VERSION = 1;
+const WORLD_INDEX_FILE_NAME = "world-index-v1.json";
+const WORLD_INDEX_SAMPLE_LIMIT = 32;
+const DEFAULT_TILE_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const DEFAULT_TILE_CACHE_MAX_ENTRIES = 4_096;
+const DEFAULT_TILE_CACHE_FRESH_MS = 1_000;
+const DEFAULT_MISSING_TILE_CACHE_MS = 750;
+const DEFAULT_STATIC_CACHE_MAX_BYTES = 16 * 1024 * 1024;
+const DEFAULT_STATIC_CACHE_MAX_ENTRIES = 128;
+const MIN_STATIC_COMPRESSION_BYTES = 1_024;
+const brotliCompressAsync = promisify(brotliCompress);
+const gzipAsync = promisify(gzip);
+let atomicWriteSequence = 0;
 const EMPTY_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4AWMAAQAABQABNtCI3QAAAABJRU5ErkJggg==",
   "base64",
@@ -33,6 +48,37 @@ export function createLiveMapServer(options = {}) {
     webDir,
     worldIndex: null,
     worldIndexPromise: null,
+    worldIndexUpdatePromise: Promise.resolve(),
+    tileCache: new Map(),
+    tileCacheBytes: 0,
+    tileCacheMaxBytes: nonNegativeIntegerOr(
+      options.tileCacheMaxBytes ?? process.env.LIVE_MAP_TILE_CACHE_MAX_BYTES,
+      DEFAULT_TILE_CACHE_MAX_BYTES,
+    ),
+    tileCacheMaxEntries: nonNegativeIntegerOr(
+      options.tileCacheMaxEntries ?? process.env.LIVE_MAP_TILE_CACHE_MAX_ENTRIES,
+      DEFAULT_TILE_CACHE_MAX_ENTRIES,
+    ),
+    tileCacheFreshMs: nonNegativeIntegerOr(
+      options.tileCacheFreshMs ?? process.env.LIVE_MAP_TILE_CACHE_FRESH_MS,
+      DEFAULT_TILE_CACHE_FRESH_MS,
+    ),
+    missingTileCache: new Map(),
+    missingTileCacheMs: nonNegativeIntegerOr(
+      options.missingTileCacheMs ?? process.env.LIVE_MAP_MISSING_TILE_CACHE_MS,
+      DEFAULT_MISSING_TILE_CACHE_MS,
+    ),
+    tileLoads: new Map(),
+    staticCache: new Map(),
+    staticCacheBytes: 0,
+    staticCacheMaxBytes: nonNegativeIntegerOr(
+      options.staticCacheMaxBytes ?? process.env.LIVE_MAP_STATIC_CACHE_MAX_BYTES,
+      DEFAULT_STATIC_CACHE_MAX_BYTES,
+    ),
+    staticCacheMaxEntries: nonNegativeIntegerOr(
+      options.staticCacheMaxEntries ?? process.env.LIVE_MAP_STATIC_CACHE_MAX_ENTRIES,
+      DEFAULT_STATIC_CACHE_MAX_ENTRIES,
+    ),
   };
 
   const server = http.createServer((request, response) => {
@@ -68,7 +114,24 @@ export async function handleRequest(state, request, response) {
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/health") {
-    json(response, 200, { ok: true, service: "endstone-live-map-local-server", dataDir: state.dataDir });
+    json(response, 200, {
+      ok: true,
+      service: "endstone-live-map-local-server",
+      dataDir: state.dataDir,
+      worldIndexReady: state.worldIndex !== null,
+      caches: {
+        tiles: {
+          entries: state.tileCache.size,
+          bytes: state.tileCacheBytes,
+          maxBytes: state.tileCacheMaxBytes,
+        },
+        static: {
+          entries: state.staticCache.size,
+          bytes: state.staticCacheBytes,
+          maxBytes: state.staticCacheMaxBytes,
+        },
+      },
+    });
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/config") {
@@ -142,7 +205,7 @@ export async function handleRequest(state, request, response) {
     return;
   }
 
-  await serveStatic(state.webDir, url.pathname, response);
+  await serveStatic(state, request, url.pathname, response);
 }
 
 function currentPlayers(state, now = Date.now()) {
@@ -236,6 +299,11 @@ function numberOr(value, fallback) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function nonNegativeIntegerOr(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.floor(number) : fallback;
+}
+
 function validHash(value) {
   return /^[a-fA-F0-9]{16,128}$/.test(String(value || ""));
 }
@@ -286,12 +354,13 @@ function avatarFile(dataDir, playerId) {
 async function readWorlds(serverState) {
   const index = await ensureWorldIndex(serverState);
   return [...index.values()]
+    .filter((entry) => entry.chunkCount > 0 && entry.bounds)
     .map((entry) => ({
       version: 2,
       world: entry.world,
       dimension: entry.dimension,
       status: "live",
-      chunkCount: entry.chunks.size,
+      chunkCount: entry.chunkCount,
       importedAt: entry.importedAt || entry.updatedAt || 0,
       updatedAt: entry.updatedAt || 0,
       bounds: entry.bounds || null,
@@ -306,10 +375,11 @@ async function ensureWorldIndex(serverState) {
     return serverState.worldIndex;
   }
   if (!serverState.worldIndexPromise) {
-    serverState.worldIndexPromise = buildWorldIndex(serverState.dataDir).then((index) => {
-      serverState.worldIndex = index;
-      return index;
-    });
+    serverState.worldIndexPromise = loadOrBuildWorldIndex(serverState.dataDir)
+      .then((index) => {
+        serverState.worldIndex = index;
+        return index;
+      });
   }
   try {
     return await serverState.worldIndexPromise;
@@ -318,7 +388,17 @@ async function ensureWorldIndex(serverState) {
   }
 }
 
-async function buildWorldIndex(dataDir) {
+async function loadOrBuildWorldIndex(dataDir) {
+  const persistedIndex = await readWorldIndex(dataDir);
+  if (persistedIndex) {
+    return persistedIndex;
+  }
+  const migratedIndex = await buildWorldIndexFromLegacyData(dataDir);
+  await writeWorldIndexAtomic(dataDir, migratedIndex);
+  return migratedIndex;
+}
+
+async function buildWorldIndexFromLegacyData(dataDir) {
   const persisted = await readState(dataDir);
   const persistedWorlds = Object.values(persisted.worlds || {});
   const canonicalWorldNames = new Map(
@@ -357,7 +437,7 @@ async function buildWorldIndex(dataDir) {
     const entry = getOrCreateWorldIndexEntry(index, persistedEntry.world, persistedEntry.dimension, persistedEntry);
     for (const coordinate of Object.keys(persistedEntry.chunks || {})) {
       const [chunkX, chunkZ] = coordinate.split(",").map(Number);
-      if (Number.isFinite(chunkX) && Number.isFinite(chunkZ)) {
+      if (Number.isInteger(chunkX) && Number.isInteger(chunkZ)) {
         addWorldIndexChunk(entry, chunkX, chunkZ, persistedEntry.chunks[coordinate]);
       }
     }
@@ -372,10 +452,11 @@ function getOrCreateWorldIndexEntry(index, worldName, dimensionName, persistedEn
     entry = {
       world: String(worldName),
       dimension: String(dimensionName),
-      importedAt: Number(persistedEntry?.importedAt || persistedEntry?.updatedAt || 0),
-      updatedAt: Number(persistedEntry?.updatedAt || 0),
-      bounds: persistedEntry?.bounds || null,
-      chunks: new Set(),
+      importedAt: numberOr(persistedEntry?.importedAt || persistedEntry?.updatedAt, 0),
+      updatedAt: numberOr(persistedEntry?.updatedAt, 0),
+      bounds: normalizeBounds(persistedEntry?.bounds),
+      chunkRows: new Map(),
+      chunkCount: 0,
       sampleCacheKey: "",
       sampleChunks: [],
     };
@@ -383,9 +464,9 @@ function getOrCreateWorldIndexEntry(index, worldName, dimensionName, persistedEn
   } else if (persistedEntry) {
     entry.world = String(persistedEntry.world || entry.world);
     entry.dimension = String(persistedEntry.dimension || entry.dimension);
-    entry.importedAt = Number(persistedEntry.importedAt || entry.importedAt || 0);
-    entry.updatedAt = Math.max(entry.updatedAt, Number(persistedEntry.updatedAt || 0));
-    entry.bounds = expandBounds(entry.bounds, persistedEntry.bounds);
+    entry.importedAt = numberOr(persistedEntry.importedAt || entry.importedAt, 0);
+    entry.updatedAt = Math.max(entry.updatedAt, numberOr(persistedEntry.updatedAt, 0));
+    entry.bounds = expandBounds(entry.bounds, normalizeBounds(persistedEntry.bounds));
   } else if (entry.world === cleanSegment(entry.world) && String(worldName) !== cleanSegment(worldName)) {
     entry.world = String(worldName);
   }
@@ -428,48 +509,113 @@ async function addBaseTileChunks(entry, zoomPath) {
 }
 
 function addWorldIndexChunk(entry, chunkX, chunkZ, updatedAt) {
-  entry.chunks.add(`${chunkX},${chunkZ}`);
-  entry.updatedAt = Math.max(entry.updatedAt, Number(updatedAt || 0));
-  entry.bounds = expandBounds(entry.bounds, {
-    minChunkX: chunkX,
-    maxChunkX: chunkX,
-    minChunkZ: chunkZ,
-    maxChunkZ: chunkZ,
-    minBlockX: chunkX * 16,
-    maxBlockX: chunkX * 16 + 15,
-    minBlockZ: chunkZ * 16,
-    maxBlockZ: chunkZ * 16 + 15,
-  });
+  entry.updatedAt = Math.max(entry.updatedAt, numberOr(updatedAt, 0));
+  let intervals = entry.chunkRows.get(chunkX);
+  if (!intervals) {
+    intervals = [];
+    entry.chunkRows.set(chunkX, intervals);
+  }
+
+  let insertionIndex = 0;
+  while (insertionIndex < intervals.length && intervals[insertionIndex][1] < chunkZ - 1) {
+    insertionIndex += 1;
+  }
+  if (
+    insertionIndex < intervals.length &&
+    intervals[insertionIndex][0] <= chunkZ &&
+    intervals[insertionIndex][1] >= chunkZ
+  ) {
+    return false;
+  }
+
+  if (insertionIndex === intervals.length || intervals[insertionIndex][0] > chunkZ + 1) {
+    intervals.splice(insertionIndex, 0, [chunkZ, chunkZ]);
+  } else {
+    intervals[insertionIndex][0] = Math.min(intervals[insertionIndex][0], chunkZ);
+    intervals[insertionIndex][1] = Math.max(intervals[insertionIndex][1], chunkZ);
+    while (
+      insertionIndex + 1 < intervals.length &&
+      intervals[insertionIndex + 1][0] <= intervals[insertionIndex][1] + 1
+    ) {
+      intervals[insertionIndex][1] = Math.max(intervals[insertionIndex][1], intervals[insertionIndex + 1][1]);
+      intervals.splice(insertionIndex + 1, 1);
+    }
+  }
+
+  entry.chunkCount += 1;
+  entry.bounds = expandBounds(entry.bounds, boundsForChunkRange(chunkX, chunkZ, chunkZ));
+  entry.sampleCacheKey = "";
+  return true;
 }
 
 function sampleChunksFor(entry) {
-  if (!entry.bounds || entry.chunks.size === 0) {
+  if (!entry.bounds || entry.chunkCount === 0) {
     return [];
   }
-  const cacheKey = [
-    entry.chunks.size,
-    entry.bounds.minChunkX,
-    entry.bounds.maxChunkX,
-    entry.bounds.minChunkZ,
-    entry.bounds.maxChunkZ,
-  ].join(":");
+  const cacheKey = sampleCacheKeyFor(entry);
   if (entry.sampleCacheKey === cacheKey) {
     return entry.sampleChunks;
   }
+
   const centerX = (entry.bounds.minChunkX + entry.bounds.maxChunkX) / 2;
   const centerZ = (entry.bounds.minChunkZ + entry.bounds.maxChunkZ) / 2;
-  entry.sampleChunks = [...entry.chunks]
-    .map((coordinate) => {
-      const [chunkX, chunkZ] = coordinate.split(",").map(Number);
-      return { chunkX, chunkZ };
-    })
-    .sort((left, right) =>
-      ((left.chunkX - centerX) ** 2 + (left.chunkZ - centerZ) ** 2) -
-      ((right.chunkX - centerX) ** 2 + (right.chunkZ - centerZ) ** 2),
-    )
-    .slice(0, 32);
+  const candidates = [];
+  for (const [chunkX, intervals] of entry.chunkRows) {
+    for (const [startChunkZ, endChunkZ] of intervals) {
+      const anchor = Math.max(startChunkZ, Math.min(endChunkZ, Math.round(centerZ)));
+      for (let offset = 0; offset < WORLD_INDEX_SAMPLE_LIMIT; offset += 1) {
+        considerSampleCandidate(candidates, chunkX, anchor - offset, startChunkZ, endChunkZ, centerX, centerZ);
+        if (offset > 0) {
+          considerSampleCandidate(candidates, chunkX, anchor + offset, startChunkZ, endChunkZ, centerX, centerZ);
+        }
+      }
+    }
+  }
+  entry.sampleChunks = candidates
+    .sort(compareSampleCandidate)
+    .map(({ chunkX, chunkZ }) => ({ chunkX, chunkZ }));
   entry.sampleCacheKey = cacheKey;
   return entry.sampleChunks;
+}
+
+function sampleCacheKeyFor(entry) {
+  return [
+    entry.chunkCount,
+    entry.bounds?.minChunkX,
+    entry.bounds?.maxChunkX,
+    entry.bounds?.minChunkZ,
+    entry.bounds?.maxChunkZ,
+  ].join(":");
+}
+
+function considerSampleCandidate(candidates, chunkX, chunkZ, startChunkZ, endChunkZ, centerX, centerZ) {
+  if (chunkZ < startChunkZ || chunkZ > endChunkZ) {
+    return;
+  }
+  const candidate = {
+    chunkX,
+    chunkZ,
+    distance: (chunkX - centerX) ** 2 + (chunkZ - centerZ) ** 2,
+  };
+  if (candidates.length < WORLD_INDEX_SAMPLE_LIMIT) {
+    candidates.push(candidate);
+    return;
+  }
+  let worstIndex = 0;
+  for (let index = 1; index < candidates.length; index += 1) {
+    if (compareSampleCandidate(candidates[index], candidates[worstIndex]) > 0) {
+      worstIndex = index;
+    }
+  }
+  if (compareSampleCandidate(candidate, candidates[worstIndex]) < 0) {
+    candidates[worstIndex] = candidate;
+  }
+}
+
+function compareSampleCandidate(left, right) {
+  return left.distance - right.distance ||
+    left.chunkX - right.chunkX ||
+    left.chunkZ - right.chunkZ;
 }
 
 function compareWorldMeta(left, right) {
@@ -477,6 +623,184 @@ function compareWorldMeta(left, right) {
   return String(left.world).localeCompare(String(right.world)) ||
     (dimensionOrder.get(left.dimension) ?? 99) - (dimensionOrder.get(right.dimension) ?? 99) ||
     String(left.dimension).localeCompare(String(right.dimension));
+}
+
+async function readWorldIndex(dataDir) {
+  let persisted;
+  try {
+    persisted = JSON.parse(await fs.readFile(path.join(dataDir, WORLD_INDEX_FILE_NAME), "utf8"));
+  } catch {
+    return null;
+  }
+  if (persisted?.version !== WORLD_INDEX_VERSION || !Array.isArray(persisted.worlds)) {
+    return null;
+  }
+
+  const index = new Map();
+  for (const persistedEntry of persisted.worlds) {
+    if (
+      !persistedEntry ||
+      typeof persistedEntry.world !== "string" ||
+      typeof persistedEntry.dimension !== "string" ||
+      !Array.isArray(persistedEntry.chunkRows)
+    ) {
+      return null;
+    }
+    const entry = getOrCreateWorldIndexEntry(
+      index,
+      persistedEntry.world,
+      persistedEntry.dimension,
+      persistedEntry,
+    );
+    const seenChunkX = new Set();
+    let derivedBounds = null;
+    for (const row of persistedEntry.chunkRows) {
+      if (!Array.isArray(row) || row.length < 3 || row.length % 2 !== 1) {
+        return null;
+      }
+      const chunkX = Number(row[0]);
+      if (!Number.isInteger(chunkX) || seenChunkX.has(chunkX)) {
+        return null;
+      }
+      seenChunkX.add(chunkX);
+      const intervals = [];
+      let previousEnd = Number.NEGATIVE_INFINITY;
+      for (let offset = 1; offset < row.length; offset += 2) {
+        const startChunkZ = Number(row[offset]);
+        const endChunkZ = Number(row[offset + 1]);
+        if (
+          !Number.isInteger(startChunkZ) ||
+          !Number.isInteger(endChunkZ) ||
+          startChunkZ > endChunkZ ||
+          startChunkZ <= previousEnd + 1
+        ) {
+          return null;
+        }
+        const rangeSize = endChunkZ - startChunkZ + 1;
+        if (!Number.isSafeInteger(entry.chunkCount + rangeSize)) {
+          return null;
+        }
+        intervals.push([startChunkZ, endChunkZ]);
+        entry.chunkCount += rangeSize;
+        previousEnd = endChunkZ;
+        derivedBounds = expandBounds(derivedBounds, boundsForChunkRange(chunkX, startChunkZ, endChunkZ));
+      }
+      entry.chunkRows.set(chunkX, intervals);
+    }
+    if (Number(persistedEntry.chunkCount) !== entry.chunkCount) {
+      return null;
+    }
+    entry.bounds = expandBounds(entry.bounds, derivedBounds);
+
+    const persistedSamples = Array.isArray(persistedEntry.sampleChunks)
+      ? persistedEntry.sampleChunks
+        .map((sample) => ({ chunkX: Number(sample?.chunkX), chunkZ: Number(sample?.chunkZ) }))
+        .filter((sample) => Number.isInteger(sample.chunkX) && Number.isInteger(sample.chunkZ))
+      : [];
+    const expectedSampleCount = Math.min(WORLD_INDEX_SAMPLE_LIMIT, entry.chunkCount);
+    if (
+      persistedSamples.length === expectedSampleCount &&
+      persistedSamples.every((sample) => worldIndexHasChunk(entry, sample.chunkX, sample.chunkZ))
+    ) {
+      entry.sampleChunks = persistedSamples;
+      entry.sampleCacheKey = sampleCacheKeyFor(entry);
+    }
+  }
+  return index;
+}
+
+async function writeWorldIndexAtomic(dataDir, index) {
+  await fs.mkdir(dataDir, { recursive: true });
+  const destination = path.join(dataDir, WORLD_INDEX_FILE_NAME);
+  const temporary = `${destination}.${process.pid}.${Date.now()}.${atomicWriteSequence += 1}.tmp`;
+  const contents = `${JSON.stringify(serializeWorldIndex(index))}\n`;
+  let handle;
+  try {
+    handle = await fs.open(temporary, "wx");
+    await handle.writeFile(contents, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.rename(temporary, destination);
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    await fs.rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+function serializeWorldIndex(index) {
+  const worlds = [...index.values()]
+    .sort(compareWorldMeta)
+    .map((entry) => ({
+      world: entry.world,
+      dimension: entry.dimension,
+      importedAt: entry.importedAt || entry.updatedAt || 0,
+      updatedAt: entry.updatedAt || 0,
+      bounds: entry.bounds,
+      chunkCount: entry.chunkCount,
+      sampleChunks: sampleChunksFor(entry),
+      chunkRows: [...entry.chunkRows]
+        .sort(([leftChunkX], [rightChunkX]) => leftChunkX - rightChunkX)
+        .map(([chunkX, intervals]) => [
+          chunkX,
+          ...intervals.flatMap(([startChunkZ, endChunkZ]) => [startChunkZ, endChunkZ]),
+        ]),
+    }));
+  return { version: WORLD_INDEX_VERSION, worlds };
+}
+
+function worldIndexHasChunk(entry, chunkX, chunkZ) {
+  const intervals = entry.chunkRows.get(chunkX);
+  if (!intervals) {
+    return false;
+  }
+  for (const [startChunkZ, endChunkZ] of intervals) {
+    if (chunkZ < startChunkZ) {
+      return false;
+    }
+    if (chunkZ <= endChunkZ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function boundsForChunkRange(chunkX, startChunkZ, endChunkZ) {
+  return {
+    minChunkX: chunkX,
+    maxChunkX: chunkX,
+    minChunkZ: startChunkZ,
+    maxChunkZ: endChunkZ,
+    minBlockX: chunkX * 16,
+    maxBlockX: chunkX * 16 + 15,
+    minBlockZ: startChunkZ * 16,
+    maxBlockZ: endChunkZ * 16 + 15,
+  };
+}
+
+function normalizeBounds(bounds) {
+  if (!bounds || typeof bounds !== "object") {
+    return null;
+  }
+  const normalized = {};
+  for (const key of [
+    "minChunkX",
+    "maxChunkX",
+    "minChunkZ",
+    "maxChunkZ",
+    "minBlockX",
+    "maxBlockX",
+    "minBlockZ",
+    "maxBlockZ",
+  ]) {
+    const value = Number(bounds[key]);
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+    normalized[key] = value;
+  }
+  return normalized;
 }
 
 async function readState(dataDir) {
@@ -487,9 +811,10 @@ async function readState(dataDir) {
   }
 }
 
-async function writeState(dataDir, state) {
-  await fs.mkdir(dataDir, { recursive: true });
-  await fs.writeFile(path.join(dataDir, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
+function enqueueWorldIndexUpdate(serverState, update) {
+  const pending = serverState.worldIndexUpdatePromise.then(update, update);
+  serverState.worldIndexUpdatePromise = pending.catch(() => {});
+  return pending;
 }
 
 async function updateWorldsFromTiles(serverState, payload) {
@@ -497,49 +822,41 @@ async function updateWorldsFromTiles(serverState, payload) {
   if (chunks.length === 0) {
     return;
   }
-  const worldIndex = await ensureWorldIndex(serverState);
-  const state = await readState(serverState.dataDir);
-  state.version = 2;
-  state.worlds ||= {};
-  const now = Number(payload.updatedAt || Date.now());
-  for (const chunk of chunks) {
-    const worldName = String(chunk.world || "Bedrock level");
-    const dimensionName = String(chunk.dimension || "Overworld");
-    const chunkX = Number(chunk.chunkX);
-    const chunkZ = Number(chunk.chunkZ);
-    if (!Number.isFinite(chunkX) || !Number.isFinite(chunkZ)) {
-      continue;
+  await enqueueWorldIndexUpdate(serverState, async () => {
+    const worldIndex = await ensureWorldIndex(serverState);
+    const payloadUpdatedAt = Number(payload.updatedAt);
+    const now = Number.isFinite(payloadUpdatedAt) ? payloadUpdatedAt : Date.now();
+    let changed = false;
+    for (const chunk of chunks) {
+      const worldName = String(chunk.world || "Bedrock level");
+      const dimensionName = String(chunk.dimension || "Overworld");
+      const chunkX = Number(chunk.chunkX);
+      const chunkZ = Number(chunk.chunkZ);
+      if (!Number.isInteger(chunkX) || !Number.isInteger(chunkZ)) {
+        continue;
+      }
+      const key = `${cleanSegment(worldName)}/${cleanSegment(dimensionName)}`;
+      const chunkUpdatedAtValue = Number(chunk.updatedAt);
+      const chunkUpdatedAt = Number.isFinite(chunkUpdatedAtValue) ? chunkUpdatedAtValue : now;
+      let entry = worldIndex.get(key);
+      if (!entry) {
+        entry = getOrCreateWorldIndexEntry(worldIndex, worldName, dimensionName, {
+          world: worldName,
+          dimension: dimensionName,
+          importedAt: now,
+          updatedAt: chunkUpdatedAt,
+          bounds: null,
+        });
+        changed = true;
+      }
+      const previousUpdatedAt = entry.updatedAt;
+      const added = addWorldIndexChunk(entry, chunkX, chunkZ, chunkUpdatedAt);
+      changed ||= added || entry.updatedAt !== previousUpdatedAt;
     }
-    const key = `${cleanSegment(worldName)}/${cleanSegment(dimensionName)}`;
-    const entry = (state.worlds[key] ||= {
-      world: worldName,
-      dimension: dimensionName,
-      importedAt: now,
-      updatedAt: now,
-      bounds: null,
-      chunks: {},
-    });
-    entry.updatedAt = Math.max(Number(entry.updatedAt || 0), Number(chunk.updatedAt || now));
-    entry.chunks[`${chunkX},${chunkZ}`] = Number(chunk.updatedAt || now);
-    addWorldIndexChunk(
-      getOrCreateWorldIndexEntry(worldIndex, worldName, dimensionName, entry),
-      chunkX,
-      chunkZ,
-      chunk.updatedAt || now,
-    );
-    const chunkBounds = {
-      minChunkX: chunkX,
-      maxChunkX: chunkX,
-      minChunkZ: chunkZ,
-      maxChunkZ: chunkZ,
-      minBlockX: chunkX * 16,
-      maxBlockX: chunkX * 16 + 15,
-      minBlockZ: chunkZ * 16,
-      maxBlockZ: chunkZ * 16 + 15,
-    };
-    entry.bounds = expandBounds(entry.bounds, chunkBounds);
-  }
-  await writeState(serverState.dataDir, state);
+    if (changed) {
+      await writeWorldIndexAtomic(serverState.dataDir, worldIndex);
+    }
+  });
 }
 
 function expandBounds(current, next) {
@@ -603,18 +920,9 @@ async function serveTile(state, request, url, response) {
   }
   const [, world, dimension, zoom, tileX, tileZ] = match;
   const file = path.join(state.dataDir, "tiles", cleanSegment(world), cleanSegment(dimension), `z${Number(zoom)}`, String(Number(tileX)), `${Number(tileZ)}.png`);
-  let stats;
-  try {
-    stats = await fs.stat(file);
-    if (!stats.isFile()) {
-      stats = null;
-    }
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
-      throw error;
-    }
-  }
-  if (!stats) {
+  const version = url.searchParams.has("_") ? url.searchParams.get("_") ?? "" : null;
+  const tile = await loadTile(state, file, version);
+  if (!tile) {
     response.writeHead(200, corsHeaders({
       "Content-Type": "image/png",
       "Content-Length": EMPTY_PNG.length,
@@ -623,31 +931,185 @@ async function serveTile(state, request, url, response) {
     response.end(EMPTY_PNG);
     return;
   }
-  const etag = `"${stats.size.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}"`;
-  const lastModified = stats.mtime.toUTCString();
   const headers = corsHeaders({
     "Content-Type": "image/png",
-    "Content-Length": stats.size,
-    "Cache-Control": url.searchParams.has("_") ? "public, max-age=31536000, immutable" : "public, max-age=0, must-revalidate",
-    ETag: etag,
-    "Last-Modified": lastModified,
+    "Content-Length": tile.bytes.length,
+    "Cache-Control": version !== null ? "public, max-age=31536000, immutable" : "public, max-age=0, must-revalidate",
+    ETag: tile.etag,
+    "Last-Modified": tile.lastModified,
   });
-  if (request.headers["if-none-match"] === etag) {
+  if (request.headers["if-none-match"] === tile.etag) {
     response.writeHead(304, headers);
     response.end();
     return;
   }
   const modifiedSince = Date.parse(String(request.headers["if-modified-since"] || ""));
-  if (Number.isFinite(modifiedSince) && modifiedSince >= Math.floor(stats.mtimeMs / 1000) * 1000) {
+  if (Number.isFinite(modifiedSince) && modifiedSince >= Math.floor(tile.mtimeMs / 1000) * 1000) {
     response.writeHead(304, headers);
     response.end();
     return;
   }
   response.writeHead(200, headers);
-  createReadStream(file).pipe(response);
+  response.end(tile.bytes);
 }
 
-async function serveStatic(webDir, pathname, response) {
+async function loadTile(state, file, version) {
+  const cacheKey = `${file}\0${version === null ? "mutable" : `version:${version}`}`;
+  const now = Date.now();
+  const cached = state.tileCache.get(cacheKey);
+  if (cached && (version !== null || now - cached.checkedAt <= state.tileCacheFreshMs)) {
+    touchTileCacheEntry(state, cacheKey, cached);
+    return cached;
+  }
+
+  const missingUntil = state.missingTileCache.get(file);
+  if (missingUntil && missingUntil > now) {
+    touchMissingTileEntry(state, file, missingUntil);
+    return null;
+  }
+  if (missingUntil) {
+    state.missingTileCache.delete(file);
+  }
+
+  const pending = state.tileLoads.get(cacheKey);
+  if (pending) {
+    return pending;
+  }
+
+  const load = (async () => {
+    if (cached && version === null) {
+      const stats = await statTileFile(file);
+      if (!stats) {
+        removeTileCacheEntry(state, cacheKey);
+        rememberMissingTile(state, file);
+        return null;
+      }
+      if (stats.size === cached.bytes.length && stats.mtimeMs === cached.mtimeMs) {
+        cached.checkedAt = Date.now();
+        touchTileCacheEntry(state, cacheKey, cached);
+        return cached;
+      }
+    }
+
+    const loaded = await readTileFile(file);
+    if (!loaded) {
+      removeTileCacheEntry(state, cacheKey);
+      rememberMissingTile(state, file);
+      return null;
+    }
+    state.missingTileCache.delete(file);
+    cacheTileEntry(state, cacheKey, loaded);
+    return loaded;
+  })();
+  state.tileLoads.set(cacheKey, load);
+  try {
+    return await load;
+  } finally {
+    if (state.tileLoads.get(cacheKey) === load) {
+      state.tileLoads.delete(cacheKey);
+    }
+  }
+}
+
+async function statTileFile(file) {
+  try {
+    const stats = await fs.stat(file);
+    return stats.isFile() ? stats : null;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function readTileFile(file) {
+  let handle;
+  try {
+    handle = await fs.open(file, "r");
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
+      return null;
+    }
+    const bytes = await handle.readFile();
+    return {
+      bytes,
+      checkedAt: Date.now(),
+      mtimeMs: stats.mtimeMs,
+      etag: `"${bytes.length.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}"`,
+      lastModified: stats.mtime.toUTCString(),
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+function cacheTileEntry(state, cacheKey, entry) {
+  removeTileCacheEntry(state, cacheKey);
+  if (
+    state.tileCacheMaxBytes === 0 ||
+    state.tileCacheMaxEntries === 0 ||
+    entry.bytes.length > state.tileCacheMaxBytes
+  ) {
+    return;
+  }
+  while (
+    state.tileCache.size >= state.tileCacheMaxEntries ||
+    state.tileCacheBytes + entry.bytes.length > state.tileCacheMaxBytes
+  ) {
+    const oldestKey = state.tileCache.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    removeTileCacheEntry(state, oldestKey);
+  }
+  state.tileCache.set(cacheKey, entry);
+  state.tileCacheBytes += entry.bytes.length;
+}
+
+function touchTileCacheEntry(state, cacheKey, entry) {
+  if (!state.tileCache.has(cacheKey)) {
+    return;
+  }
+  state.tileCache.delete(cacheKey);
+  state.tileCache.set(cacheKey, entry);
+}
+
+function removeTileCacheEntry(state, cacheKey) {
+  const existing = state.tileCache.get(cacheKey);
+  if (!existing) {
+    return;
+  }
+  state.tileCache.delete(cacheKey);
+  state.tileCacheBytes = Math.max(0, state.tileCacheBytes - existing.bytes.length);
+}
+
+function rememberMissingTile(state, file) {
+  if (state.missingTileCacheMs === 0 || state.tileCacheMaxEntries === 0) {
+    return;
+  }
+  touchMissingTileEntry(state, file, Date.now() + state.missingTileCacheMs);
+  while (state.missingTileCache.size > state.tileCacheMaxEntries) {
+    const oldestKey = state.missingTileCache.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    state.missingTileCache.delete(oldestKey);
+  }
+}
+
+function touchMissingTileEntry(state, file, expiresAt) {
+  state.missingTileCache.delete(file);
+  state.missingTileCache.set(file, expiresAt);
+}
+
+async function serveStatic(state, request, pathname, response) {
+  const webDir = state.webDir;
   const requested = pathname === "/" ? "/index.html" : pathname;
   const normalized = path.normalize(decodeURIComponent(requested)).replace(/^[/\\]+/, "").replace(/^(\.\.[/\\])+/, "");
   let file = path.join(webDir, normalized);
@@ -663,14 +1125,162 @@ async function serveStatic(webDir, pathname, response) {
     return;
   }
   const stats = await fs.stat(file);
-  response.writeHead(200, corsHeaders({
-    "Content-Type": contentType(file),
-    "Content-Length": stats.size,
+  const type = contentType(file);
+  const cacheEntry = await loadStaticCacheEntry(state, file, stats);
+  const preferredEncoding = isCompressibleContentType(type)
+    ? preferredContentEncoding(request.headers["accept-encoding"])
+    : null;
+  const representation = await staticRepresentation(state, file, cacheEntry, preferredEncoding);
+  const etag = `"${stats.size.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}-${representation.encoding || "identity"}"`;
+  const headers = corsHeaders({
+    "Content-Type": type,
+    "Content-Length": representation.bytes.length,
     "Cache-Control": path.basename(file) === "index.html"
       ? "no-cache"
       : "public, max-age=31536000, immutable",
-  }));
-  createReadStream(file).pipe(response);
+    ETag: etag,
+    "Last-Modified": stats.mtime.toUTCString(),
+    ...(isCompressibleContentType(type) ? { Vary: "Accept-Encoding" } : {}),
+    ...(representation.encoding ? { "Content-Encoding": representation.encoding } : {}),
+  });
+  if (request.headers["if-none-match"] === etag) {
+    response.writeHead(304, headers);
+    response.end();
+    return;
+  }
+  response.writeHead(200, headers);
+  response.end(representation.bytes);
+}
+
+async function loadStaticCacheEntry(state, file, stats) {
+  const cached = state.staticCache.get(file);
+  if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
+    state.staticCache.delete(file);
+    state.staticCache.set(file, cached);
+    return cached;
+  }
+  if (cached) {
+    removeStaticCacheEntry(state, file);
+  }
+
+  const entry = {
+    bytes: await fs.readFile(file),
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+    encoded: new Map(),
+    encodingPromises: new Map(),
+  };
+  if (
+    state.staticCacheMaxBytes > 0 &&
+    state.staticCacheMaxEntries > 0 &&
+    entry.bytes.length <= state.staticCacheMaxBytes
+  ) {
+    trimStaticCache(state, entry.bytes.length, 1);
+    state.staticCache.set(file, entry);
+    state.staticCacheBytes += entry.bytes.length;
+  }
+  return entry;
+}
+
+async function staticRepresentation(state, file, entry, encoding) {
+  if (!encoding || entry.bytes.length < MIN_STATIC_COMPRESSION_BYTES) {
+    return { bytes: entry.bytes, encoding: null };
+  }
+  const encoded = entry.encoded.get(encoding);
+  if (encoded) {
+    return { bytes: encoded, encoding };
+  }
+
+  let pending = entry.encodingPromises.get(encoding);
+  if (!pending) {
+    pending = (encoding === "br"
+      ? brotliCompressAsync(entry.bytes, {
+        params: {
+          [zlibConstants.BROTLI_PARAM_QUALITY]: 6,
+        },
+      })
+      : gzipAsync(entry.bytes, { level: 6 }))
+      .then((bytes) => Buffer.from(bytes));
+    entry.encodingPromises.set(encoding, pending);
+  }
+  try {
+    const bytes = await pending;
+    if (bytes.length >= entry.bytes.length) {
+      return { bytes: entry.bytes, encoding: null };
+    }
+    if (!entry.encoded.has(encoding)) {
+      entry.encoded.set(encoding, bytes);
+      if (state.staticCache.get(file) === entry) {
+        state.staticCacheBytes += bytes.length;
+        trimStaticCache(state, 0, 0);
+      }
+    }
+    return { bytes, encoding };
+  } catch {
+    return { bytes: entry.bytes, encoding: null };
+  } finally {
+    entry.encodingPromises.delete(encoding);
+  }
+}
+
+function trimStaticCache(state, additionalBytes, additionalEntries) {
+  while (
+    state.staticCache.size + additionalEntries > state.staticCacheMaxEntries ||
+    state.staticCacheBytes + additionalBytes > state.staticCacheMaxBytes
+  ) {
+    const oldestKey = state.staticCache.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    removeStaticCacheEntry(state, oldestKey);
+  }
+}
+
+function removeStaticCacheEntry(state, file) {
+  const entry = state.staticCache.get(file);
+  if (!entry) {
+    return;
+  }
+  state.staticCache.delete(file);
+  state.staticCacheBytes = Math.max(
+    0,
+    state.staticCacheBytes -
+      entry.bytes.length -
+      [...entry.encoded.values()].reduce((total, bytes) => total + bytes.length, 0),
+  );
+}
+
+function preferredContentEncoding(header) {
+  const value = String(header || "");
+  if (!value) {
+    return null;
+  }
+  const qualities = new Map();
+  let wildcardQuality = 0;
+  for (const item of value.split(",")) {
+    const [rawName, ...parameters] = item.trim().toLowerCase().split(";");
+    const qualityParameter = parameters.map((parameter) => parameter.trim()).find((parameter) => parameter.startsWith("q="));
+    const parsedQuality = qualityParameter ? Number(qualityParameter.slice(2)) : 1;
+    const quality = Number.isFinite(parsedQuality) ? Math.max(0, Math.min(1, parsedQuality)) : 0;
+    if (rawName === "*") {
+      wildcardQuality = quality;
+    } else if (rawName) {
+      qualities.set(rawName, quality);
+    }
+  }
+  const brotliQuality = qualities.get("br") ?? wildcardQuality;
+  const gzipQuality = qualities.get("gzip") ?? wildcardQuality;
+  if (brotliQuality <= 0 && gzipQuality <= 0) {
+    return null;
+  }
+  return brotliQuality >= gzipQuality ? "br" : "gzip";
+}
+
+function isCompressibleContentType(type) {
+  return type.startsWith("text/") ||
+    type === "application/javascript" ||
+    type === "application/json" ||
+    type === "image/svg+xml";
 }
 
 function contentType(file) {

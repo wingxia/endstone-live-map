@@ -9,6 +9,7 @@ import { PlayerList } from "./PlayerList";
 
 const DEFAULT_WORLD = "Bedrock level";
 const DEFAULT_DIMENSION = "Overworld";
+const WORLD_REFRESH_DEBOUNCE_MS = 400;
 const DIMENSIONS = [
   { id: "Overworld", label: "主世界", Icon: TreePine },
   { id: "Nether", label: "下界", Icon: Flame },
@@ -49,20 +50,23 @@ export function App() {
       return;
     }
     let cancelled = false;
-    listWorlds()
-      .then((nextWorlds) => {
-        if (!cancelled) {
-          setWorlds(nextWorlds);
-          setError("");
-        }
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err));
-        }
-      });
+    const refreshTimer = window.setTimeout(() => {
+      listWorlds()
+        .then((nextWorlds) => {
+          if (!cancelled) {
+            setWorlds(nextWorlds);
+            setError("");
+          }
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) {
+            setError(err instanceof Error ? err.message : String(err));
+          }
+        });
+    }, WORLD_REFRESH_DEBOUNCE_MS);
     return () => {
       cancelled = true;
+      window.clearTimeout(refreshTimer);
     };
   }, [live.tilesReady]);
 

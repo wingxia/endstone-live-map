@@ -7,7 +7,8 @@ import { blockToChunk } from "./coords";
 const BLOCKS_PER_CHUNK = 16;
 const TILE_SIZE = 256;
 const MAX_ZOOM = 4;
-const TILE_KEEP_BUFFER = 2;
+const TILE_KEEP_BUFFER = 1;
+const TILE_UPDATE_INTERVAL_MS = 150;
 
 export const MIN_MAP_ZOOM = -8;
 export const INITIAL_MAP_ZOOM = 4;
@@ -102,6 +103,8 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       }
       this.worldName = nextWorld;
       this.dimensionName = nextDimension;
+      this.active = false;
+      this.knownBounds = null;
       this.baseImageTileVersion = undefined;
       this.imageTileVersions.clear();
       this.redraw();
@@ -142,7 +145,11 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     }
 
     createTile(coords: Coords, done: DoneCallback): HTMLElement {
-      if (!this.active || !tileIntersectsChunkBounds(coords, this.knownBounds)) {
+      if (
+        !this.active ||
+        this.baseImageTileVersion === undefined ||
+        !tileIntersectsChunkBounds(coords, this.knownBounds)
+      ) {
         return this.createBlankTile(done);
       }
       const image = document.createElement("img");
@@ -210,8 +217,9 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     minZoom: MIN_MAP_ZOOM,
     maxZoom: MAX_ZOOM,
     noWrap: false,
-    updateWhenIdle: true,
-    updateWhenZooming: false,
+    updateWhenIdle: false,
+    updateInterval: TILE_UPDATE_INTERVAL_MS,
+    updateWhenZooming: true,
     keepBuffer: TILE_KEEP_BUFFER,
     className: "chunk-grid-layer",
   }) as ChunkLayerHandle;

@@ -39,7 +39,7 @@ test("uses the newest available world when the configured default is absent", as
     .toBe(true);
 });
 
-test("defers tile churn until map movement settles", async ({ page }) => {
+test("updates tiles during map interaction with a bounded buffer", async ({ page }) => {
   await mockLiveMap(page, { players: false });
   await page.goto("/");
   await expect(page.getByTestId("map-canvas")).toBeVisible();
@@ -62,6 +62,7 @@ test("defers tile churn until map movement settles", async ({ page }) => {
         return gridOptions
           ? {
               updateWhenIdle: gridOptions.updateWhenIdle,
+              updateInterval: gridOptions.updateInterval,
               updateWhenZooming: gridOptions.updateWhenZooming,
               keepBuffer: gridOptions.keepBuffer,
             }
@@ -69,9 +70,10 @@ test("defers tile churn until map movement settles", async ({ page }) => {
       }),
     )
     .toEqual({
-      updateWhenIdle: true,
-      updateWhenZooming: false,
-      keepBuffer: 2,
+      updateWhenIdle: false,
+      updateInterval: 150,
+      updateWhenZooming: true,
+      keepBuffer: 1,
     });
 });
 
@@ -89,30 +91,72 @@ test("refreshes visible tiles and world metadata after live tile updates", async
   expect(unchangedTile).toBeTruthy();
 
   await page.evaluate(() => {
-    (window as unknown as { __liveMapSocketSend: (data: string) => void }).__liveMapSocketSend(
-      JSON.stringify({
-        type: "tiles_ready",
-        updatedAt: 999,
-        chunks: [],
-        tiles: [
-          {
-            world: "Bedrock level",
-            dimension: "Overworld",
-            zoom: 4,
-            tileX: 0,
-            tileZ: 0,
-            updatedAt: 999,
-            hasPixels: true,
-          },
-        ],
-      }),
-    );
+    const send = (updatedAt: number) =>
+      (window as unknown as { __liveMapSocketSend: (data: string) => void }).__liveMapSocketSend(
+        JSON.stringify({
+          type: "tiles_ready",
+          updatedAt,
+          chunks: [],
+          tiles: [
+            {
+              world: "Bedrock level",
+              dimension: "Overworld",
+              zoom: 4,
+              tileX: 0,
+              tileZ: 0,
+              updatedAt,
+              hasPixels: true,
+            },
+          ],
+        }),
+      );
+    send(997);
+    send(998);
+    send(999);
   });
 
   await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("_=999")))).toBe(true);
   await expect.poll(() => visibleTileSources(page).then((sources) => sources.includes(unchangedTile!))).toBe(true);
   await expect.poll(() => requests.worlds).toBeGreaterThan(1);
+  expect(requests.worlds).toBe(2);
   expect(requests.legacy.length).toBe(0);
+});
+
+test("waits for versioned world metadata before requesting tiles", async ({ page }) => {
+  const requests = await mockLiveMap(page, { holdWorlds: true });
+
+  await page.goto("/");
+  await expect(page.getByTestId("map-canvas")).toBeVisible();
+  await expect.poll(() => requests.worlds).toBe(1);
+
+  expect(requests.tiles).toHaveLength(0);
+  requests.releaseWorlds();
+  await expect.poll(() => requests.tiles.length).toBeGreaterThan(0);
+  expect(requests.tiles.every((url) => url.includes("_=10"))).toBe(true);
+});
+
+test("uses opaque map overlays without backdrop-filter recomposition", async ({ page }) => {
+  await mockLiveMap(page);
+  await page.goto("/");
+
+  await expect(page.locator(".player-marker-name")).toBeVisible();
+  const overlayStyles = await page
+    .locator(".map-hud, .coordinate-hud, .leaflet-control-zoom, .map-home-control, .player-marker-name")
+    .evaluateAll((elements) =>
+      elements.map((element) => {
+        const style = getComputedStyle(element);
+        return {
+          backdropFilter: style.backdropFilter,
+          webkitBackdropFilter: (style as CSSStyleDeclaration & { webkitBackdropFilter?: string }).webkitBackdropFilter,
+          backgroundColor: style.backgroundColor,
+        };
+      }),
+    );
+
+  expect(overlayStyles.length).toBeGreaterThan(0);
+  expect(overlayStyles.every(({ backdropFilter }) => !backdropFilter || backdropFilter === "none")).toBe(true);
+  expect(overlayStyles.every(({ webkitBackdropFilter }) => !webkitBackdropFilter || webkitBackdropFilter === "none")).toBe(true);
+  expect(overlayStyles.every(({ backgroundColor }) => /rgba?\(/.test(backgroundColor))).toBe(true);
 });
 
 test("constrains navigation to explored bounds and restores the initial view", async ({ page }) => {
@@ -251,10 +295,23 @@ test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
   expect(await hudMapCoverage(page)).toBeLessThan(0.13);
 });
 
-async function mockLiveMap(page: Page, options: { players?: boolean; world?: string } = {}) {
+async function mockLiveMap(page: Page, options: { players?: boolean; world?: string; holdWorlds?: boolean } = {}) {
   const includePlayers = options.players !== false;
   const worldName = options.world ?? "Bedrock level";
-  const requests = { tiles: [] as string[], avatars: [] as string[], lands: [] as string[], legacy: [] as string[], worlds: 0 };
+  let releaseWorlds = () => {};
+  const worldsGate = options.holdWorlds
+    ? new Promise<void>((resolve) => {
+        releaseWorlds = resolve;
+      })
+    : Promise.resolve();
+  const requests = {
+    tiles: [] as string[],
+    avatars: [] as string[],
+    lands: [] as string[],
+    legacy: [] as string[],
+    worlds: 0,
+    releaseWorlds,
+  };
   page.on("request", (request) => {
     const url = request.url();
     if (url.includes("/api/chunks") || url.includes("/api/textures") || url.includes("/textures/")) {
@@ -329,6 +386,7 @@ async function mockLiveMap(page: Page, options: { players?: boolean; world?: str
   });
   await page.route("**/api/worlds", async (route) => {
     requests.worlds += 1;
+    await worldsGate;
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({

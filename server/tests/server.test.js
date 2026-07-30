@@ -9,12 +9,14 @@ import { cleanSegment, createLiveMapServer } from "../src/index.js";
 describe("local live map server", () => {
   let tmp;
   let server;
+  let serverState;
   let baseUrl;
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), "livemap-server-"));
     const created = createLiveMapServer({ dataDir: tmp, pluginToken: "secret", webDir: tmp });
     server = created.server;
+    serverState = created.state;
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     baseUrl = `http://127.0.0.1:${address.port}`;
@@ -34,11 +36,13 @@ describe("local live map server", () => {
     expect(server.headersTimeout).toBe(100_000);
   });
 
-  it("serves the app shell uncached and immutable hashed assets with content lengths", async () => {
+  it("serves the app shell uncached and immutable hashed assets with compressed conditional responses", async () => {
     const assetDir = path.join(tmp, "assets");
     await fs.mkdir(assetDir, { recursive: true });
     await fs.writeFile(path.join(tmp, "index.html"), "<!doctype html><main>map</main>");
     await fs.writeFile(path.join(assetDir, "app-deadbeef.js"), "export const ready = true;");
+    const largeAsset = `export const payload = ${JSON.stringify("map-tile-".repeat(1_024))};`;
+    await fs.writeFile(path.join(assetDir, "large-deadbeef.js"), largeAsset);
 
     const shell = await fetch(`${baseUrl}/`, { headers: { Connection: "close" } });
     expect(shell.status).toBe(200);
@@ -51,6 +55,28 @@ describe("local live map server", () => {
     expect(asset.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
     expect(asset.headers.get("content-length")).toBe(String(Buffer.byteLength("export const ready = true;")));
     await asset.text();
+
+    const identity = await fetch(`${baseUrl}/assets/large-deadbeef.js`, {
+      headers: { "Accept-Encoding": "identity", Connection: "close" },
+    });
+    expect(identity.headers.get("content-encoding")).toBeNull();
+    expect(identity.headers.get("content-length")).toBe(String(Buffer.byteLength(largeAsset)));
+    await expect(identity.text()).resolves.toBe(largeAsset);
+
+    const compressed = await fetch(`${baseUrl}/assets/large-deadbeef.js`, {
+      headers: { "Accept-Encoding": "br", Connection: "close" },
+    });
+    expect(compressed.headers.get("content-encoding")).toBe("br");
+    expect(compressed.headers.get("vary")).toBe("Accept-Encoding");
+    expect(Number(compressed.headers.get("content-length"))).toBeLessThan(Buffer.byteLength(largeAsset));
+    const compressedEtag = compressed.headers.get("etag");
+    expect(compressedEtag).toBeTruthy();
+    await expect(compressed.text()).resolves.toBe(largeAsset);
+
+    const notModified = await fetch(`${baseUrl}/assets/large-deadbeef.js`, {
+      headers: { "Accept-Encoding": "br", "If-None-Match": compressedEtag, Connection: "close" },
+    });
+    expect(notModified.status).toBe(304);
   });
 
   it("advertises the generated low-zoom tile floor", async () => {
@@ -62,6 +88,28 @@ describe("local live map server", () => {
       nativeMinZoom: -8,
       maxZoom: 4,
     });
+  });
+
+  it("omits legacy world records that have no rendered chunks or bounds", async () => {
+    await fs.writeFile(
+      path.join(tmp, "state.json"),
+      JSON.stringify({
+        version: 2,
+        worlds: {
+          "Bedrock_level/Overworld": {
+            world: "Bedrock level",
+            dimension: "Overworld",
+            importedAt: 1,
+            updatedAt: 1,
+            bounds: null,
+            chunks: {},
+          },
+        },
+      }),
+    );
+    const response = await fetch(`${baseUrl}/api/worlds`);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ worlds: [] });
   });
 
   it("protects plugin endpoints with the configured token", async () => {
@@ -89,22 +137,20 @@ describe("local live map server", () => {
   });
 
   it("indexes complete world bounds from existing z4 tile files", async () => {
-    await fs.writeFile(
-      path.join(tmp, "state.json"),
-      JSON.stringify({
-        version: 2,
-        worlds: {
-          "Bedrock_level/Overworld": {
-            world: "Bedrock level",
-            dimension: "Overworld",
-            importedAt: 5,
-            updatedAt: 10,
-            bounds: null,
-            chunks: { "0,0": 10 },
-          },
+    const legacyState = JSON.stringify({
+      version: 2,
+      worlds: {
+        "Bedrock_level/Overworld": {
+          world: "Bedrock level",
+          dimension: "Overworld",
+          importedAt: 5,
+          updatedAt: 10,
+          bounds: null,
+          chunks: { "0,0": 10 },
         },
-      }),
-    );
+      },
+    });
+    await fs.writeFile(path.join(tmp, "state.json"), legacyState);
     for (const [dimension, chunkX, chunkZ] of [
       ["Overworld", 0, 0],
       ["Overworld", 64, -3],
@@ -129,6 +175,81 @@ describe("local live map server", () => {
     expect(worlds[0].sampleChunks).toEqual(expect.arrayContaining([{ chunkX: 0, chunkZ: 0 }, { chunkX: 64, chunkZ: -3 }]));
     expect(worlds[1]).toMatchObject({ world: "Bedrock level", dimension: "Nether", chunkCount: 1 });
     expect(worlds[2]).toMatchObject({ world: "Bedrock level", dimension: "TheEnd", chunkCount: 1 });
+
+    const persistedIndex = JSON.parse(await fs.readFile(path.join(tmp, "world-index-v1.json"), "utf8"));
+    expect(persistedIndex.version).toBe(1);
+    expect(persistedIndex.worlds).toHaveLength(3);
+    expect(persistedIndex.worlds[0]).toMatchObject({
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkCount: 2,
+      bounds: { minChunkX: 0, maxChunkX: 64, minChunkZ: -3, maxChunkZ: 0 },
+    });
+    expect(persistedIndex.worlds[0].sampleChunks).toEqual(
+      expect.arrayContaining([{ chunkX: 0, chunkZ: 0 }, { chunkX: 64, chunkZ: -3 }]),
+    );
+    expect(persistedIndex.worlds[0]).not.toHaveProperty("chunks");
+    expect(await fs.readFile(path.join(tmp, "state.json"), "utf8")).toBe(legacyState);
+
+    await closeServer(server);
+    await fs.rm(path.join(tmp, "tiles"), { recursive: true, force: true });
+    const restarted = createLiveMapServer({ dataDir: tmp, pluginToken: "secret", webDir: tmp });
+    server = restarted.server;
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const restartedWorlds = await (await fetch(`${baseUrl}/api/worlds`)).json();
+    expect(restartedWorlds.worlds).toEqual(worlds);
+  });
+
+  it("serializes compact index updates and keeps duplicate chunks stable across restart", async () => {
+    const postChunks = (updatedAt, chunks) => fetch(`${baseUrl}/api/plugin/tiles`, {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "tiles_ready", updatedAt, chunks }),
+    });
+    const duplicate = { world: "Bedrock level", dimension: "Overworld", chunkX: 5, chunkZ: 8 };
+    const responses = await Promise.all([
+      postChunks(10, [{ ...duplicate, updatedAt: 10 }, { ...duplicate, updatedAt: 10 }]),
+      postChunks(12, [{ ...duplicate, updatedAt: 12 }]),
+      postChunks(11, [
+        { world: "Bedrock level", dimension: "Overworld", chunkX: 5, chunkZ: 9, updatedAt: 11 },
+      ]),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200]);
+
+    const firstWorlds = await (await fetch(`${baseUrl}/api/worlds`)).json();
+    expect(firstWorlds.worlds).toHaveLength(1);
+    expect(firstWorlds.worlds[0]).toMatchObject({
+      world: "Bedrock level",
+      dimension: "Overworld",
+      chunkCount: 2,
+      updatedAt: 12,
+      bounds: { minChunkX: 5, maxChunkX: 5, minChunkZ: 8, maxChunkZ: 9 },
+    });
+    expect(firstWorlds.worlds[0].sampleChunks).toEqual([
+      { chunkX: 5, chunkZ: 8 },
+      { chunkX: 5, chunkZ: 9 },
+    ]);
+
+    const persistedIndex = JSON.parse(await fs.readFile(path.join(tmp, "world-index-v1.json"), "utf8"));
+    expect(persistedIndex.worlds[0]).toMatchObject({
+      chunkCount: 2,
+      chunkRows: [[5, 8, 9]],
+    });
+    await expect(fs.access(path.join(tmp, "state.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await fs.readdir(tmp)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+
+    await closeServer(server);
+    const restarted = createLiveMapServer({ dataDir: tmp, pluginToken: "secret", webDir: tmp });
+    server = restarted.server;
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const restartedWorlds = await (await fetch(`${baseUrl}/api/worlds`)).json();
+    expect(restartedWorlds).toEqual(firstWorlds);
   });
 
   it("stores and returns lands by world and dimension", async () => {
@@ -185,6 +306,59 @@ describe("local live map server", () => {
     const versionedMissing = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/9/9.png?_=123`);
     expect(versionedMissing.status).toBe(200);
     expect(versionedMissing.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("serves versioned PNG tiles at every configured zoom from -8 through 4", async () => {
+    for (let zoom = -8; zoom <= 4; zoom += 1) {
+      const tileFile = path.join(tmp, "tiles", "Bedrock_level", "Overworld", `z${zoom}`, "0", "0.png");
+      const tileBytes = Buffer.from([zoom + 8, 4 - zoom]);
+      await fs.mkdir(path.dirname(tileFile), { recursive: true });
+      await fs.writeFile(tileFile, tileBytes);
+
+      const response = await fetch(
+        `${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z${zoom}/0/0.png?_=zoom-test`,
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(tileBytes);
+    }
+  });
+
+  it("keeps versioned tiles in a bounded memory cache and briefly suppresses missing-tile probes", async () => {
+    const tileFile = path.join(tmp, "tiles", "Bedrock_level", "Overworld", "z4", "2", "3.png");
+    await fs.mkdir(path.dirname(tileFile), { recursive: true });
+    await fs.writeFile(tileFile, Buffer.from([1, 2, 3]));
+
+    const first = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/2/3.png?_=10`);
+    expect(Buffer.from(await first.arrayBuffer())).toEqual(Buffer.from([1, 2, 3]));
+    expect(serverState.tileCache.size).toBe(1);
+    expect(serverState.tileCacheBytes).toBe(3);
+
+    await fs.writeFile(tileFile, Buffer.from([4, 5, 6, 7]));
+    const sameVersion = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/2/3.png?_=10`);
+    expect(Buffer.from(await sameVersion.arrayBuffer())).toEqual(Buffer.from([1, 2, 3]));
+
+    const nextVersion = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/2/3.png?_=11`);
+    expect(Buffer.from(await nextVersion.arrayBuffer())).toEqual(Buffer.from([4, 5, 6, 7]));
+    expect(serverState.tileCache.size).toBe(2);
+    expect(serverState.tileCacheBytes).toBe(7);
+    const health = await (await fetch(`${baseUrl}/api/health`)).json();
+    expect(health.caches.tiles).toMatchObject({ entries: 2, bytes: 7, maxBytes: 64 * 1024 * 1024 });
+
+    serverState.missingTileCacheMs = 20;
+    const missingFile = path.join(tmp, "tiles", "Bedrock_level", "Overworld", "z4", "8", "9.png");
+    const missingUrl = `${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/8/9.png?_=12`;
+    const missing = await fetch(missingUrl);
+    expect(missing.headers.get("cache-control")).toBe("no-store");
+    expect(serverState.missingTileCache.size).toBe(1);
+
+    await fs.mkdir(path.dirname(missingFile), { recursive: true });
+    await fs.writeFile(missingFile, Buffer.from([8, 9]));
+    const dampened = await fetch(missingUrl);
+    expect(Buffer.from(await dampened.arrayBuffer())).not.toEqual(Buffer.from([8, 9]));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const available = await fetch(missingUrl);
+    expect(Buffer.from(await available.arrayBuffer())).toEqual(Buffer.from([8, 9]));
   });
 
   it("caches player avatars from plugin snapshots and serves lightweight player state", async () => {
