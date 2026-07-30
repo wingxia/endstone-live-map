@@ -259,6 +259,7 @@ void testLandConfigParsing()
     })json";
 
     const auto parsed = livemap::parseLandConfig(json, "Bedrock level", 123);
+    assert(parsed.source_valid);
     assert(parsed.claims.size() == 4);
     assert(parsed.skipped_entries == 1);
     assert(parsed.claims[0].owner == "GieZi8670");
@@ -294,6 +295,21 @@ void testLandConfigParsing()
     assert(serialized.find("\"publicTeleport\":true") != std::string::npos);
     assert(serialized.find("\"publicTeleport\":false") != std::string::npos);
     assert(serialized.find("\"nested\":true") != std::string::npos);
+
+    const auto empty = livemap::parseLandConfig("{}", "Bedrock level", 456);
+    assert(empty.source_valid);
+    assert(empty.claims.empty());
+    const auto authoritative_empty =
+        livemap::serializeLandBatch(empty.claims, "Bedrock level", {"Overworld", "Nether", "TheEnd"});
+    assert(authoritative_empty.find("\"world\":\"Bedrock level\"") != std::string::npos);
+    assert(authoritative_empty.find("\"dimensions\":[\"Overworld\",\"Nether\",\"TheEnd\"]") != std::string::npos);
+    assert(authoritative_empty.find("\"claims\":[]") != std::string::npos);
+
+    assert(!livemap::parseLandConfig("{", "Bedrock level", 456).source_valid);
+    assert(!livemap::parseLandConfig("[]", "Bedrock level", 456).source_valid);
+    const auto missing_path = std::filesystem::temp_directory_path() / "live_map_missing_land_config.json";
+    std::filesystem::remove(missing_path);
+    assert(!livemap::loadLandConfig(missing_path, "Bedrock level", 456).source_valid);
 }
 
 void testProtocol()
@@ -423,6 +439,12 @@ void testR2SigningAndRateLimit()
     assert(signed_request.url ==
            "https://account.r2.cloudflarestorage.com/bucket/map-tiles/v2/Bedrock_level/Overworld/z4/-1/2.png");
     assert(signed_request.canonical_request.find("host:account.r2.cloudflarestorage.com") != std::string::npos);
+
+    input.method = "DELETE";
+    input.payload_sha256 = livemap::hexLower(livemap::sha256(std::vector<std::uint8_t>{}));
+    const auto signed_delete = livemap::signR2Request(input);
+    assert(signed_delete.canonical_request.starts_with("DELETE\n"));
+    assert(signed_delete.canonical_request.find(input.payload_sha256) != std::string::npos);
     assert(signed_request.authorization.find("Credential=ACCESS/20260612/auto/s3/aws4_request") !=
            std::string::npos);
 
@@ -685,6 +707,71 @@ void testTilePyramidBatchingAndRepair()
     std::filesystem::remove_all(dir);
 }
 
+void testBaseTilePngRepairBeforeParentDerivation()
+{
+    const auto dir = std::filesystem::temp_directory_path() / "live_map_base_tile_png_repair_test";
+    std::filesystem::remove_all(dir);
+
+    livemap::LiveMapSettings settings;
+    settings.tile_data_dir = dir.string();
+    settings.tile_min_zoom = 1;
+
+    const auto snapshot = makeTilePyramidSnapshot(-3, 5, 400);
+    const auto rendered = livemap::renderChunkSnapshotsToTiles(settings, {snapshot});
+    assert(rendered.ok);
+    assert(rendered.tiles.size() == 4);
+
+    const auto base_png =
+        livemap::tilePngPath(settings, snapshot.world, snapshot.dimension, livemap::kMapTileBaseZoom,
+                             snapshot.chunk_x, snapshot.chunk_z);
+    const auto base_raw =
+        livemap::tileRawPath(settings, snapshot.world, snapshot.dimension, livemap::kMapTileBaseZoom,
+                             snapshot.chunk_x, snapshot.chunk_z);
+    const auto expected_png =
+        livemap::encodePngRgba(livemap::readRawRgba(base_raw, livemap::kMapTileSize, livemap::kMapTileSize));
+
+    const auto read_bytes = [](const std::filesystem::path &path) {
+        const auto size = std::filesystem::file_size(path);
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+        std::ifstream in(path, std::ios::binary);
+        assert(in);
+        in.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        assert(in.gcount() == static_cast<std::streamsize>(bytes.size()));
+        return bytes;
+    };
+    const auto assert_repaired = [&]() {
+        const auto repaired = livemap::repairMissingTilePyramid(settings);
+        assert(repaired.ok);
+        assert(repaired.tiles.size() == 4);
+        for (std::size_t index = 0; index < repaired.tiles.size(); ++index) {
+            assert(repaired.tiles[index].zoom == livemap::kMapTileBaseZoom - static_cast<int>(index));
+            assert(repaired.tiles[index].has_pixels);
+        }
+        assert(read_bytes(base_png) == expected_png);
+        assert(livemap::repairMissingTilePyramid(settings).tiles.empty());
+    };
+
+    std::filesystem::remove(base_png);
+    assert_repaired();
+
+    {
+        std::ofstream out(base_png, std::ios::binary | std::ios::trunc);
+    }
+    assert_repaired();
+
+    auto invalid_png = expected_png;
+    assert(invalid_png.size() > 29);
+    invalid_png[29] ^= 0xFFU;
+    {
+        std::ofstream out(base_png, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char *>(invalid_png.data()),
+                  static_cast<std::streamsize>(invalid_png.size()));
+    }
+    assert_repaired();
+
+    std::filesystem::remove_all(dir);
+}
+
 void testChunkBaselineIndex()
 {
     const auto path = std::filesystem::temp_directory_path() / "live_map_chunk_baselines_test.tsv";
@@ -921,6 +1008,7 @@ int main()
     testChunkBaselineIndex();
     testTileRendering();
     testTilePyramidBatchingAndRepair();
+    testBaseTilePngRepairBeforeParentDerivation();
     testSettingsLegacyKeys();
     testSettingsDirtyBatchDefaults();
     testSettingsNewKeysOverrideLegacyKeys();

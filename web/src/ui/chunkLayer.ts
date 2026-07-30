@@ -8,7 +8,8 @@ const BLOCKS_PER_CHUNK = 16;
 const TILE_SIZE = 256;
 const MAX_ZOOM = 4;
 const TILE_KEEP_BUFFER = 1;
-const TILE_UPDATE_INTERVAL_MS = 150;
+const TILE_UPDATE_INTERVAL_MS = 250;
+const MAX_TILE_VERSION_ENTRIES = 16_384;
 
 export const MIN_MAP_ZOOM = -8;
 export const INITIAL_MAP_ZOOM = 4;
@@ -72,7 +73,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     private dimensionName = dimension;
     private knownBounds = options.bounds || null;
     private active = false;
-    private baseImageTileVersion: string | number | undefined;
+    private metadataReady = false;
     private imageTileVersions = new Map<string, string | number>();
 
     setActive(active: boolean) {
@@ -86,13 +87,13 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     setKnownBounds(bounds: ChunkLayerBounds | null, tileVersion?: string | number) {
       const boundsChanged = !sameBounds(this.knownBounds, bounds);
       this.knownBounds = bounds;
-      const versionInitialized = tileVersion !== undefined && this.baseImageTileVersion === undefined;
-      if (versionInitialized) {
-        this.baseImageTileVersion = tileVersion;
+      const metadataInitialized = tileVersion !== undefined && !this.metadataReady;
+      if (tileVersion !== undefined) {
+        this.metadataReady = true;
       }
-      if (boundsChanged) {
+      if (boundsChanged && this.active) {
         this.redraw();
-      } else if (versionInitialized) {
+      } else if (metadataInitialized && this.active) {
         this.redrawVisibleImageTiles();
       }
     }
@@ -105,7 +106,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       this.dimensionName = nextDimension;
       this.active = false;
       this.knownBounds = null;
-      this.baseImageTileVersion = undefined;
+      this.metadataReady = false;
       this.imageTileVersions.clear();
       this.redraw();
     }
@@ -120,14 +121,14 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
       if (tiles.length > 0) {
         for (const tile of tiles) {
           const key = imageTileKey({ x: tile.tileX, y: tile.tileZ, z: tile.zoom });
-          this.imageTileVersions.set(key, tile.updatedAt || message.updatedAt || Date.now());
+          this.rememberImageTileVersion(key, tile.updatedAt || message.updatedAt || Date.now());
           changedKeys.add(key);
         }
       } else {
         const legacyVersion = message.updatedAt || Date.now();
         for (const chunk of chunks) {
           for (const key of imageTileKeysForChunk(chunk)) {
-            this.imageTileVersions.set(key, legacyVersion);
+            this.rememberImageTileVersion(key, legacyVersion);
             changedKeys.add(key);
           }
         }
@@ -147,7 +148,7 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     createTile(coords: Coords, done: DoneCallback): HTMLElement {
       if (
         !this.active ||
-        this.baseImageTileVersion === undefined ||
+        !this.metadataReady ||
         !tileIntersectsChunkBounds(coords, this.knownBounds)
       ) {
         return this.createBlankTile(done);
@@ -183,8 +184,20 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     }
 
     private imageTileSrc(coords: Coords) {
-      const version = this.imageTileVersions.get(imageTileKey(coords)) ?? this.baseImageTileVersion;
+      const version = this.imageTileVersions.get(imageTileKey(coords));
       return mapImageTileUrl(this.worldName, this.dimensionName, coords.z, coords.x, coords.y, version);
+    }
+
+    private rememberImageTileVersion(key: string, version: string | number) {
+      this.imageTileVersions.delete(key);
+      this.imageTileVersions.set(key, version);
+      while (this.imageTileVersions.size > MAX_TILE_VERSION_ENTRIES) {
+        const oldestKey = this.imageTileVersions.keys().next().value;
+        if (oldestKey === undefined) {
+          break;
+        }
+        this.imageTileVersions.delete(oldestKey);
+      }
     }
 
     private refreshVisibleTilesForUpdates(changedKeys: Set<string>) {
@@ -217,9 +230,9 @@ export function createChunkGridLayer(L: typeof import("leaflet"), world: string,
     minZoom: MIN_MAP_ZOOM,
     maxZoom: MAX_ZOOM,
     noWrap: false,
-    updateWhenIdle: false,
+    updateWhenIdle: true,
     updateInterval: TILE_UPDATE_INTERVAL_MS,
-    updateWhenZooming: true,
+    updateWhenZooming: false,
     keepBuffer: TILE_KEEP_BUFFER,
     className: "chunk-grid-layer",
   }) as ChunkLayerHandle;

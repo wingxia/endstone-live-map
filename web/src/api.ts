@@ -104,6 +104,7 @@ export interface TilesReadyMessage {
   type: "tiles_ready";
   chunks: Array<ReadyChunk & { world: string; dimension: string }>;
   tiles?: ReadyTile[];
+  worlds?: WorldMeta[];
   updatedAt: number;
 }
 
@@ -114,8 +115,11 @@ export interface LiveMessage {
   dimension?: string;
   chunks?: ReadyChunk[];
   tiles?: ReadyTile[];
+  worlds?: WorldMeta[];
   updatedAt?: number;
 }
+
+let bootstrapConsumed = false;
 
 export function mapImageTileUrl(world: string, dimension: string, zoom: number, tileX: number, tileZ: number, cacheBust?: string | number): string {
   const params = new URLSearchParams();
@@ -173,6 +177,10 @@ export function segmentKey(value: string): string {
 
 export async function listWorlds(): Promise<WorldMeta[]> {
   try {
+    const bootstrappedWorlds = takeBootstrappedWorlds();
+    if (bootstrappedWorlds) {
+      return bootstrappedWorlds;
+    }
     const response = await fetch("/api/worlds");
     if (!response.ok) {
       throw new Error(`Failed to load worlds: ${response.status}`);
@@ -185,6 +193,25 @@ export async function listWorlds(): Promise<WorldMeta[]> {
       return mockWorlds;
     }
     throw error;
+  }
+}
+
+function takeBootstrappedWorlds(): WorldMeta[] | null {
+  if (bootstrapConsumed || typeof document === "undefined") {
+    return null;
+  }
+  bootstrapConsumed = true;
+  const element = document.getElementById("endstone-live-map-bootstrap");
+  const source = element?.textContent || "";
+  element?.remove();
+  if (!source || source === "__ENDSTONE_LIVE_MAP_BOOTSTRAP__") {
+    return null;
+  }
+  try {
+    const data = JSON.parse(source) as { worlds?: unknown };
+    return Array.isArray(data.worlds) ? (data.worlds as WorldMeta[]) : null;
+  } catch {
+    return null;
   }
 }
 

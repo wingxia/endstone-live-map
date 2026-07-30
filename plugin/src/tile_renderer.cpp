@@ -10,6 +10,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -42,6 +43,7 @@ std::mutex &tilePyramidMutex()
 }
 
 constexpr auto kPngCompressionMarker = ".png-filter-zlib-v1";
+constexpr std::array<std::uint8_t, 8> kPngSignature = {137, 80, 78, 71, 13, 10, 26, 10};
 
 std::int64_t nowMs()
 {
@@ -387,6 +389,81 @@ bool rawTileFileIsComplete(const std::filesystem::path &path)
     return std::filesystem::file_size(path, error) == expected_size && !error;
 }
 
+std::uint32_t readBigEndianUint32(const std::uint8_t *bytes)
+{
+    return (static_cast<std::uint32_t>(bytes[0]) << 24U) | (static_cast<std::uint32_t>(bytes[1]) << 16U) |
+           (static_cast<std::uint32_t>(bytes[2]) << 8U) | static_cast<std::uint32_t>(bytes[3]);
+}
+
+std::uint32_t pngCrc32(const std::uint8_t *bytes, std::size_t size)
+{
+    std::uint32_t crc = 0xFFFFFFFFU;
+    for (std::size_t index = 0; index < size; ++index) {
+        crc ^= bytes[index];
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1U) ^ (0xEDB88320U & (0U - (crc & 1U)));
+        }
+    }
+    return crc ^ 0xFFFFFFFFU;
+}
+
+bool pngTileFileIsValid(const std::filesystem::path &path)
+{
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error) || error) {
+        return false;
+    }
+
+    const auto file_size = std::filesystem::file_size(path, error);
+    constexpr std::uintmax_t kMinimumPngBytes = 8U + 25U + 12U + 12U;
+    constexpr std::uintmax_t kMaximumPngBytes =
+        static_cast<std::uintmax_t>(kMapTileSize) * kMapTileSize * 8U + 4096U;
+    if (error || file_size < kMinimumPngBytes || file_size > kMaximumPngBytes) {
+        return false;
+    }
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return false;
+    }
+
+    // Files written by encodePngRgba always contain exactly
+    // signature + IHDR + one IDAT + IEND. Read only the fixed header and tail
+    // so startup repair remains O(number of tiles), not O(total PNG bytes).
+    std::array<std::uint8_t, 41> header{};
+    in.read(reinterpret_cast<char *>(header.data()), static_cast<std::streamsize>(header.size()));
+    if (in.gcount() != static_cast<std::streamsize>(header.size()) ||
+        !std::equal(kPngSignature.begin(), kPngSignature.end(), header.begin())) {
+        return false;
+    }
+
+    const auto *ihdr_type = header.data() + 12U;
+    const auto *ihdr_data = header.data() + 16U;
+    if (readBigEndianUint32(header.data() + 8U) != 13U || std::memcmp(ihdr_type, "IHDR", 4U) != 0 ||
+        readBigEndianUint32(ihdr_data) != kMapTileSize ||
+        readBigEndianUint32(ihdr_data + 4U) != kMapTileSize || ihdr_data[8] != 8U ||
+        ihdr_data[9] != 6U || ihdr_data[10] != 0U || ihdr_data[11] != 0U ||
+        ihdr_data[12] != 0U ||
+        pngCrc32(ihdr_type, 17U) != readBigEndianUint32(header.data() + 29U)) {
+        return false;
+    }
+
+    const auto idat_size = static_cast<std::uintmax_t>(readBigEndianUint32(header.data() + 33U));
+    if (idat_size == 0U || std::memcmp(header.data() + 37U, "IDAT", 4U) != 0 ||
+        57U + idat_size != file_size) {
+        return false;
+    }
+
+    std::array<std::uint8_t, 12> tail{};
+    in.clear();
+    in.seekg(static_cast<std::streamoff>(file_size - tail.size()), std::ios::beg);
+    in.read(reinterpret_cast<char *>(tail.data()), static_cast<std::streamsize>(tail.size()));
+    return in.gcount() == static_cast<std::streamsize>(tail.size()) &&
+           readBigEndianUint32(tail.data()) == 0U &&
+           std::memcmp(tail.data() + 4U, "IEND", 4U) == 0 &&
+           pngCrc32(tail.data() + 4U, 4U) == readBigEndianUint32(tail.data() + 8U);
+}
+
 Rgba average2x2(const RgbaImage &image, int x, int y)
 {
     int count = 0;
@@ -586,6 +663,44 @@ TileGroups baseTileGroups(const LiveMapSettings &settings)
     return groups;
 }
 
+TileGroups repairBaseLevelPngs(const LiveMapSettings &settings, const TileGroups &base_groups,
+                               std::int64_t updated_at_ms, TileRenderResult *result)
+{
+    TileGroups repaired_groups;
+    for (const auto &[group, coordinates] : base_groups) {
+        const auto &[world, dimension] = group;
+        for (const auto &[tile_x, tile_z] : coordinates) {
+            const auto png_path =
+                tilePngPath(settings, world, dimension, kMapTileBaseZoom, tile_x, tile_z);
+            if (pngTileFileIsValid(png_path)) {
+                continue;
+            }
+
+            const auto image =
+                readRawRgba(tileRawPath(settings, world, dimension, kMapTileBaseZoom, tile_x, tile_z),
+                            kMapTileSize, kMapTileSize);
+            std::string error;
+            if (!writePngRgba(png_path, image, &error)) {
+                throw std::runtime_error(error.empty() ? "failed to repair base tile png" : error);
+            }
+
+            RenderedTile tile;
+            tile.world = world;
+            tile.dimension = dimension;
+            tile.zoom = kMapTileBaseZoom;
+            tile.tile_x = tile_x;
+            tile.tile_z = tile_z;
+            tile.png_path = png_path;
+            tile.r2_key = tileR2Key(settings, world, dimension, kMapTileBaseZoom, tile_x, tile_z);
+            tile.updated_at_ms = updated_at_ms;
+            tile.has_pixels = hasPixels(image);
+            result->tiles.push_back(std::move(tile));
+            repaired_groups[group].emplace(tile_x, tile_z);
+        }
+    }
+    return repaired_groups;
+}
+
 TileGroups parentGroupsFor(const TileGroups &child_groups)
 {
     TileGroups parent_groups;
@@ -650,10 +765,9 @@ void renderParentLevels(const LiveMapSettings &settings, TileGroups affected_chi
     }
 }
 
-void repairParentLevels(const LiveMapSettings &settings, TileGroups source_groups, std::int64_t updated_at_ms,
-                        TileRenderResult *result)
+void repairParentLevels(const LiveMapSettings &settings, TileGroups source_groups, TileGroups changed_children,
+                        std::int64_t updated_at_ms, TileRenderResult *result)
 {
-    TileGroups changed_children;
     int child_zoom = kMapTileBaseZoom;
     for (int zoom = kMapTileBaseZoom - 1; zoom >= settings.tile_min_zoom; --zoom) {
         auto expected_parents = parentGroupsFor(source_groups);
@@ -833,7 +947,10 @@ TileRenderResult repairMissingTilePyramid(const LiveMapSettings &settings)
     std::scoped_lock pyramid_lock(tilePyramidMutex());
     try {
         result.optimized_png_tiles = optimizeLegacyPngTiles(settings);
-        repairParentLevels(settings, baseTileGroups(settings), nowMs(), &result);
+        const auto base_groups = baseTileGroups(settings);
+        const auto updated_at_ms = nowMs();
+        auto repaired_base_groups = repairBaseLevelPngs(settings, base_groups, updated_at_ms, &result);
+        repairParentLevels(settings, base_groups, std::move(repaired_base_groups), updated_at_ms, &result);
     }
     catch (const std::exception &exception) {
         result.ok = false;

@@ -40,7 +40,7 @@ test("uses the newest available world when the configured default is absent", as
 });
 
 test("updates tiles during map interaction with a bounded buffer", async ({ page }) => {
-  await mockLiveMap(page, { players: false });
+  const requests = await mockLiveMap(page, { players: false, tileDelayMs: 40 });
   await page.goto("/");
   await expect(page.getByTestId("map-canvas")).toBeVisible();
 
@@ -70,11 +70,25 @@ test("updates tiles during map interaction with a bounded buffer", async ({ page
       }),
     )
     .toEqual({
-      updateWhenIdle: false,
-      updateInterval: 150,
-      updateWhenZooming: true,
+      updateWhenIdle: true,
+      updateInterval: 250,
+      updateWhenZooming: false,
       keepBuffer: 1,
     });
+
+  await expect.poll(() => visibleZoomTilesReady(page, 4)).toBe(true);
+  await page.waitForTimeout(300);
+  const tileRequestsBeforeDrag = requests.tiles.length;
+  const mapBounds = await page.getByTestId("map-canvas").boundingBox();
+  expect(mapBounds).not.toBeNull();
+  const startX = mapBounds!.x + mapBounds!.width / 2;
+  const startY = mapBounds!.y + mapBounds!.height / 2;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX - 140, startY + 60, { steps: 12 });
+  await page.waitForTimeout(350);
+  expect(requests.tiles).toHaveLength(tileRequestsBeforeDrag);
+  await page.mouse.up();
 });
 
 test("refreshes visible tiles and world metadata after live tile updates", async ({ page }) => {
@@ -84,7 +98,8 @@ test("refreshes visible tiles and world metadata after live tile updates", async
   await page.goto("/");
 
   await expect(page.getByTestId("map-canvas")).toBeVisible();
-  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("_=10")))).toBe(true);
+  await expect.poll(() => visibleTileSources(page).then((sources) => sources.length)).toBeGreaterThan(0);
+  expect((await visibleTileSources(page)).every((url) => !url.includes("_="))).toBe(true);
   const unchangedTile = await visibleTileSources(page).then((sources) =>
     sources.find((url) => url.includes("/z4/") && !url.includes("/z4/0/0.png")),
   );
@@ -96,6 +111,27 @@ test("refreshes visible tiles and world metadata after live tile updates", async
         JSON.stringify({
           type: "tiles_ready",
           updatedAt,
+          worlds: [{
+            version: 2,
+            world: "Bedrock level",
+            dimension: "Overworld",
+            status: "live",
+            chunkCount: 10_972,
+            importedAt: 1,
+            updatedAt,
+            bounds: {
+              minChunkX: -4,
+              maxChunkX: 4,
+              minChunkZ: -4,
+              maxChunkZ: 4,
+              minBlockX: -64,
+              maxBlockX: 79,
+              minBlockZ: -64,
+              maxBlockZ: 79,
+            },
+            sampleChunks: [{ chunkX: 0, chunkZ: 0 }],
+            topBlocks: {},
+          }],
           chunks: [],
           tiles: [
             {
@@ -117,12 +153,12 @@ test("refreshes visible tiles and world metadata after live tile updates", async
 
   await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("_=999")))).toBe(true);
   await expect.poll(() => visibleTileSources(page).then((sources) => sources.includes(unchangedTile!))).toBe(true);
-  await expect.poll(() => requests.worlds).toBeGreaterThan(1);
-  expect(requests.worlds).toBe(2);
+  await expect(page.getByLabel("地图状态")).toContainText("10,972");
+  expect(requests.worlds).toBe(1);
   expect(requests.legacy.length).toBe(0);
 });
 
-test("waits for versioned world metadata before requesting tiles", async ({ page }) => {
+test("waits for world metadata before requesting stable revalidating tile URLs", async ({ page }) => {
   const requests = await mockLiveMap(page, { holdWorlds: true });
 
   await page.goto("/");
@@ -132,7 +168,7 @@ test("waits for versioned world metadata before requesting tiles", async ({ page
   expect(requests.tiles).toHaveLength(0);
   requests.releaseWorlds();
   await expect.poll(() => requests.tiles.length).toBeGreaterThan(0);
-  expect(requests.tiles.every((url) => url.includes("_=10"))).toBe(true);
+  expect(requests.tiles.every((url) => !url.includes("_="))).toBe(true);
 });
 
 test("uses opaque map overlays without backdrop-filter recomposition", async ({ page }) => {
@@ -189,18 +225,22 @@ test("constrains navigation to explored bounds and restores the initial view", a
 });
 
 test("uses generated PNG tiles for every zoom level from z4 through z-8", async ({ page }) => {
-  const requests = await mockLiveMap(page, { players: false });
+  const requests = await mockLiveMap(page, { players: false, tileDelayMs: 40 });
   await page.goto("/");
   await expect(page.getByTestId("map-canvas")).toBeVisible();
-  await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes("/api/local-map-tiles/Bedrock_level/Overworld/z4/")))).toBe(true);
-  for (const zoom of ["z3", "z2", "z1", "z0", "z-1", "z-2", "z-3", "z-4", "z-5", "z-6", "z-7", "z-8"]) {
-    await page.evaluate((zoomLabel) => {
-      const zoomNumber = Number(String(zoomLabel).slice(1));
+  await expect.poll(() => visibleZoomTilesReady(page, 4), { timeout: 2_500 }).toBe(true);
+  const settleTimes: number[] = [];
+  for (const zoom of [3, 2, 1, 0, -1, -2, -3, -4, -5, -6, -7, -8]) {
+    const startedAt = Date.now();
+    await page.evaluate((zoomNumber) => {
       const leafletMap = (window as unknown as { __endstoneLiveMapLeaflet?: { setZoom?: (zoom: number, options?: { animate?: boolean }) => void } }).__endstoneLiveMapLeaflet;
       leafletMap?.setZoom?.(zoomNumber, { animate: false });
     }, zoom);
-    await expect.poll(() => visibleTileSources(page).then((sources) => sources.some((url) => url.includes(`/api/local-map-tiles/Bedrock_level/Overworld/${zoom}/`)))).toBe(true);
+    await expect.poll(() => visibleZoomTilesReady(page, zoom), { timeout: 2_500 }).toBe(true);
+    settleTimes.push(Date.now() - startedAt);
   }
+  expect(Math.max(...settleTimes)).toBeLessThan(2_000);
+  expect(requests.tiles.every((url) => !url.includes("_="))).toBe(true);
   expect(requests.legacy.length).toBe(0);
 });
 
@@ -252,7 +292,7 @@ test("shows player avatar markers, public land overlays, and coordinate copy", a
   await page.mouse.click(180, 180);
   await page.getByTestId("coordinate-copy").click();
   const copied = await page.evaluate(() => (window as unknown as { __copiedCoordinates: string[] }).__copiedCoordinates.at(-1));
-  expect(copied).toMatch(/^-?\d+, \d+, -?\d+$/);
+  expect(copied).toMatch(/^-?\d+, (?:\d+|~), -?\d+$/);
   expect(requests.legacy.length).toBe(0);
 });
 
@@ -270,6 +310,45 @@ test("removes player markers when the plugin publishes an empty online snapshot"
 
   await expect(page.locator(".player-marker-name", { hasText: "Wing" })).toHaveCount(0);
   await expect(page.getByText("当前维度没有在线玩家")).toBeVisible();
+});
+
+test("moves an unchanged player marker without rebuilding its DOM", async ({ page }) => {
+  await installMockLiveSocket(page);
+  await mockLiveMap(page);
+  await page.goto("/");
+
+  const marker = page.locator(".player-marker").first();
+  await expect(marker).toBeVisible();
+  const initialTransform = await marker.getAttribute("style");
+  await marker.evaluate((element) => {
+    element.setAttribute("data-marker-instance", "preserved");
+  });
+
+  await page.evaluate(() => {
+    (window as unknown as { __liveMapSocketSend: (data: string) => void }).__liveMapSocketSend(
+      JSON.stringify({
+        type: "player_snapshot",
+        players: [{
+          id: "player-wing",
+          name: "Wing",
+          xuid: "xuid-1",
+          world: "Bedrock level",
+          dimension: "Overworld",
+          x: 46,
+          y: 72,
+          z: -35,
+          yaw: 120,
+          pitch: 0,
+          avatarHash: "abc123",
+          avatarUrl: "/api/players/player-wing/avatar.png?_=abc123",
+          updatedAt: 20,
+        }],
+      }),
+    );
+  });
+
+  await expect.poll(() => marker.getAttribute("style")).not.toBe(initialTransform);
+  await expect(marker).toHaveAttribute("data-marker-instance", "preserved");
 });
 
 test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
@@ -295,7 +374,10 @@ test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
   expect(await hudMapCoverage(page)).toBeLessThan(0.13);
 });
 
-async function mockLiveMap(page: Page, options: { players?: boolean; world?: string; holdWorlds?: boolean } = {}) {
+async function mockLiveMap(
+  page: Page,
+  options: { players?: boolean; world?: string; holdWorlds?: boolean; tileDelayMs?: number } = {},
+) {
   const includePlayers = options.players !== false;
   const worldName = options.world ?? "Bedrock level";
   let releaseWorlds = () => {};
@@ -418,6 +500,9 @@ async function mockLiveMap(page: Page, options: { players?: boolean; world?: str
   });
   await page.route("**/api/local-map-tiles/**", async (route: Route) => {
     requests.tiles.push(route.request().url());
+    if (options.tileDelayMs) {
+      await new Promise((resolve) => setTimeout(resolve, options.tileDelayMs));
+    }
     await route.fulfill({ contentType: "image/png", body: GREEN_TILE_PNG });
   });
   await page.route("**/api/chunks?**", async (route) => {
@@ -494,6 +579,23 @@ async function visibleTileSources(page: Page) {
       })
       .map((image) => image.src),
   );
+}
+
+async function visibleZoomTilesReady(page: Page, zoom: number) {
+  return page.evaluate((zoomLabel) => {
+    const images = [...document.querySelectorAll<HTMLImageElement>("img.chunk-image-tile")].filter((image) => {
+      const style = window.getComputedStyle(image);
+      const rect = image.getBoundingClientRect();
+      return (
+        image.src.includes(`/z${zoomLabel}/`) &&
+        style.visibility !== "hidden" &&
+        style.display !== "none" &&
+        rect.width > 0 &&
+        rect.height > 0
+      );
+    });
+    return images.length > 0 && images.every((image) => image.complete && image.naturalWidth > 1);
+  }, zoom);
 }
 
 async function leafletView(page: Page) {

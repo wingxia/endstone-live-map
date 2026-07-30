@@ -20,6 +20,12 @@ interface CoordinateState {
   locked: boolean;
 }
 
+interface PlayerMarkerRecord {
+  marker: L.Marker;
+  visualSignature: string;
+  tooltipSignature: string;
+}
+
 interface MapCanvasProps {
   world: string;
   dimension: string;
@@ -37,6 +43,7 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
     layers: L.LayerGroup;
     landLayers: L.LayerGroup;
     chunkLayer: ChunkLayerHandle;
+    playerMarkers: Map<string, PlayerMarkerRecord>;
   } | null>(null);
   const [coordinate, setCoordinate] = useState<CoordinateState>(() => buildCoordinateState(0, 0, null, false));
   const [mapReady, setMapReady] = useState(false);
@@ -44,6 +51,10 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
   const lockedRef = useRef(false);
   const autoFitKeyRef = useRef("");
   const homeViewsRef = useRef(new Map<string, { center: [number, number]; zoom: number }>());
+  const navigationBoundsRef = useRef<{ key: string; bounds: WorldMeta["bounds"] | null }>({
+    key: "",
+    bounds: null,
+  });
   const mapSelectionRef = useRef({ world, dimension });
   mapSelectionRef.current = { world, dimension };
 
@@ -77,7 +88,8 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
 
       const landLayers = L.layerGroup().addTo(map);
       const layers = L.layerGroup().addTo(map);
-      stateRef.current = { map, layers, landLayers, chunkLayer };
+      const playerMarkers = new Map<string, PlayerMarkerRecord>();
+      stateRef.current = { map, layers, landLayers, chunkLayer, playerMarkers };
       mountedMap = map;
       readyFrame = window.requestAnimationFrame(() => {
         if (cancelled) {
@@ -172,13 +184,25 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
     }
     const playerBounds = players.length > 0 ? boundsForPlayers(players) : null;
     const meta = isWorldMetaForMap(worldMeta, world, dimension) ? worldMeta : null;
-    const navigationBounds = meta?.bounds || playerBounds;
+    const selectionKey = mapViewKey(world, dimension);
+    const candidateNavigationBounds = mergeMapBounds(meta?.bounds || null, playerBounds);
+    const previousNavigation = navigationBoundsRef.current;
+    const navigationBounds =
+      previousNavigation.key === selectionKey
+        ? mergeMapBounds(previousNavigation.bounds, candidateNavigationBounds)
+        : candidateNavigationBounds;
     const autoFitKey = autoFitKeyFor(world, dimension, meta, playerBounds);
-    state.map.setMaxBounds(
-      navigationBounds
-        ? leafletMaxBoundsFor(navigationBounds)
-        : (null as unknown as L.LatLngBoundsExpression),
-    );
+    if (
+      previousNavigation.key !== selectionKey ||
+      !sameMapBounds(previousNavigation.bounds, navigationBounds)
+    ) {
+      state.map.setMaxBounds(
+        navigationBounds
+          ? leafletMaxBoundsFor(navigationBounds)
+          : (null as unknown as L.LatLngBoundsExpression),
+      );
+      navigationBoundsRef.current = { key: selectionKey, bounds: navigationBounds };
+    }
     if (!meta) {
       state.chunkLayer.setActive(false);
       if (autoFitKeyRef.current !== autoFitKey) {
@@ -198,7 +222,7 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
       }
       return;
     }
-    state.chunkLayer.setKnownBounds(mergeMapBounds(meta.bounds, playerBounds), meta.updatedAt);
+    state.chunkLayer.setKnownBounds(meta.bounds, meta.updatedAt);
     if (autoFitKeyRef.current !== autoFitKey) {
       if (playerBounds) {
         state.map.fitBounds(
@@ -287,36 +311,56 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
   }, [lands, mapReady]);
 
   useEffect(() => {
-    let cancelled = false;
-
     function refreshOverlay() {
       const state = stateRef.current;
-      if (cancelled || !state || !mapReady) {
+      if (!state || !mapReady) {
         return;
       }
-      state.layers.clearLayers();
 
+      const onlinePlayerIds = new Set<string>();
       for (const player of players) {
-        L.marker(minecraftToLeaflet(player.x, player.z), {
-          icon: L.divIcon({
-            className: "player-marker",
-            html: playerMarkerHtml(player),
-            iconSize: [36, 48],
-            iconAnchor: [18, 42],
-          }),
-          keyboard: false,
-        })
-          .bindTooltip(`${escapeHtml(player.name)} (${Math.round(player.x)}, ${Math.round(player.y)}, ${Math.round(player.z)})`, {
-            permanent: false,
+        const playerId = String(player.id);
+        const nextPosition = minecraftToLeaflet(player.x, player.z);
+        const visualSignature = playerMarkerVisualSignature(player);
+        const tooltip = playerMarkerTooltip(player);
+        onlinePlayerIds.add(playerId);
+
+        const existing = state.playerMarkers.get(playerId);
+        if (!existing) {
+          const marker = L.marker(nextPosition, {
+            icon: playerMarkerIcon(player),
+            keyboard: false,
           })
-          .addTo(state.layers);
+            .bindTooltip(tooltip, { permanent: false })
+            .addTo(state.layers);
+          state.playerMarkers.set(playerId, { marker, visualSignature, tooltipSignature: tooltip });
+          continue;
+        }
+
+        const currentPosition = existing.marker.getLatLng();
+        if (currentPosition.lat !== nextPosition[0] || currentPosition.lng !== nextPosition[1]) {
+          existing.marker.setLatLng(nextPosition);
+        }
+        if (existing.visualSignature !== visualSignature) {
+          existing.marker.setIcon(playerMarkerIcon(player));
+          existing.visualSignature = visualSignature;
+        }
+        if (existing.tooltipSignature !== tooltip) {
+          existing.marker.setTooltipContent(tooltip);
+          existing.tooltipSignature = tooltip;
+        }
+      }
+
+      for (const [playerId, record] of state.playerMarkers) {
+        if (onlinePlayerIds.has(playerId)) {
+          continue;
+        }
+        state.layers.removeLayer(record.marker);
+        state.playerMarkers.delete(playerId);
       }
     }
 
     refreshOverlay();
-    return () => {
-      cancelled = true;
-    };
   }, [mapReady, players]);
 
   useEffect(() => {
@@ -425,7 +469,7 @@ function buildCoordinateState(
 }
 
 export function coordinateCopyText(coordinate: { x: number; height: number; z: number }): string {
-  const y = Number.isFinite(coordinate.height) ? coordinate.height : 0;
+  const y = Number.isFinite(coordinate.height) ? coordinate.height : "~";
   return `${coordinate.x}, ${y}, ${coordinate.z}`;
 }
 
@@ -530,6 +574,25 @@ export function mergeMapBounds(left: WorldMeta["bounds"] | null, right: WorldMet
   };
 }
 
+function sameMapBounds(left: WorldMeta["bounds"] | null, right: WorldMeta["bounds"] | null) {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    left.minChunkX === right.minChunkX &&
+    left.maxChunkX === right.maxChunkX &&
+    left.minChunkZ === right.minChunkZ &&
+    left.maxChunkZ === right.maxChunkZ &&
+    left.minBlockX === right.minBlockX &&
+    left.maxBlockX === right.maxBlockX &&
+    left.minBlockZ === right.minBlockZ &&
+    left.maxBlockZ === right.maxBlockZ
+  );
+}
+
 export function leafletMaxBoundsFor(bounds: WorldMeta["bounds"]): L.LatLngBoundsExpression {
   return [
     minecraftToLeaflet(bounds.minBlockX - MAP_BOUNDS_PADDING_BLOCKS, bounds.maxBlockZ + MAP_BOUNDS_PADDING_BLOCKS),
@@ -551,6 +614,23 @@ function playerMarkerHtml(player: PlayerState) {
     ? `<img class="player-marker-avatar" src="${escapeAttribute(avatar)}" alt="" loading="lazy" />`
     : `<span class="player-marker-fallback">${initial}</span>`;
   return `<span class="player-marker-frame">${avatarHtml}</span><span class="player-marker-name">${name}</span>`;
+}
+
+function playerMarkerIcon(player: PlayerState) {
+  return L.divIcon({
+    className: "player-marker",
+    html: playerMarkerHtml(player),
+    iconSize: [36, 48],
+    iconAnchor: [18, 42],
+  });
+}
+
+function playerMarkerVisualSignature(player: PlayerState) {
+  return `${player.name}\u0000${playerAvatarUrl(player)}`;
+}
+
+function playerMarkerTooltip(player: PlayerState) {
+  return `${escapeHtml(player.name)} (${Math.round(player.x)}, ${Math.round(player.y)}, ${Math.round(player.z)})`;
 }
 
 function escapeHtml(value: string) {

@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { landsUrl, mapImageTileUrl, playerAvatarUrl, segmentKey, type WorldMeta } from "../src/api";
+import { landsUrl, listWorlds, mapImageTileUrl, playerAvatarUrl, segmentKey, type WorldMeta } from "../src/api";
 import { blockColumnIndex, blockToChunk, leafletToMinecraft, minecraftToLeaflet } from "../src/ui/coords";
 import {
   blockFacingEdgeForState,
@@ -71,6 +71,41 @@ describe("api helpers", () => {
       topBlocks: {},
     };
     expect(meta.bounds.maxBlockX - meta.bounds.minBlockX + 1).toBe(48);
+  });
+
+  it("uses server-embedded world metadata before making a network request", async () => {
+    const script = document.createElement("script");
+    script.id = "endstone-live-map-bootstrap";
+    script.type = "application/json";
+    script.textContent = JSON.stringify({
+      worlds: [{
+        version: 2,
+        world: "ExchangeTest",
+        dimension: "Overworld",
+        status: "live",
+        chunkCount: 1,
+        importedAt: 1,
+        updatedAt: 2,
+        bounds: {
+          minChunkX: 0,
+          maxChunkX: 0,
+          minChunkZ: 0,
+          maxChunkZ: 0,
+          minBlockX: 0,
+          maxBlockX: 15,
+          minBlockZ: 0,
+          maxBlockZ: 15,
+        },
+        topBlocks: {},
+      }],
+    });
+    document.body.append(script);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    await expect(listWorlds()).resolves.toMatchObject([{ world: "ExchangeTest", chunkCount: 1 }]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(document.getElementById("endstone-live-map-bootstrap")).toBeNull();
+    fetchSpy.mockRestore();
   });
 
   it("converts Leaflet tile coordinates into zoom-aware chunk ranges", () => {

@@ -206,7 +206,7 @@ void writeExampleSettings(const std::filesystem::path &path)
         << "  \"dimensions\": [\"Overworld\", \"Nether\", \"TheEnd\"],\n"
         << "  \"tile_min_zoom\": -8,\n"
         << "  \"tile_max_zoom\": 4,\n"
-        << "  \"render_worker_threads\": 2,\n"
+        << "  \"render_worker_threads\": 1,\n"
         << "  \"scan_radius_chunks\": 8,\n"
         << "  \"chunk_refresh_seconds\": 20,\n"
         << "  \"player_push_seconds\": 1,\n"

@@ -37,10 +37,12 @@ struct LandClaim {
 struct LandParseResult {
     std::vector<LandClaim> claims;
     std::size_t skipped_entries = 0;
+    bool source_valid = false;
 };
 
 LandParseResult parseLandConfig(std::string_view source, std::string_view world, std::int64_t updated_at_ms);
 LandParseResult loadLandConfig(const std::filesystem::path &path, std::string_view world, std::int64_t updated_at_ms);
-std::string serializeLandBatch(const std::vector<LandClaim> &claims);
+std::string serializeLandBatch(const std::vector<LandClaim> &claims, std::string_view world = {},
+                               const std::vector<std::string> &dimensions = {});
 
 }  // namespace livemap

@@ -34,6 +34,30 @@ describe("local live map server", () => {
   it("keeps reverse-proxy origin connections open beyond the tunnel idle window", () => {
     expect(server.keepAliveTimeout).toBe(95_000);
     expect(server.headersTimeout).toBe(100_000);
+    expect(server.requestTimeout).toBe(60_000);
+  });
+
+  it("completes the WebSocket close handshake and releases the client socket", async () => {
+    const socket = new WebSocket(`${baseUrl.replace("http://", "ws://")}/api/live`);
+    try {
+      await withTimeout(new Promise((resolve, reject) => {
+        socket.addEventListener("open", resolve, { once: true });
+        socket.addEventListener("error", () => reject(new Error("WebSocket failed to open")), { once: true });
+      }), 1_000);
+
+      const closed = new Promise((resolve) => {
+        socket.addEventListener("close", resolve, { once: true });
+      });
+      socket.close(1000, "done");
+      const event = await withTimeout(closed, 1_000);
+      expect(event.code).toBe(1000);
+      expect(event.reason).toBe("done");
+      expect(serverState.sockets.size).toBe(0);
+    } finally {
+      for (const client of serverState.sockets) {
+        client.destroy();
+      }
+    }
   });
 
   it("serves the app shell uncached and immutable hashed assets with compressed conditional responses", async () => {
@@ -77,6 +101,36 @@ describe("local live map server", () => {
       headers: { "Accept-Encoding": "br", "If-None-Match": compressedEtag, Connection: "close" },
     });
     expect(notModified.status).toBe(304);
+  });
+
+  it("embeds XSS-safe world metadata in the app shell to remove a blocking API round trip", async () => {
+    const world = "</script><script>alert('map')</script>";
+    await fs.writeFile(
+      path.join(tmp, "index.html"),
+      '<!doctype html><script id="endstone-live-map-bootstrap" type="application/json">__ENDSTONE_LIVE_MAP_BOOTSTRAP__</script>',
+    );
+    const update = await fetch(`${baseUrl}/api/plugin/tiles`, {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "tiles_ready",
+        updatedAt: 10,
+        chunks: [{ world, dimension: "Overworld", chunkX: 0, chunkZ: 0, updatedAt: 10 }],
+      }),
+    });
+    expect(update.status).toBe(200);
+
+    const response = await fetch(`${baseUrl}/`, { headers: { "Accept-Encoding": "identity" } });
+    const html = await response.text();
+    expect(response.headers.get("cache-control")).toBe("no-cache");
+    expect(html).not.toContain("__ENDSTONE_LIVE_MAP_BOOTSTRAP__");
+    expect(html).not.toContain(world);
+    expect(html).toContain("\\u003c/script>");
+    expect(JSON.parse(html.match(/type="application\/json">([^<]*)<\/script>/)?.[1] || "{}").worlds[0]).toMatchObject({
+      world,
+      dimension: "Overworld",
+      chunkCount: 1,
+    });
   });
 
   it("advertises the generated low-zoom tile floor", async () => {
@@ -134,6 +188,18 @@ describe("local live map server", () => {
       chunkCount: 1,
     });
     expect(worlds.worlds[0].bounds).toMatchObject({ minChunkX: -1, maxChunkZ: 2 });
+  });
+
+  it("rejects oversized plugin payloads without exhausting server memory", async () => {
+    serverState.maxJsonBodyBytes = 64;
+    const response = await fetch(`${baseUrl}/api/plugin/live`, {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ players: [{ id: "x".repeat(128) }] }),
+    });
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({ error: "payload_too_large" });
+    await expect((await fetch(`${baseUrl}/api/health`)).json()).resolves.toMatchObject({ ok: true });
   });
 
   it("indexes complete world bounds from existing z4 tile files", async () => {
@@ -271,9 +337,28 @@ describe("local live map server", () => {
 
     const lands = await (await fetch(`${baseUrl}/api/lands?world=Bedrock+level&dimension=Overworld`)).json();
     expect(lands.claims).toEqual([claim]);
+
+    const unchanged = await fetch(`${baseUrl}/api/plugin/lands`, {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ claims: [{ ...claim, updatedAt: 999 }] }),
+    });
+    await expect(unchanged.json()).resolves.toMatchObject({ ok: true, claims: 1, worlds: 0 });
+    const afterUnchanged = await (await fetch(`${baseUrl}/api/lands?world=Bedrock+level&dimension=Overworld`)).json();
+    expect(afterUnchanged).toEqual(lands);
+
+    const cleared = await fetch(`${baseUrl}/api/plugin/lands`, {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ world: "Bedrock level", dimensions: ["Overworld"], claims: [] }),
+    });
+    await expect(cleared.json()).resolves.toMatchObject({ ok: true, claims: 0, worlds: 1 });
+    const afterClear = await (await fetch(`${baseUrl}/api/lands?world=Bedrock+level&dimension=Overworld`)).json();
+    expect(afterClear.claims).toEqual([]);
+    expect(afterClear.updatedAt).toBeGreaterThan(lands.updatedAt);
   });
 
-  it("serves mutable map tiles with revalidation and uncached placeholders", async () => {
+  it("serves mutable map tiles with revalidation and safely caches versioned placeholders", async () => {
     const tileFile = path.join(tmp, "tiles", "Bedrock_level", "Overworld", "z4", "0", "0.png");
     await fs.mkdir(path.dirname(tileFile), { recursive: true });
     await fs.writeFile(tileFile, Buffer.from([1, 2, 3]));
@@ -305,7 +390,7 @@ describe("local live map server", () => {
 
     const versionedMissing = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/9/9.png?_=123`);
     expect(versionedMissing.status).toBe(200);
-    expect(versionedMissing.headers.get("cache-control")).toBe("no-store");
+    expect(versionedMissing.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
   });
 
   it("serves versioned PNG tiles at every configured zoom from -8 through 4", async () => {
@@ -347,7 +432,7 @@ describe("local live map server", () => {
 
     serverState.missingTileCacheMs = 20;
     const missingFile = path.join(tmp, "tiles", "Bedrock_level", "Overworld", "z4", "8", "9.png");
-    const missingUrl = `${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/8/9.png?_=12`;
+    const missingUrl = `${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/8/9.png`;
     const missing = await fetch(missingUrl);
     expect(missing.headers.get("cache-control")).toBe("no-store");
     expect(serverState.missingTileCache.size).toBe(1);
@@ -435,4 +520,18 @@ async function closeServer(server) {
   const closed = new Promise((resolve) => server.close(resolve));
   server.closeAllConnections();
   await closed;
+}
+
+async function withTimeout(promise, timeoutMs) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs} ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
 }

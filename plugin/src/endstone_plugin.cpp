@@ -69,7 +69,7 @@ struct ColumnSample {
 
 struct QueuedSeed {
     livemap::ChunkCoord coord;
-    std::int64_t queued_at_ms{};
+    std::int64_t not_before_ms{};
     bool force{};
 };
 
@@ -83,11 +83,23 @@ struct PendingChunkUpload {
     livemap::ChunkSnapshot snapshot;
     ChunkUploadMeta meta;
     std::int64_t queued_at_ms{};
+    std::int64_t ready_at_ms{};
+};
+
+enum class PendingChunkQueueResult {
+    Queued,
+    Skipped,
+    Backpressured,
 };
 
 struct EncodedAvatar {
     std::string hash;
     std::string png_base64;
+};
+
+struct PlayerAvatarAck {
+    std::string player_id;
+    std::string hash;
 };
 
 constexpr std::int64_t kChunkBatchRetryMinDelayMs = 30000;
@@ -235,6 +247,7 @@ struct UploadResult {
     std::int64_t started_at_ms{};
     std::int64_t finished_at_ms{};
     livemap::TransportResult transport;
+    std::vector<PlayerAvatarAck> player_avatar_acks;
 };
 
 class BackgroundLog {
@@ -347,9 +360,11 @@ private:
 class UploadDispatcher {
 public:
     UploadDispatcher(livemap::LiveMapSettings settings, std::size_t max_queue_size)
-        : settings_(std::move(settings)), max_queue_size_(std::max<std::size_t>(1, max_queue_size)),
-          worker_count_(static_cast<std::size_t>(std::max(1, settings_.render_worker_threads)))
+        : settings_(std::move(settings)), max_queue_size_(std::max<std::size_t>(1, max_queue_size))
     {
+        // Tile batches can touch the same base and parent files. A single FIFO
+        // dispatcher worker makes local render + notification order deterministic
+        // and prevents an older batch from overwriting a newer batch.
         workers_.reserve(worker_count_);
         for (std::size_t i = 0; i < worker_count_; ++i) {
             workers_.emplace_back([this] { workerLoop(); });
@@ -454,24 +469,29 @@ private:
                         .error = repair.error.empty() ? "tile pyramid repair failed" : repair.error};
             }
 
-            const auto r2 = livemap::uploadRenderedTilesToR2(settings_, repair.tiles);
-            if (!r2.ok) {
-                return {.ok = false, .error = r2.error.empty() ? "repaired tile R2 upload failed" : r2.error};
-            }
-
             if (repair.tiles.empty()) {
                 return {.ok = true,
                         .body = "{\"repairedTiles\":0,\"optimizedPngTiles\":" +
-                                std::to_string(repair.optimized_png_tiles) + ",\"r2Uploaded\":0}"};
+                                std::to_string(repair.optimized_png_tiles) +
+                                ",\"r2MirrorOk\":true,\"r2Uploaded\":0,\"r2Deleted\":0}"};
             }
             auto notify = livemap::postPluginJson(settings_, "/api/plugin/tiles",
-                                                  livemap::serializeTilesReady(repair));
+                                                   livemap::serializeTilesReady(repair));
             if (!notify.ok) {
                 return notify;
             }
+            const auto r2 = livemap::uploadRenderedTilesToR2(settings_, repair.tiles);
             notify.body = "{\"repairedTiles\":" + std::to_string(repair.tiles.size()) +
-                          ",\"optimizedPngTiles\":" + std::to_string(repair.optimized_png_tiles) +
-                          ",\"r2Uploaded\":" + std::to_string(r2.uploaded) + "}";
+                           ",\"optimizedPngTiles\":" + std::to_string(repair.optimized_png_tiles) +
+                           ",\"r2MirrorOk\":" + (r2.ok ? "true" : "false") +
+                           ",\"r2Uploaded\":" + std::to_string(r2.uploaded) +
+                           ",\"r2Deleted\":" + std::to_string(r2.deleted);
+            if (!r2.ok) {
+                notify.body += ",\"r2MirrorError\":\"" +
+                               livemap::jsonEscape(r2.error.empty() ? "repaired tile R2 upload failed" : r2.error) +
+                               "\"";
+            }
+            notify.body += "}";
             return notify;
         }
         if (job.kind != UploadJob::Kind::ChunkBatch) {
@@ -483,17 +503,20 @@ private:
             return {.ok = false, .error = render.error.empty() ? "tile render failed" : render.error};
         }
 
-        const auto r2 = livemap::uploadRenderedTilesToR2(settings_, render.tiles);
-        if (!r2.ok) {
-            return {.ok = false, .error = r2.error.empty() ? "R2 upload failed" : r2.error};
-        }
-
         auto notify = livemap::postPluginJson(settings_, "/api/plugin/tiles", livemap::serializeTilesReady(render));
         if (!notify.ok) {
             return notify;
         }
-        notify.body = "{\"renderedTiles\":" + std::to_string(render.tiles.size()) + ",\"r2Uploaded\":" +
-                      std::to_string(r2.uploaded) + "}";
+        const auto r2 = livemap::uploadRenderedTilesToR2(settings_, render.tiles);
+        notify.body = "{\"renderedTiles\":" + std::to_string(render.tiles.size()) +
+                      ",\"r2MirrorOk\":" + (r2.ok ? "true" : "false") +
+                      ",\"r2Uploaded\":" + std::to_string(r2.uploaded) +
+                      ",\"r2Deleted\":" + std::to_string(r2.deleted);
+        if (!r2.ok) {
+            notify.body += ",\"r2MirrorError\":\"" +
+                           livemap::jsonEscape(r2.error.empty() ? "R2 upload failed" : r2.error) + "\"";
+        }
+        notify.body += "}";
         return notify;
     }
 
@@ -538,11 +561,12 @@ public:
     LatestUploadDispatcher(const LatestUploadDispatcher &) = delete;
     LatestUploadDispatcher &operator=(const LatestUploadDispatcher &) = delete;
 
-    void publish(std::string json, std::size_t item_count)
+    void publish(std::string json, std::size_t item_count, std::vector<PlayerAvatarAck> player_avatar_acks)
     {
         {
             std::scoped_lock lock(mutex_);
-            const bool replaced = pending_.replace({std::move(json), item_count, nowMs()});
+            const bool replaced =
+                pending_.replace({std::move(json), item_count, nowMs(), std::move(player_avatar_acks)});
             if (replaced) {
                 ++replaced_count_;
             }
@@ -595,6 +619,7 @@ private:
         std::string json;
         std::size_t item_count{};
         std::int64_t queued_at_ms{};
+        std::vector<PlayerAvatarAck> player_avatar_acks;
     };
 
     void workerLoop()
@@ -620,7 +645,8 @@ private:
             {
                 std::scoped_lock lock(mutex_);
                 results_.push_back({UploadJob::Kind::PlayerSnapshot, {}, {}, payload.item_count, {},
-                                    payload.queued_at_ms, started_at_ms, finished_at_ms, std::move(transport)});
+                                    payload.queued_at_ms, started_at_ms, finished_at_ms, std::move(transport),
+                                    std::move(payload.player_avatar_acks)});
             }
         }
     }
@@ -727,7 +753,8 @@ public:
             " maxPendingChunkUploads=", settings_.max_pending_chunk_uploads,
             " uploadLands=", settings_.upload_lands, " landPush=", settings_.land_push_seconds,
             "s landConfig=", settings_.land_config_file, " tileDataDir=", settings_.tile_data_dir,
-            " renderWorkers=", settings_.render_worker_threads, " tileMinZoom=", settings_.tile_min_zoom,
+            " renderWorkers=1 (serialized; requested=", settings_.render_worker_threads,
+            ") tileMinZoom=", settings_.tile_min_zoom,
             " r2Enabled=", settings_.r2_enabled, " r2Bucket=", settings_.r2_bucket,
             " r2MaxPerMinute=", settings_.r2_max_uploads_per_minute, " dimensions=", settings_.dimensions.size(),
             " loadedChunks=", loadedChunkCount(), ".");
@@ -754,6 +781,10 @@ public:
         processUploadResults();
         if (upload_dispatcher_ != nullptr) {
             upload_dispatcher_->stop();
+            // A render that was already in flight can finish while stop() joins
+            // the worker. Consume that final result before persisting baselines
+            // so a graceful shutdown does not needlessly render it again.
+            processUploadResults();
         }
         if (player_dispatcher_ != nullptr) {
             player_dispatcher_->stop();
@@ -906,6 +937,12 @@ public:
         }
         settings_ = livemap::loadSettings(config_path);
         settings_.tile_data_dir = resolveDataPath(settings_.tile_data_dir).string();
+        {
+            std::scoped_lock lock(state_mutex_);
+            // A different token or endpoint may refer to a server that has never
+            // received these images. Force bounded retransmission after reload.
+            acknowledged_player_avatar_hashes_.clear();
+        }
         upload_dispatcher_ =
             std::make_unique<UploadDispatcher>(settings_, static_cast<std::size_t>(settings_.max_upload_queue_size));
         player_dispatcher_ = std::make_unique<LatestUploadDispatcher>(settings_, "/api/plugin/live");
@@ -962,6 +999,23 @@ private:
         return loaded_chunks_.find(coord) != loaded_chunks_.end();
     }
 
+    bool queueSeedChunkLocked(const livemap::ChunkCoord &coord, bool force, std::int64_t not_before_ms)
+    {
+        if (queued_seed_chunks_.insert(coord).second) {
+            seed_queue_.push_back({coord, not_before_ms, force});
+            return true;
+        }
+        if (force) {
+            for (auto &queued : seed_queue_) {
+                if (queued.coord == coord) {
+                    queued.force = true;
+                    break;
+                }
+            }
+        }
+        return false;
+    }
+
     bool deferSeedChunk(const livemap::ChunkCoord &coord, bool force)
     {
         std::scoped_lock lock(state_mutex_);
@@ -970,12 +1024,7 @@ private:
         // method records the deferred work. Requeue atomically in that case so
         // the work cannot miss the one load event and remain deferred forever.
         if (loaded_chunks_.find(coord) != loaded_chunks_.end()) {
-            if (force) {
-                queued_seed_chunks_.erase(coord);
-            }
-            if (queued_seed_chunks_.insert(coord).second) {
-                seed_queue_.push_back({coord, nowMs(), force});
-            }
+            queueSeedChunkLocked(coord, force, nowMs());
             return false;
         }
         auto found = deferred_seed_chunks_.find(coord);
@@ -1003,13 +1052,7 @@ private:
             }
             force = deferred->second;
             deferred_seed_chunks_.erase(deferred);
-            if (force) {
-                queued_seed_chunks_.erase(coord);
-            }
-            if (queued_seed_chunks_.insert(coord).second) {
-                seed_queue_.push_back({coord, nowMs(), force});
-                queued = true;
-            }
+            queued = queueSeedChunkLocked(coord, force, nowMs());
         }
         if (queued) {
             background_log_.info("Queued deferred live map base chunk ", chunkName(coord),
@@ -1053,11 +1096,7 @@ private:
                 const auto coord = deferred->first;
                 const auto force = deferred->second;
                 deferred = deferred_seed_chunks_.erase(deferred);
-                if (force) {
-                    queued_seed_chunks_.erase(coord);
-                }
-                if (queued_seed_chunks_.insert(coord).second) {
-                    seed_queue_.push_back({coord, nowMs(), force});
+                if (queueSeedChunkLocked(coord, force, nowMs())) {
                     ++recovered;
                 }
             }
@@ -1103,17 +1142,27 @@ private:
         if (deferred != deferred_seed_chunks_.end()) {
             deferred_seed_chunks_.erase(deferred);
         }
-        if (!force && queued_seed_chunks_.find(coord) != queued_seed_chunks_.end()) {
-            return 0;
+        return queueSeedChunkLocked(coord, force, nowMs()) ? 1 : 0;
+    }
+
+    void requeueSeedChunkAfterPendingBackpressure(const livemap::ChunkCoord &coord, bool force)
+    {
+        if (!settings_.upload_chunks || settings_.plugin_token.empty()) {
+            return;
         }
-        if (force) {
-            queued_seed_chunks_.erase(coord);
+        const auto retry_at_ms =
+            nowMs() + static_cast<std::int64_t>(std::max(1, settings_.chunk_upload_flush_seconds)) * 1000;
+        std::scoped_lock lock(state_mutex_);
+        if (queueSeedChunkLocked(coord, force, retry_at_ms)) {
+            return;
         }
-        if (!queued_seed_chunks_.insert(coord).second) {
-            return 0;
+        for (auto &queued : seed_queue_) {
+            if (queued.coord == coord) {
+                queued.force = queued.force || force;
+                queued.not_before_ms = std::max(queued.not_before_ms, retry_at_ms);
+                return;
+            }
         }
-        seed_queue_.push_back({coord, nowMs(), force});
-        return 1;
     }
 
     std::size_t enqueueChunkSquare(const std::string &world, const std::string &dimension, int center_x, int center_z,
@@ -1210,11 +1259,17 @@ private:
     {
         std::vector<QueuedSeed> chunks;
         std::scoped_lock lock(state_mutex_);
-        while (!seed_queue_.empty() && chunks.size() < limit) {
-            const auto queued = seed_queue_.front();
+        const auto current_ms = nowMs();
+        const auto scan_count = seed_queue_.size();
+        for (std::size_t scanned = 0; scanned < scan_count && chunks.size() < limit; ++scanned) {
+            auto queued = std::move(seed_queue_.front());
             seed_queue_.pop_front();
+            if (queued.not_before_ms > current_ms) {
+                seed_queue_.push_back(std::move(queued));
+                continue;
+            }
             queued_seed_chunks_.erase(queued.coord);
-            chunks.push_back(queued);
+            chunks.push_back(std::move(queued));
         }
         return chunks;
     }
@@ -1226,6 +1281,8 @@ private:
         }
 
         std::vector<livemap::PlayerState> players;
+        std::vector<PlayerAvatarAck> player_avatar_acks;
+        std::unordered_set<std::string> online_player_ids;
         for (auto *player : getServer().getOnlinePlayers()) {
             if (player == nullptr) {
                 continue;
@@ -1233,19 +1290,22 @@ private:
             const auto location = player->getLocation();
             auto &dimension = location.getDimension();
             const auto player_id = player->getUniqueId().str();
+            online_player_ids.insert(player_id);
             auto avatar = encodePlayerAvatar(*player);
             std::string avatar_hash;
             std::string avatar_png_base64;
             if (avatar.has_value()) {
                 avatar_hash = std::move(avatar->hash);
-                const auto cache_key = player_id + "|" + avatar_hash;
                 bool should_send_avatar = false;
                 {
                     std::scoped_lock lock(state_mutex_);
-                    should_send_avatar = sent_player_avatar_keys_.insert(cache_key).second;
+                    const auto acknowledged = acknowledged_player_avatar_hashes_.find(player_id);
+                    should_send_avatar = acknowledged == acknowledged_player_avatar_hashes_.end() ||
+                                         acknowledged->second != avatar_hash;
                 }
                 if (should_send_avatar) {
                     avatar_png_base64 = std::move(avatar->png_base64);
+                    player_avatar_acks.push_back({player_id, avatar_hash});
                 }
             }
             players.push_back({
@@ -1264,11 +1324,18 @@ private:
                 nowMs(),
             });
         }
+        {
+            std::scoped_lock lock(state_mutex_);
+            std::erase_if(acknowledged_player_avatar_hashes_, [&online_player_ids](const auto &entry) {
+                return online_player_ids.find(entry.first) == online_player_ids.end();
+            });
+        }
         if (player_dispatcher_ == nullptr) {
             background_log_.warning("Dropped live map player snapshot because player upload dispatcher is unavailable.");
             return;
         }
-        player_dispatcher_->publish(livemap::serializePlayerSnapshot(players), players.size());
+        player_dispatcher_->publish(livemap::serializePlayerSnapshot(players), players.size(),
+                                    std::move(player_avatar_acks));
     }
 
     void publishLands()
@@ -1279,12 +1346,16 @@ private:
 
         auto *level = getServer().getLevel();
         const auto world = level == nullptr ? std::string{"Bedrock level"} : level->getName();
-        const auto parsed = livemap::loadLandConfig(resolveDataPath(settings_.land_config_file), world, nowMs());
-        if (parsed.claims.empty() && parsed.skipped_entries == 0) {
+        const auto land_config_path = resolveDataPath(settings_.land_config_file);
+        const auto parsed = livemap::loadLandConfig(land_config_path, world, nowMs());
+        if (!parsed.source_valid) {
+            background_log_.warning("Skipped authoritative live map land snapshot because ", land_config_path.string(),
+                                    " is missing, unreadable, or invalid.");
             return;
         }
 
-        if (!enqueueUpload({UploadJob::Kind::Lands, "/api/plugin/lands", livemap::serializeLandBatch(parsed.claims),
+        if (!enqueueUpload({UploadJob::Kind::Lands, "/api/plugin/lands",
+                            livemap::serializeLandBatch(parsed.claims, world, settings_.dimensions),
                             {}, {}, parsed.claims.size(), {}})) {
             background_log_.warning("Dropped live map land snapshot because upload queue is full.");
             return;
@@ -1389,38 +1460,6 @@ private:
         return snapshot;
     }
 
-    void cacheChunkSnapshot(const livemap::ChunkSnapshot &snapshot)
-    {
-        std::scoped_lock lock(state_mutex_);
-        for (int local_z = 0; local_z < livemap::kChunkSize; ++local_z) {
-            for (int local_x = 0; local_x < livemap::kChunkSize; ++local_x) {
-                const int index = local_z * livemap::kChunkSize + local_x;
-                const int block_x = snapshot.chunk_x * livemap::kChunkSize + local_x;
-                const int block_z = snapshot.chunk_z * livemap::kChunkSize + local_z;
-                top_cache_[livemap::columnForBlock(snapshot.world, snapshot.dimension, block_x, block_z)] = {
-                    snapshot.palette[snapshot.blocks[index]],
-                    snapshot.heights[index],
-                };
-            }
-        }
-    }
-
-    void cacheColumn(const livemap::BlockColumnCoord &coord, const ColumnTop &column)
-    {
-        std::scoped_lock lock(state_mutex_);
-        top_cache_[coord] = column;
-    }
-
-    std::optional<ColumnTop> cachedColumn(const livemap::BlockColumnCoord &coord) const
-    {
-        std::scoped_lock lock(state_mutex_);
-        const auto found = top_cache_.find(coord);
-        if (found == top_cache_.end()) {
-            return std::nullopt;
-        }
-        return found->second;
-    }
-
     void requeueDirtyColumn(const livemap::DirtyBlockColumn &column)
     {
         std::scoped_lock lock(state_mutex_);
@@ -1476,45 +1515,73 @@ private:
         return true;
     }
 
-    bool queuePendingChunkUpload(livemap::ChunkSnapshot snapshot, bool force = false)
+    void pruneChunkUploadCooldownsLocked(std::int64_t current_ms)
+    {
+        if (current_ms < next_chunk_cooldown_prune_ms_) {
+            return;
+        }
+        std::erase_if(chunk_upload_cooldown_until_ms_, [current_ms](const auto &entry) {
+            return entry.second <= current_ms;
+        });
+        next_chunk_cooldown_prune_ms_ = current_ms + 1000;
+    }
+
+    [[nodiscard]] std::int64_t pendingChunkReadyAtLocked(const livemap::ChunkCoord &coord,
+                                                         std::int64_t current_ms) const
+    {
+        const auto cooldown = chunk_upload_cooldown_until_ms_.find(coord);
+        if (cooldown != chunk_upload_cooldown_until_ms_.end()) {
+            return std::max(current_ms, cooldown->second);
+        }
+        return current_ms;
+    }
+
+    PendingChunkQueueResult queuePendingChunkUpload(livemap::ChunkSnapshot snapshot, bool force = false)
     {
         const auto coord = chunkCoordForSnapshot(snapshot);
         const auto fingerprint = livemap::fingerprintChunkSnapshot(snapshot);
         const auto current_ms = nowMs();
         std::scoped_lock lock(state_mutex_);
+        pruneChunkUploadCooldownsLocked(current_ms);
 
         const auto confirmed = chunk_baselines_.find(coord);
         if (!force && confirmed != chunk_baselines_.end() && confirmed->second.fingerprint == fingerprint &&
             livemap::renderedTileFilesExistForChunk(settings_, coord)) {
             ++skipped_cached_chunks_;
-            return false;
+            return PendingChunkQueueResult::Skipped;
         }
 
         auto pending = pending_chunk_uploads_.find(coord);
         if (!force && pending != pending_chunk_uploads_.end() && pending->second.meta.fingerprint == fingerprint) {
             ++skipped_cached_chunks_;
-            return false;
+            return PendingChunkQueueResult::Skipped;
         }
 
         const auto meta = ChunkUploadMeta{coord, fingerprint, snapshot.updated_at_ms};
         if (pending != pending_chunk_uploads_.end()) {
             pending->second.snapshot = std::move(snapshot);
             pending->second.meta = meta;
-            return true;
+            pending->second.ready_at_ms =
+                std::max(pending->second.ready_at_ms,
+                         pendingChunkReadyAtLocked(coord, current_ms));
+            return PendingChunkQueueResult::Queued;
         }
 
         const auto max_pending = static_cast<std::size_t>(std::max(1, settings_.max_pending_chunk_uploads));
         if (pending_chunk_uploads_.size() >= max_pending) {
-            ++dropped_pending_chunk_uploads_;
-            return false;
+            ++backpressured_pending_chunk_uploads_;
+            return PendingChunkQueueResult::Backpressured;
         }
 
         if (pending_chunk_uploads_.empty()) {
-            pending_chunk_cooldown_until_ms_ =
-                current_ms + static_cast<std::int64_t>(std::max(1, settings_.chunk_upload_cooldown_seconds)) * 1000;
+            pending_chunk_flush_deadline_ms_ =
+                current_ms +
+                static_cast<std::int64_t>(std::max(1, settings_.chunk_upload_flush_seconds)) * 1000;
         }
-        pending_chunk_uploads_.emplace(coord, PendingChunkUpload{std::move(snapshot), meta, current_ms});
-        return true;
+        pending_chunk_uploads_.emplace(
+            coord,
+            PendingChunkUpload{std::move(snapshot), meta, current_ms, pendingChunkReadyAtLocked(coord, current_ms)});
+        return PendingChunkQueueResult::Queued;
     }
 
     void restorePendingChunkUploads(std::vector<livemap::ChunkSnapshot> snapshots, std::vector<ChunkUploadMeta> metas)
@@ -1526,8 +1593,10 @@ private:
         const auto current_ms = nowMs();
         std::size_t restored = 0;
         std::size_t skipped = 0;
+        std::vector<livemap::ChunkCoord> backpressured_coords;
         {
             std::scoped_lock lock(state_mutex_);
+            pruneChunkUploadCooldownsLocked(current_ms);
             for (std::size_t i = 0; i < snapshots.size(); ++i) {
                 auto existing = pending_chunk_uploads_.find(metas[i].coord);
                 if (existing != pending_chunk_uploads_.end() &&
@@ -1543,24 +1612,29 @@ private:
                 }
                 const auto max_pending = static_cast<std::size_t>(std::max(1, settings_.max_pending_chunk_uploads));
                 if (pending_chunk_uploads_.size() >= max_pending) {
-                    ++dropped_pending_chunk_uploads_;
-                    ++skipped;
+                    ++backpressured_pending_chunk_uploads_;
+                    backpressured_coords.push_back(metas[i].coord);
                     continue;
                 }
-                if (pending_chunk_uploads_.empty()) {
-                    pending_chunk_cooldown_until_ms_ =
-                        current_ms +
-                        static_cast<std::int64_t>(std::max(1, settings_.chunk_upload_cooldown_seconds)) * 1000;
-                }
                 const auto coord = metas[i].coord;
-                pending_chunk_uploads_.emplace(coord,
-                                               PendingChunkUpload{std::move(snapshots[i]), metas[i], current_ms});
+                if (pending_chunk_uploads_.empty()) {
+                    pending_chunk_flush_deadline_ms_ =
+                        current_ms +
+                        static_cast<std::int64_t>(std::max(1, settings_.chunk_upload_flush_seconds)) * 1000;
+                }
+                pending_chunk_uploads_.emplace(
+                    coord,
+                    PendingChunkUpload{std::move(snapshots[i]), metas[i], current_ms,
+                                       pendingChunkReadyAtLocked(coord, current_ms)});
                 ++restored;
             }
         }
+        for (const auto &coord : backpressured_coords) {
+            requeueSeedChunkAfterPendingBackpressure(coord, true);
+        }
         if (skipped > 0) {
             background_log_.warning("Skipped restoring ", skipped,
-                                    " stale live map chunk upload(s); restored ", restored, " chunk(s).");
+                                     " stale live map chunk upload(s); restored ", restored, " chunk(s).");
         }
     }
 
@@ -1591,20 +1665,23 @@ private:
             std::vector<ChunkUploadMeta> metas;
             std::size_t remaining = 0;
             std::size_t waiting_pending = 0;
-            std::int64_t cooldown_remaining_ms = 0;
+            std::int64_t ready_remaining_ms = 0;
             std::int64_t backoff_remaining_ms = 0;
             bool waiting = false;
             bool log_waiting = false;
             {
                 std::scoped_lock lock(state_mutex_);
+                pruneChunkUploadCooldownsLocked(current_ms);
                 if (pending_chunk_uploads_.empty()) {
-                    pending_chunk_cooldown_until_ms_ = 0;
+                    pending_chunk_flush_deadline_ms_ = 0;
                     return queued_any;
                 }
-                if (current_ms < chunk_upload_backoff_until_ms_ || current_ms < pending_chunk_cooldown_until_ms_) {
+                if (current_ms < chunk_upload_backoff_until_ms_ ||
+                    current_ms < pending_chunk_flush_deadline_ms_) {
                     waiting = true;
                     waiting_pending = pending_chunk_uploads_.size();
-                    cooldown_remaining_ms = std::max<std::int64_t>(0, pending_chunk_cooldown_until_ms_ - current_ms);
+                    ready_remaining_ms =
+                        std::max<std::int64_t>(0, pending_chunk_flush_deadline_ms_ - current_ms);
                     backoff_remaining_ms = std::max<std::int64_t>(0, chunk_upload_backoff_until_ms_ - current_ms);
                     if (current_ms - last_chunk_pending_log_ms_ >= 30000) {
                         last_chunk_pending_log_ms_ = current_ms;
@@ -1612,37 +1689,54 @@ private:
                     }
                 }
                 if (!waiting) {
-                    const auto count = std::min(max_batch_size, pending_chunk_uploads_.size());
                     std::vector<livemap::ChunkCoord> coords;
                     coords.reserve(pending_chunk_uploads_.size());
-                    for (const auto &[coord, _upload] : pending_chunk_uploads_) {
-                        coords.push_back(coord);
-                    }
-                    std::sort(coords.begin(), coords.end(), [this](const auto &left, const auto &right) {
-                        const auto left_upload = pending_chunk_uploads_.find(left);
-                        const auto right_upload = pending_chunk_uploads_.find(right);
-                        if (left_upload != pending_chunk_uploads_.end() &&
-                            right_upload != pending_chunk_uploads_.end() &&
-                            left_upload->second.queued_at_ms != right_upload->second.queued_at_ms) {
-                            return left_upload->second.queued_at_ms < right_upload->second.queued_at_ms;
+                    std::int64_t next_ready_at_ms = 0;
+                    for (const auto &[coord, upload] : pending_chunk_uploads_) {
+                        if (upload.ready_at_ms <= current_ms) {
+                            coords.push_back(coord);
                         }
-                        return left < right;
-                    });
+                        else if (next_ready_at_ms == 0 || upload.ready_at_ms < next_ready_at_ms) {
+                            next_ready_at_ms = upload.ready_at_ms;
+                        }
+                    }
+                    if (coords.empty()) {
+                        waiting = true;
+                        waiting_pending = pending_chunk_uploads_.size();
+                        ready_remaining_ms = std::max<std::int64_t>(0, next_ready_at_ms - current_ms);
+                        if (current_ms - last_chunk_pending_log_ms_ >= 30000) {
+                            last_chunk_pending_log_ms_ = current_ms;
+                            log_waiting = true;
+                        }
+                    }
+                    else {
+                        std::sort(coords.begin(), coords.end(), [this](const auto &left, const auto &right) {
+                            const auto left_upload = pending_chunk_uploads_.find(left);
+                            const auto right_upload = pending_chunk_uploads_.find(right);
+                            if (left_upload != pending_chunk_uploads_.end() &&
+                                right_upload != pending_chunk_uploads_.end() &&
+                                left_upload->second.queued_at_ms != right_upload->second.queued_at_ms) {
+                                return left_upload->second.queued_at_ms < right_upload->second.queued_at_ms;
+                            }
+                            return left < right;
+                        });
 
-                    snapshots.reserve(count);
-                    metas.reserve(count);
-                    for (std::size_t i = 0; i < count; ++i) {
-                        auto pending = pending_chunk_uploads_.find(coords[i]);
-                        if (pending == pending_chunk_uploads_.end()) {
-                            continue;
+                        const auto count = std::min(max_batch_size, coords.size());
+                        snapshots.reserve(count);
+                        metas.reserve(count);
+                        for (std::size_t i = 0; i < count; ++i) {
+                            auto pending = pending_chunk_uploads_.find(coords[i]);
+                            if (pending == pending_chunk_uploads_.end()) {
+                                continue;
+                            }
+                            snapshots.push_back(std::move(pending->second.snapshot));
+                            metas.push_back(pending->second.meta);
+                            pending_chunk_uploads_.erase(pending);
                         }
-                        snapshots.push_back(std::move(pending->second.snapshot));
-                        metas.push_back(pending->second.meta);
-                        pending_chunk_uploads_.erase(pending);
-                    }
-                    remaining = pending_chunk_uploads_.size();
-                    if (pending_chunk_uploads_.empty()) {
-                        pending_chunk_cooldown_until_ms_ = 0;
+                        remaining = pending_chunk_uploads_.size();
+                        if (pending_chunk_uploads_.empty()) {
+                            pending_chunk_flush_deadline_ms_ = 0;
+                        }
                     }
                 }
             }
@@ -1650,8 +1744,8 @@ private:
             if (waiting) {
                 if (log_waiting) {
                     background_log_.info("Accumulating ", waiting_pending,
-                                         " pending live map chunk upload(s); cooldownRemaining=",
-                                         cooldown_remaining_ms / 1000, "s retryRemaining=",
+                                         " pending live map chunk upload(s); flushOrCooldownRemaining=",
+                                         ready_remaining_ms / 1000, "s retryRemaining=",
                                          backoff_remaining_ms / 1000, "s.");
                 }
                 return queued_any;
@@ -1677,39 +1771,55 @@ private:
 
     void confirmUploadedChunkBatch(const std::vector<ChunkUploadMeta> &chunks)
     {
+        const auto current_ms = nowMs();
+        const auto cooldown_until_ms =
+            current_ms + static_cast<std::int64_t>(std::max(1, settings_.chunk_upload_cooldown_seconds)) * 1000;
         std::scoped_lock lock(state_mutex_);
+        pruneChunkUploadCooldownsLocked(current_ms);
         for (const auto &chunk : chunks) {
-            chunk_baselines_[chunk.coord] = {chunk.coord, chunk.fingerprint, chunk.updated_at_ms};
-            baselines_dirty_ = true;
+            const auto confirmed = chunk_baselines_.find(chunk.coord);
+            if (confirmed == chunk_baselines_.end() ||
+                confirmed->second.updated_at_ms <= chunk.updated_at_ms) {
+                chunk_baselines_[chunk.coord] = {chunk.coord, chunk.fingerprint, chunk.updated_at_ms};
+                baselines_dirty_ = true;
+            }
+            auto &coord_cooldown_until_ms = chunk_upload_cooldown_until_ms_[chunk.coord];
+            coord_cooldown_until_ms = std::max(coord_cooldown_until_ms, cooldown_until_ms);
+            const auto pending = pending_chunk_uploads_.find(chunk.coord);
+            if (pending != pending_chunk_uploads_.end()) {
+                pending->second.ready_at_ms =
+                    std::max(pending->second.ready_at_ms, coord_cooldown_until_ms);
+            }
         }
     }
 
     void logCachedChunkSkips(bool force)
     {
         std::size_t skipped = 0;
-        std::size_t dropped = 0;
+        std::size_t backpressured = 0;
         const auto current_ms = nowMs();
         {
             std::scoped_lock lock(state_mutex_);
-            if (skipped_cached_chunks_ == 0 && dropped_pending_chunk_uploads_ == 0) {
+            if (skipped_cached_chunks_ == 0 && backpressured_pending_chunk_uploads_ == 0) {
                 return;
             }
-            if (!force && skipped_cached_chunks_ < 32 && dropped_pending_chunk_uploads_ == 0 &&
+            if (!force && skipped_cached_chunks_ < 32 && backpressured_pending_chunk_uploads_ == 0 &&
                 current_ms - last_chunk_cache_log_ms_ < 60000) {
                 return;
             }
             skipped = skipped_cached_chunks_;
-            dropped = dropped_pending_chunk_uploads_;
+            backpressured = backpressured_pending_chunk_uploads_;
             skipped_cached_chunks_ = 0;
-            dropped_pending_chunk_uploads_ = 0;
+            backpressured_pending_chunk_uploads_ = 0;
             last_chunk_cache_log_ms_ = current_ms;
         }
         if (skipped > 0) {
             background_log_.info("Skipped ", skipped, " unchanged live map base chunk upload(s) from local baseline.");
         }
-        if (dropped > 0) {
-            background_log_.warning("Dropped ", dropped,
-                                    " live map base chunk upload(s) because the pending chunk buffer is full.");
+        if (backpressured > 0) {
+            background_log_.warning("Deferred ", backpressured,
+                                    " live map base chunk upload(s) because the pending chunk buffer is full; "
+                                    "the latest chunks remain queued for resampling.");
         }
     }
 
@@ -1736,6 +1846,12 @@ private:
             const auto wait_ms = std::max<std::int64_t>(0, result.started_at_ms - result.queued_at_ms);
             const auto duration_ms = std::max<std::int64_t>(0, result.finished_at_ms - result.started_at_ms);
             if (result.transport.ok) {
+                if (!result.player_avatar_acks.empty()) {
+                    std::scoped_lock lock(state_mutex_);
+                    for (const auto &avatar : result.player_avatar_acks) {
+                        acknowledged_player_avatar_hashes_[avatar.player_id] = avatar.hash;
+                    }
+                }
                 if (!last_player_success_log_count_.has_value() ||
                     last_player_success_log_count_.value() != result.update_count ||
                     result.finished_at_ms >= next_player_success_log_ms_) {
@@ -1769,6 +1885,11 @@ private:
                 if (result.kind == UploadJob::Kind::ChunkBatch) {
                     confirmUploadedChunkBatch(result.chunks);
                     resetChunkBatchRetry();
+                    if (result.transport.body.find("\"r2MirrorOk\":false") != std::string::npos) {
+                        background_log_.warning("Local live map tile batch committed, but the optional R2 mirror "
+                                                "failed: ",
+                                                responseSnippet(result.transport.body), ".");
+                    }
                     background_log_.info("Rendered live map tile batch for ", result.chunks.size(),
                                          " chunk(s), notified local server HTTP ", result.transport.response_code,
                                          " response=", responseSnippet(result.transport.body), ".");
@@ -1779,6 +1900,11 @@ private:
                                          result.transport.response_code, ".");
                 }
                 else if (result.kind == UploadJob::Kind::TilePyramidRepair) {
+                    if (result.transport.body.find("\"r2MirrorOk\":false") != std::string::npos) {
+                        background_log_.warning("Local live map tile pyramid repair committed, but the optional R2 "
+                                                "mirror failed: ",
+                                                responseSnippet(result.transport.body), ".");
+                    }
                     background_log_.info("Completed live map tile pyramid repair response=",
                                          responseSnippet(result.transport.body), ".");
                 }
@@ -1881,9 +2007,10 @@ private:
                                         "; dropped sample to avoid retrying unloaded chunks every tick.");
                 continue;
             }
-            cacheChunkSnapshot(*snapshot);
-
-            queuePendingChunkUpload(std::move(*snapshot), queued.force);
+            const auto pending_result = queuePendingChunkUpload(std::move(*snapshot), queued.force);
+            if (pending_result == PendingChunkQueueResult::Backpressured) {
+                requeueSeedChunkAfterPendingBackpressure(coord, queued.force);
+            }
         }
         flushPendingChunkUploads();
     }
@@ -1935,9 +2062,9 @@ private:
     std::unordered_map<std::string, std::int64_t> player_next_seed_ms_;
     std::unordered_map<std::string, std::int64_t> player_first_seen_ms_;
     std::unordered_map<std::string, std::string> player_last_seed_center_;
-    std::unordered_set<std::string> sent_player_avatar_keys_;
-    std::unordered_map<livemap::BlockColumnCoord, ColumnTop, livemap::BlockColumnCoordHash> top_cache_;
+    std::unordered_map<std::string, std::string> acknowledged_player_avatar_hashes_;
     std::unordered_map<livemap::ChunkCoord, PendingChunkUpload, livemap::ChunkCoordHash> pending_chunk_uploads_;
+    std::unordered_map<livemap::ChunkCoord, std::int64_t, livemap::ChunkCoordHash> chunk_upload_cooldown_until_ms_;
     livemap::ChunkBaselineMap chunk_baselines_;
     bool baselines_dirty_ = false;
     std::filesystem::path background_log_path_;
@@ -1945,11 +2072,12 @@ private:
     BackgroundLog background_log_;
     std::optional<std::size_t> last_player_success_log_count_;
     std::int64_t next_player_success_log_ms_ = 0;
-    std::int64_t pending_chunk_cooldown_until_ms_ = 0;
+    std::int64_t pending_chunk_flush_deadline_ms_ = 0;
     std::int64_t chunk_upload_backoff_until_ms_ = 0;
     std::int64_t chunk_upload_retry_delay_ms_ = kChunkBatchRetryMinDelayMs;
+    std::int64_t next_chunk_cooldown_prune_ms_ = 0;
     std::size_t skipped_cached_chunks_ = 0;
-    std::size_t dropped_pending_chunk_uploads_ = 0;
+    std::size_t backpressured_pending_chunk_uploads_ = 0;
     std::int64_t last_chunk_cache_log_ms_ = 0;
     std::int64_t last_chunk_pending_log_ms_ = 0;
     std::int64_t next_loaded_chunk_refresh_ms_ = 0;
@@ -2005,7 +2133,7 @@ ENDSTONE_PLUGIN("live_map", "0.1.0", LiveMapPlugin)
 
     command("livemap")
         .description("Inspect, repair, or queue live map sampling")
-        .usages("/livemap", "/livemap <render-near> [radius: int]",
+        .usages("/livemap", "/livemap <status>", "/livemap <render-near> [radius: int]",
                 "/livemap <render-chunk> <chunkX: int> <chunkZ: int>",
                 "/livemap <render-area> <minX: int> <minZ: int> <maxX: int> <maxZ: int>",
                 "/livemap <repair-pyramid>", "/livemap <reload>")

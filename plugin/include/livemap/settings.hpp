@@ -22,7 +22,7 @@ struct LiveMapSettings {
     std::vector<std::string> dimensions = {"Overworld"};
     int tile_min_zoom = -8;
     int tile_max_zoom = 4;
-    int render_worker_threads = 2;
+    int render_worker_threads = 1;
     int scan_radius_chunks = 8;
     int chunk_refresh_seconds = 20;
     int player_push_seconds = 1;

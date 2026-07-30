@@ -24,8 +24,8 @@ describe("MapCanvas coordinate helpers", () => {
     expect(coordinateCopyText({ x: 44, height: 65, z: 80 })).toBe("44, 65, 80");
   });
 
-  it("falls back to y=0 before block height is loaded", () => {
-    expect(coordinateCopyText({ x: -12, height: Number.NaN, z: 35 })).toBe("-12, 0, 35");
+  it("marks y as relative before block height is loaded", () => {
+    expect(coordinateCopyText({ x: -12, height: Number.NaN, z: 35 })).toBe("-12, ~, 35");
   });
 
   it("expands map bounds with live player bounds", () => {

@@ -461,10 +461,17 @@ std::optional<LandClaim> parseClaim(const std::string &owner, const std::string 
 LandParseResult parseLandConfig(std::string_view source, std::string_view world, std::int64_t updated_at_ms)
 {
     LandParseResult result;
-    const auto root = JsonParser(source).parse();
+    JsonValue root;
+    try {
+        root = JsonParser(source).parse();
+    }
+    catch (...) {
+        return result;
+    }
     if (!root.isObject()) {
         return result;
     }
+    result.source_valid = true;
 
     for (const auto &[owner, entries] : root.object_value) {
         if (!entries.isArray()) {
@@ -502,13 +509,28 @@ LandParseResult loadLandConfig(const std::filesystem::path &path, std::string_vi
     }
     std::ostringstream buffer;
     buffer << in.rdbuf();
+    if (in.bad()) {
+        return {};
+    }
     return parseLandConfig(buffer.str(), world, updated_at_ms);
 }
 
-std::string serializeLandBatch(const std::vector<LandClaim> &claims)
+std::string serializeLandBatch(const std::vector<LandClaim> &claims, std::string_view world,
+                               const std::vector<std::string> &dimensions)
 {
     std::ostringstream out;
-    out << "{\"claims\":[";
+    out << '{';
+    if (!world.empty()) {
+        out << "\"world\":\"" << jsonEscape(world) << "\",\"dimensions\":[";
+        for (std::size_t dimension_index = 0; dimension_index < dimensions.size(); ++dimension_index) {
+            if (dimension_index != 0) {
+                out << ',';
+            }
+            out << '"' << jsonEscape(dimensions[dimension_index]) << '"';
+        }
+        out << "],";
+    }
+    out << "\"claims\":[";
     for (std::size_t i = 0; i < claims.size(); ++i) {
         const auto &claim = claims[i];
         if (i != 0) {

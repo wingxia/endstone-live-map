@@ -22,7 +22,10 @@ const DEFAULT_TILE_CACHE_FRESH_MS = 1_000;
 const DEFAULT_MISSING_TILE_CACHE_MS = 750;
 const DEFAULT_STATIC_CACHE_MAX_BYTES = 16 * 1024 * 1024;
 const DEFAULT_STATIC_CACHE_MAX_ENTRIES = 128;
+const DEFAULT_MAX_JSON_BODY_BYTES = 8 * 1024 * 1024;
+const DEFAULT_WEBSOCKET_MAX_BUFFERED_BYTES = 1024 * 1024;
 const MIN_STATIC_COMPRESSION_BYTES = 1_024;
+const WEB_BOOTSTRAP_PLACEHOLDER = "__ENDSTONE_LIVE_MAP_BOOTSTRAP__";
 const brotliCompressAsync = promisify(brotliCompress);
 const gzipAsync = promisify(gzip);
 let atomicWriteSequence = 0;
@@ -79,11 +82,27 @@ export function createLiveMapServer(options = {}) {
       options.staticCacheMaxEntries ?? process.env.LIVE_MAP_STATIC_CACHE_MAX_ENTRIES,
       DEFAULT_STATIC_CACHE_MAX_ENTRIES,
     ),
+    maxJsonBodyBytes: nonNegativeIntegerOr(
+      options.maxJsonBodyBytes ?? process.env.LIVE_MAP_MAX_JSON_BODY_BYTES,
+      DEFAULT_MAX_JSON_BODY_BYTES,
+    ),
+    webSocketMaxBufferedBytes: nonNegativeIntegerOr(
+      options.webSocketMaxBufferedBytes ?? process.env.LIVE_MAP_WEBSOCKET_MAX_BUFFERED_BYTES,
+      DEFAULT_WEBSOCKET_MAX_BUFFERED_BYTES,
+    ),
   };
 
   const server = http.createServer((request, response) => {
     void handleRequest(state, request, response).catch((error) => {
-      json(response, 500, { error: "internal_error", message: error instanceof Error ? error.message : String(error) });
+      if (response.headersSent) {
+        response.destroy(error instanceof Error ? error : undefined);
+        return;
+      }
+      const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+      json(response, statusCode, {
+        error: typeof error?.errorCode === "string" ? error.errorCode : "internal_error",
+        message: error instanceof Error ? error.message : String(error),
+      }, statusCode === 413 ? { Connection: "close" } : {});
     });
   });
 
@@ -94,13 +113,14 @@ export function createLiveMapServer(options = {}) {
   // time for the next request headers to arrive.
   server.keepAliveTimeout = 95_000;
   server.headersTimeout = 100_000;
+  server.requestTimeout = 60_000;
 
-  server.on("upgrade", (request, socket) => {
+  server.on("upgrade", (request, socket, head) => {
     if (new URL(request.url || "/", "http://localhost").pathname !== "/api/live") {
       socket.destroy();
       return;
     }
-    acceptWebSocket(state, request, socket);
+    acceptWebSocket(state, request, socket, head);
   });
 
   return { server, state };
@@ -172,7 +192,7 @@ export async function handleRequest(state, request, response) {
       json(response, 401, { error: "unauthorized" });
       return;
     }
-    const body = await readJsonBody(request);
+    const body = await readJsonBody(request, state.maxJsonBodyBytes);
     state.players = await normalizePlayers(state.dataDir, Array.isArray(body.players) ? body.players : []);
     state.playersReceivedAt = Date.now();
     broadcast(state, JSON.stringify({ type: "player_snapshot", players: state.players }));
@@ -184,9 +204,12 @@ export async function handleRequest(state, request, response) {
       json(response, 401, { error: "unauthorized" });
       return;
     }
-    const body = await readJsonBody(request);
+    const body = await readJsonBody(request, state.maxJsonBodyBytes);
     const claims = Array.isArray(body.claims) ? body.claims : [];
-    const written = await writeLandClaims(state.dataDir, claims);
+    const written = await writeLandClaims(state.dataDir, claims, {
+      world: body.world,
+      dimensions: body.dimensions,
+    });
     for (const item of written) {
       broadcast(state, JSON.stringify({ type: "lands_updated", world: item.world, dimension: item.dimension, updatedAt: item.updatedAt }));
     }
@@ -198,9 +221,9 @@ export async function handleRequest(state, request, response) {
       json(response, 401, { error: "unauthorized" });
       return;
     }
-    const body = await readJsonBody(request);
+    const body = await readJsonBody(request, state.maxJsonBodyBytes);
     await updateWorldsFromTiles(state, body);
-    broadcast(state, JSON.stringify(body));
+    broadcast(state, JSON.stringify({ ...body, worlds: await readWorlds(state) }));
     json(response, 200, { ok: true, chunks: Array.isArray(body.chunks) ? body.chunks.length : 0, sockets: state.sockets.size });
     return;
   }
@@ -233,13 +256,31 @@ function json(response, status, body, headers = {}) {
   response.end(JSON.stringify(body));
 }
 
-async function readJsonBody(request) {
+async function readJsonBody(request, maxBytes) {
+  const declaredLength = Number(request.headers["content-length"]);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw requestError(413, "payload_too_large", `JSON request body exceeds ${maxBytes} bytes`);
+  }
   const chunks = [];
+  let totalBytes = 0;
   for await (const chunk of request) {
-    chunks.push(Buffer.from(chunk));
+    const bytes = Buffer.from(chunk);
+    totalBytes += bytes.length;
+    if (totalBytes > maxBytes) {
+      throw requestError(413, "payload_too_large", `JSON request body exceeds ${maxBytes} bytes`);
+    }
+    chunks.push(bytes);
   }
   const text = Buffer.concat(chunks).toString("utf8");
-  return text ? JSON.parse(text) : {};
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    throw requestError(400, "invalid_json", "Request body is not valid JSON");
+  }
+}
+
+function requestError(statusCode, errorCode, message) {
+  return Object.assign(new Error(message), { statusCode, errorCode });
 }
 
 function authorized(state, request) {
@@ -321,9 +362,16 @@ async function maybeWriteAvatar(dataDir, playerId, avatarHash, avatarPngBase64) 
     return;
   }
   const file = avatarFile(dataDir, playerId);
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, bytes);
-  await fs.writeFile(`${file}.sha256`, `${avatarHash}\n`);
+  try {
+    if ((await fs.readFile(`${file}.sha256`, "utf8")).trim() === avatarHash) {
+      await fs.access(file);
+      return;
+    }
+  } catch {
+    // Missing or incomplete avatar state is repaired atomically below.
+  }
+  await writeFileAtomic(file, bytes);
+  await writeFileAtomic(`${file}.sha256`, `${avatarHash}\n`);
 }
 
 function isPng(bytes) {
@@ -710,10 +758,13 @@ async function readWorldIndex(dataDir) {
 }
 
 async function writeWorldIndexAtomic(dataDir, index) {
-  await fs.mkdir(dataDir, { recursive: true });
   const destination = path.join(dataDir, WORLD_INDEX_FILE_NAME);
+  await writeFileAtomic(destination, `${JSON.stringify(serializeWorldIndex(index))}\n`);
+}
+
+async function writeFileAtomic(destination, contents) {
+  await fs.mkdir(path.dirname(destination), { recursive: true });
   const temporary = `${destination}.${process.pid}.${Date.now()}.${atomicWriteSequence += 1}.tmp`;
-  const contents = `${JSON.stringify(serializeWorldIndex(index))}\n`;
   let handle;
   try {
     handle = await fs.open(temporary, "wx");
@@ -878,7 +929,7 @@ function expandBounds(current, next) {
   };
 }
 
-async function writeLandClaims(dataDir, claims) {
+async function writeLandClaims(dataDir, claims, scope = {}) {
   const groups = new Map();
   for (const claim of claims) {
     const world = String(claim.world || "Bedrock level");
@@ -889,15 +940,43 @@ async function writeLandClaims(dataDir, claims) {
     }
     groups.get(key).claims.push(claim);
   }
+  const scopeWorld = typeof scope.world === "string" && scope.world ? scope.world : "";
+  const scopeDimensions = Array.isArray(scope.dimensions) ? scope.dimensions : [];
+  if (scopeWorld) {
+    for (const rawDimension of scopeDimensions) {
+      const dimension = String(rawDimension || "");
+      if (!dimension) {
+        continue;
+      }
+      const key = `${cleanSegment(scopeWorld)}/${cleanSegment(dimension)}`;
+      if (!groups.has(key)) {
+        groups.set(key, { world: scopeWorld, dimension, claims: [] });
+      }
+    }
+  }
   const written = [];
   for (const group of groups.values()) {
-    const updatedAt = Math.max(Date.now(), ...group.claims.map((claim) => Number(claim.updatedAt || 0)));
     const file = landFile(dataDir, cleanSegment(group.world), cleanSegment(group.dimension));
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(file, `${JSON.stringify({ version: 1, world: group.world, dimension: group.dimension, claims: group.claims, updatedAt }, null, 2)}\n`);
+    const existing = await readLandFile(dataDir, cleanSegment(group.world), cleanSegment(group.dimension));
+    if (landClaimsSignature(existing.claims) === landClaimsSignature(group.claims)) {
+      continue;
+    }
+    const updatedAt = Math.max(
+      Date.now(),
+      numberOr(existing.updatedAt, 0) + 1,
+      ...group.claims.map((claim) => Number(claim.updatedAt || 0)),
+    );
+    await writeFileAtomic(
+      file,
+      `${JSON.stringify({ version: 1, world: group.world, dimension: group.dimension, claims: group.claims, updatedAt }, null, 2)}\n`,
+    );
     written.push({ world: group.world, dimension: group.dimension, updatedAt });
   }
   return written;
+}
+
+function landClaimsSignature(claims) {
+  return JSON.stringify(Array.isArray(claims) ? claims : [], (key, value) => key === "updatedAt" ? undefined : value);
 }
 
 async function readLandFile(dataDir, world, dimension) {
@@ -926,7 +1005,7 @@ async function serveTile(state, request, url, response) {
     response.writeHead(200, corsHeaders({
       "Content-Type": "image/png",
       "Content-Length": EMPTY_PNG.length,
-      "Cache-Control": "no-store",
+      "Cache-Control": version !== null ? "public, max-age=31536000, immutable" : "no-store",
     }));
     response.end(EMPTY_PNG);
     return;
@@ -1127,15 +1206,21 @@ async function serveStatic(state, request, pathname, response) {
   const stats = await fs.stat(file);
   const type = contentType(file);
   const cacheEntry = await loadStaticCacheEntry(state, file, stats);
+  const isIndex = path.basename(file) === "index.html";
+  const responseEntry = isIndex
+    ? withWorldBootstrap(cacheEntry, await readWorlds(state))
+    : cacheEntry;
   const preferredEncoding = isCompressibleContentType(type)
     ? preferredContentEncoding(request.headers["accept-encoding"])
     : null;
-  const representation = await staticRepresentation(state, file, cacheEntry, preferredEncoding);
-  const etag = `"${stats.size.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}-${representation.encoding || "identity"}"`;
+  const representation = await staticRepresentation(state, file, responseEntry, preferredEncoding);
+  const etag = isIndex
+    ? `"${createHash("sha256").update(representation.bytes).digest("base64url").slice(0, 24)}-${representation.encoding || "identity"}"`
+    : `"${stats.size.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}-${representation.encoding || "identity"}"`;
   const headers = corsHeaders({
     "Content-Type": type,
     "Content-Length": representation.bytes.length,
-    "Cache-Control": path.basename(file) === "index.html"
+    "Cache-Control": isIndex
       ? "no-cache"
       : "public, max-age=31536000, immutable",
     ETag: etag,
@@ -1150,6 +1235,25 @@ async function serveStatic(state, request, pathname, response) {
   }
   response.writeHead(200, headers);
   response.end(representation.bytes);
+}
+
+function withWorldBootstrap(entry, worlds) {
+  const source = entry.bytes.toString("utf8");
+  if (!source.includes(WEB_BOOTSTRAP_PLACEHOLDER)) {
+    return entry;
+  }
+  const bootstrap = JSON.stringify({ worlds })
+    .replaceAll("<", "\\u003c")
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029");
+  const bytes = Buffer.from(source.replace(WEB_BOOTSTRAP_PLACEHOLDER, bootstrap));
+  return {
+    bytes,
+    size: bytes.length,
+    mtimeMs: entry.mtimeMs,
+    encoded: new Map(),
+    encodingPromises: new Map(),
+  };
 }
 
 async function loadStaticCacheEntry(state, file, stats) {
@@ -1292,7 +1396,7 @@ function contentType(file) {
   return "application/octet-stream";
 }
 
-function acceptWebSocket(state, request, socket) {
+function acceptWebSocket(state, request, socket, head = Buffer.alloc(0)) {
   const key = request.headers["sec-websocket-key"];
   if (!key) {
     socket.destroy();
@@ -1311,35 +1415,158 @@ function acceptWebSocket(state, request, socket) {
       "",
     ].join("\r\n"),
   );
+  socket.setNoDelay(true);
   state.sockets.add(socket);
-  socket.on("close", () => state.sockets.delete(socket));
-  socket.on("error", () => state.sockets.delete(socket));
+  let bufferedInput = Buffer.alloc(0);
+  let closing = false;
+  const forgetSocket = () => state.sockets.delete(socket);
+  const closeWithCode = (code) => {
+    if (closing) {
+      return;
+    }
+    closing = true;
+    forgetSocket();
+    const payload = Buffer.alloc(2);
+    payload.writeUInt16BE(code);
+    if (socket.destroyed || !socket.writable) {
+      socket.destroy();
+      return;
+    }
+    socket.end(webSocketFrame(0x8, payload));
+  };
+  const handleData = (chunk) => {
+    if (closing || chunk.length === 0) {
+      return;
+    }
+    if (bufferedInput.length + chunk.length > state.webSocketMaxBufferedBytes) {
+      closeWithCode(1009);
+      return;
+    }
+    bufferedInput = bufferedInput.length === 0 ? chunk : Buffer.concat([bufferedInput, chunk]);
+
+    while (bufferedInput.length >= 2 && !closing) {
+      const first = bufferedInput[0];
+      const second = bufferedInput[1];
+      const finalFrame = (first & 0x80) !== 0;
+      const opcode = first & 0x0f;
+      const masked = (second & 0x80) !== 0;
+      if ((first & 0x70) !== 0 || !masked) {
+        closeWithCode(1002);
+        return;
+      }
+
+      let payloadLength = second & 0x7f;
+      let headerLength = 2;
+      if (payloadLength === 126) {
+        if (bufferedInput.length < 4) {
+          return;
+        }
+        payloadLength = bufferedInput.readUInt16BE(2);
+        headerLength = 4;
+      } else if (payloadLength === 127) {
+        if (bufferedInput.length < 10) {
+          return;
+        }
+        const largePayloadLength = bufferedInput.readBigUInt64BE(2);
+        if (largePayloadLength > BigInt(state.webSocketMaxBufferedBytes)) {
+          closeWithCode(1009);
+          return;
+        }
+        payloadLength = Number(largePayloadLength);
+        headerLength = 10;
+      }
+
+      const isControlFrame = opcode >= 0x8;
+      if ((isControlFrame && (!finalFrame || payloadLength > 125)) ||
+          payloadLength > state.webSocketMaxBufferedBytes) {
+        closeWithCode(isControlFrame ? 1002 : 1009);
+        return;
+      }
+
+      const frameLength = headerLength + 4 + payloadLength;
+      if (bufferedInput.length < frameLength) {
+        return;
+      }
+      const mask = bufferedInput.subarray(headerLength, headerLength + 4);
+      const encodedPayload = bufferedInput.subarray(headerLength + 4, frameLength);
+      const payload = Buffer.allocUnsafe(payloadLength);
+      for (let index = 0; index < payloadLength; index += 1) {
+        payload[index] = encodedPayload[index] ^ mask[index % 4];
+      }
+      bufferedInput = bufferedInput.subarray(frameLength);
+
+      if (opcode === 0x8) {
+        if (payloadLength === 1) {
+          closeWithCode(1002);
+          return;
+        }
+        closing = true;
+        forgetSocket();
+        socket.end(webSocketFrame(0x8, payload));
+        return;
+      }
+      if (opcode === 0x9) {
+        if (socket.writableLength + payload.length + 2 > state.webSocketMaxBufferedBytes) {
+          closeWithCode(1009);
+          return;
+        }
+        socket.write(webSocketFrame(0xA, payload));
+        continue;
+      }
+      if (opcode === 0xA || opcode === 0x0 || opcode === 0x1 || opcode === 0x2) {
+        continue;
+      }
+      closeWithCode(1002);
+      return;
+    }
+  };
+  socket.on("data", handleData);
+  socket.on("end", forgetSocket);
+  socket.on("close", forgetSocket);
+  socket.on("error", forgetSocket);
+  if (head.length > 0) {
+    handleData(head);
+  }
 }
 
 function broadcast(state, message) {
+  const frame = webSocketTextFrame(message);
   for (const socket of state.sockets) {
+    if (
+      socket.destroyed ||
+      !socket.writable ||
+      socket.writableLength + frame.length > state.webSocketMaxBufferedBytes
+    ) {
+      state.sockets.delete(socket);
+      socket.destroy();
+      continue;
+    }
     try {
-      socket.write(webSocketTextFrame(message));
+      socket.write(frame);
     } catch {
       state.sockets.delete(socket);
+      socket.destroy();
     }
   }
 }
 
 function webSocketTextFrame(message) {
-  const payload = Buffer.from(message);
+  return webSocketFrame(0x1, Buffer.from(message));
+}
+
+function webSocketFrame(opcode, payload) {
   if (payload.length < 126) {
-    return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+    return Buffer.concat([Buffer.from([0x80 | opcode, payload.length]), payload]);
   }
   if (payload.length <= 65535) {
     const header = Buffer.alloc(4);
-    header[0] = 0x81;
+    header[0] = 0x80 | opcode;
     header[1] = 126;
     header.writeUInt16BE(payload.length, 2);
     return Buffer.concat([header, payload]);
   }
   const header = Buffer.alloc(10);
-  header[0] = 0x81;
+  header[0] = 0x80 | opcode;
   header[1] = 127;
   header.writeBigUInt64BE(BigInt(payload.length), 2);
   return Buffer.concat([header, payload]);
@@ -1349,10 +1576,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const host = process.env.LIVE_MAP_HOST || "127.0.0.1";
   const port = Number(process.env.LIVE_MAP_PORT || 8000);
   const { server, state } = createLiveMapServer();
-  server.listen(port, host, () => {
-    console.log(`endstone-live-map local server listening on http://${host}:${port}`);
-    void ensureWorldIndex(state).catch((error) => {
-      console.error(`failed to prewarm live map world index: ${error instanceof Error ? error.message : String(error)}`);
+  if (!state.pluginToken && process.env.LIVE_MAP_ALLOW_INSECURE_PLUGIN_WRITES !== "true") {
+    console.error("LIVE_MAP_PLUGIN_TOKEN is required (or explicitly set LIVE_MAP_ALLOW_INSECURE_PLUGIN_WRITES=true for local development)");
+    process.exitCode = 1;
+  } else {
+    server.listen(port, host, () => {
+      console.log(`endstone-live-map local server listening on http://${host}:${port}`);
+      void ensureWorldIndex(state).catch((error) => {
+        console.error(`failed to prewarm live map world index: ${error instanceof Error ? error.message : String(error)}`);
+      });
     });
-  });
+  }
 }

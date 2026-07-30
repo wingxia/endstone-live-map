@@ -58,8 +58,8 @@ size_t appendResponseBody(char *ptr, size_t size, size_t nmemb, void *userdata)
     return total;
 }
 
-long putObject(const LiveMapSettings &settings, const RenderedTile &tile, const std::vector<std::uint8_t> &body,
-               std::string *error)
+long requestObject(const LiveMapSettings &settings, const RenderedTile &tile, std::string_view method,
+                   const std::vector<std::uint8_t> &body, std::string *error)
 {
     static std::once_flag curl_once;
     std::call_once(curl_once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
@@ -81,6 +81,7 @@ long putObject(const LiveMapSettings &settings, const RenderedTile &tile, const 
     input.region = settings.r2_region;
     input.access_key_id = access_key;
     input.secret_access_key = secret_key;
+    input.method = std::string(method);
     input.amz_date = amz_date;
     input.date_stamp = date_stamp;
     input.payload_sha256 = hexLower(sha256(body));
@@ -103,10 +104,12 @@ long putObject(const LiveMapSettings &settings, const RenderedTile &tile, const 
     }
 
     curl_easy_setopt(curl, CURLOPT_URL, signed_request.url.c_str());
-    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, input.method.c_str());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, reinterpret_cast<const char *>(body.data()));
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+    if (!body.empty()) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, reinterpret_cast<const char *>(body.data()));
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+    }
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(settings.http_timeout_seconds));
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error_buffer);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
@@ -143,11 +146,12 @@ R2UploadResult uploadRenderedTilesToR2(const LiveMapSettings &settings, const st
 
     UploadRateLimiter limiter(settings.r2_max_uploads_per_minute);
     for (const auto &tile : tiles) {
-        if (!tile.has_pixels) {
-            continue;
+        std::vector<std::uint8_t> body;
+        const std::string_view method = tile.has_pixels ? "PUT" : "DELETE";
+        if (tile.has_pixels) {
+            body = readFileBytes(tile.png_path);
         }
-        const auto body = readFileBytes(tile.png_path);
-        if (body.empty()) {
+        if (tile.has_pixels && body.empty()) {
             result.ok = false;
             result.error = "missing rendered tile " + tile.png_path.string();
             return result;
@@ -163,9 +167,14 @@ R2UploadResult uploadRenderedTilesToR2(const LiveMapSettings &settings, const st
         std::string error;
         long status = 0;
         for (int attempt = 0; attempt <= settings.r2_retry_count; ++attempt) {
-            status = putObject(settings, tile, body, &error);
+            status = requestObject(settings, tile, method, body, &error);
             if (status >= 200 && status < 300) {
-                ++result.uploaded;
+                if (tile.has_pixels) {
+                    ++result.uploaded;
+                }
+                else {
+                    ++result.deleted;
+                }
                 limiter.record(std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::system_clock::now().time_since_epoch())
                                    .count());

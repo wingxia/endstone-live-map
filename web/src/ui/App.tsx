@@ -49,6 +49,11 @@ export function App() {
     if (!live.tilesReady) {
       return;
     }
+    if (Array.isArray(live.tilesReady.worlds)) {
+      setWorlds(live.tilesReady.worlds);
+      setError("");
+      return;
+    }
     let cancelled = false;
     const refreshTimer = window.setTimeout(() => {
       listWorlds()

@@ -11,6 +11,7 @@ namespace livemap {
 struct R2UploadResult {
     bool ok = true;
     std::size_t uploaded = 0;
+    std::size_t deleted = 0;
     std::string error;
 };
 
