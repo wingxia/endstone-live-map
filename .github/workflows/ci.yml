@@ -25,10 +25,26 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - name: Install C++ dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build clang libc++-dev libc++abi-dev libcurl4-openssl-dev zlib1g-dev
+      - name: Install LLVM 20 and C++ dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl gnupg
+
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /tmp/llvm-snapshot.gpg.key
+          key_fingerprint="$(gpg --show-keys --with-colons /tmp/llvm-snapshot.gpg.key | awk -F: '$1 == "fpr" { print $10; exit }')"
+          test "$key_fingerprint" = "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421"
+          gpg --batch --yes --dearmor --output /tmp/apt.llvm.org.gpg /tmp/llvm-snapshot.gpg.key
+          sudo install -m 0644 /tmp/apt.llvm.org.gpg /usr/share/keyrings/apt.llvm.org.gpg
+          echo "deb [signed-by=/usr/share/keyrings/apt.llvm.org.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" |
+            sudo tee /etc/apt/sources.list.d/apt.llvm.org.list >/dev/null
+
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang-20 libc++-20-dev libc++abi-20-dev libcurl4-openssl-dev zlib1g-dev
+          clang++-20 --version
       - name: Configure
-        run: cmake -S plugin -B plugin/build-endstone -GNinja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS=-stdlib=libc++ -DLIVE_MAP_WITH_ENDSTONE=ON -DENDSTONE_API_VERSION=0.11.6
+        run: cmake -S plugin -B plugin/build-endstone -GNinja -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 -DCMAKE_CXX_FLAGS=-stdlib=libc++ -DLIVE_MAP_WITH_ENDSTONE=ON -DENDSTONE_API_VERSION=0.11.6
       - name: Build
         run: cmake --build plugin/build-endstone --target endstone_live_map
       - name: Upload plugin artifact
