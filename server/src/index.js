@@ -1000,12 +1000,15 @@ async function serveTile(state, request, url, response) {
   const [, world, dimension, zoom, tileX, tileZ] = match;
   const file = path.join(state.dataDir, "tiles", cleanSegment(world), cleanSegment(dimension), `z${Number(zoom)}`, String(Number(tileX)), `${Number(tileZ)}.png`);
   const version = url.searchParams.has("_") ? url.searchParams.get("_") ?? "" : null;
+  const immutableCacheControl = "public, max-age=31536000, immutable";
+  const cloudflareMutableCacheControl = "public, max-age=60, stale-while-revalidate=86400, stale-if-error=86400";
   const tile = await loadTile(state, file, version);
   if (!tile) {
     response.writeHead(200, corsHeaders({
       "Content-Type": "image/png",
       "Content-Length": EMPTY_PNG.length,
-      "Cache-Control": version !== null ? "public, max-age=31536000, immutable" : "no-store",
+      "Cache-Control": version !== null ? immutableCacheControl : "no-store",
+      "Cloudflare-CDN-Cache-Control": version !== null ? immutableCacheControl : "no-store",
     }));
     response.end(EMPTY_PNG);
     return;
@@ -1013,7 +1016,8 @@ async function serveTile(state, request, url, response) {
   const headers = corsHeaders({
     "Content-Type": "image/png",
     "Content-Length": tile.bytes.length,
-    "Cache-Control": version !== null ? "public, max-age=31536000, immutable" : "public, max-age=0, must-revalidate",
+    "Cache-Control": version !== null ? immutableCacheControl : "public, no-cache",
+    "Cloudflare-CDN-Cache-Control": version !== null ? immutableCacheControl : cloudflareMutableCacheControl,
     ETag: tile.etag,
     "Last-Modified": tile.lastModified,
   });

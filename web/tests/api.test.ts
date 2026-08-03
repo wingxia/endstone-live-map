@@ -21,8 +21,13 @@ import { isMapDecorationBlock, isPlantBlock } from "../src/ui/mapBlocks";
 describe("api helpers", () => {
   it("builds land and image tile urls for the local server", () => {
     expect(landsUrl("Bedrock level", "Overworld", 123)).toBe("/api/lands?world=Bedrock+level&dimension=Overworld&_=123");
-    expect(mapImageTileUrl("Bedrock level", "Overworld", 4, -1, 2)).toBe("/api/local-map-tiles/Bedrock_level/Overworld/z4/-1/2.png");
-    expect(mapImageTileUrl("Bedrock level", "Overworld", -1, 0, -1)).toBe("/api/local-map-tiles/Bedrock_level/Overworld/z-1/0/-1.png");
+    const initialTile = mapImageTileUrl("Bedrock level", "Overworld", 4, -1, 2);
+    const initialTileVersion = new URL(initialTile, "https://map.example").searchParams.get("v");
+    expect(initialTile).toBe(`/api/local-map-tiles/Bedrock_level/Overworld/z4/-1/2.png?v=${initialTileVersion}`);
+    expect(initialTileVersion).toMatch(/^\d+$/);
+    expect(mapImageTileUrl("Bedrock level", "Overworld", -1, 0, -1)).toBe(
+      `/api/local-map-tiles/Bedrock_level/Overworld/z-1/0/-1.png?v=${initialTileVersion}`,
+    );
     expect(mapImageTileUrl("Bedrock level", "Overworld", 0, 0, 0, 123)).toBe("/api/local-map-tiles/Bedrock_level/Overworld/z0/0/0.png?_=123");
     expect(playerAvatarUrl({ id: "uuid/one", avatarHash: "abc123" })).toBe("/api/players/uuid%2Fone/avatar.png?_=abc123");
     expect(playerAvatarUrl({ id: "uuid/one", avatarHash: "abc123", avatarUrl: "/custom/avatar.png" })).toBe("/custom/avatar.png");

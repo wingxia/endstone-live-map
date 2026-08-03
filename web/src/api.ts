@@ -120,11 +120,14 @@ export interface LiveMessage {
 }
 
 let bootstrapConsumed = false;
+const initialTileCacheVersion = Math.floor(Date.now() / 60_000);
 
 export function mapImageTileUrl(world: string, dimension: string, zoom: number, tileX: number, tileZ: number, cacheBust?: string | number): string {
   const params = new URLSearchParams();
   if (cacheBust !== undefined) {
     params.set("_", String(cacheBust));
+  } else {
+    params.set("v", String(initialTileCacheVersion));
   }
   const suffix = params.toString();
   return `/api/local-map-tiles/${segmentKey(world)}/${segmentKey(dimension)}/z${zoom}/${tileX}/${tileZ}.png${suffix ? `?${suffix}` : ""}`;

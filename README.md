@@ -99,7 +99,8 @@ plugins/live_map/
 ### 4. 用户访问、缩放与拖动
 
 - HTML 首次响应直接嵌入世界元数据，地图不必先等待一次 `/api/worlds` 往返。
-- 普通瓦片 URL 保持稳定并使用 ETag 重新验证，不会因为一个区块更新而让整张地图失去浏览器缓存。
+- 普通瓦片 URL 在单次页面会话中保持稳定，并按页面加载分钟更换缓存键；单个区块更新不会让整张地图失去缓存，Cloudflare 强制浏览器 TTL 时也不会长期显示旧瓦片。
+- Cloudflare 边缘通过 `Cloudflare-CDN-Cache-Control` 缓存普通瓦片 60 秒；过期后异步重验证并继续提供旧副本，避免并发重验证阻塞拖动和缩放。
 - WebSocket 的 `tiles_ready` 只给变化瓦片增加版本参数，并同时携带最新世界元数据。
 - 拖动过程中不发起新瓦片请求；拖动结束后再加载新视口。
 - 缩放期间不边动画边解码新层；缩放落定后直接读取对应的预生成 PNG。
@@ -199,7 +200,7 @@ RestartSec=2
 WantedBy=multi-user.target
 ```
 
-环境文件应设为 `0600`，并包含前述四个 `LIVE_MAP_*` 变量。推荐让 Nginx、Caddy 或 Cloudflare Tunnel 代理本地监听地址，同时保留 Node 返回的 `Cache-Control`、`ETag`、`Content-Encoding` 和 WebSocket Upgrade 头。
+环境文件应设为 `0600`，并包含前述四个 `LIVE_MAP_*` 变量。推荐让 Nginx、Caddy 或 Cloudflare Tunnel 代理本地监听地址，同时保留 Node 返回的 `Cache-Control`、`Cloudflare-CDN-Cache-Control`、`ETag`、`Content-Encoding` 和 WebSocket Upgrade 头。
 
 ### 2. 安装插件
 
@@ -315,7 +316,7 @@ POST /api/plugin/lands
 POST /api/plugin/tiles
 ```
 
-未带版本的瓦片使用 ETag 重新验证；收到实时更新后，只有变化瓦片会使用不可变版本 URL。未带版本的缺图不缓存，已确认版本的缺图占位图可以长期缓存，从而避免视口反复请求同一空白位置。
+初始瓦片使用页面加载分钟生成稳定的 `v` 缓存键，在 Cloudflare 边缘缓存 60 秒并使用 `stale-while-revalidate`；收到实时更新后，只有变化瓦片会改用带 `_` 的不可变版本 URL。Node 将 `v` 视为可重新验证的普通瓦片，不会把它误当作实时版本。未带实时版本的缺图不缓存，已确认版本的缺图占位图可以长期缓存，从而避免视口反复请求同一空白位置。
 
 ## 可选 Cloudflare R2 / Worker
 
@@ -401,7 +402,7 @@ ctest --test-dir plugin/build-core --output-on-failure
 2. PNG 不是固定约 256 KiB 的未压缩旧文件；
 3. `map-data/.png-filter-zlib-v1` 已生成；
 4. 静态 JS/CSS 返回 Brotli 或 Gzip；
-5. 反向代理没有覆盖 ETag 和 Cache-Control；
+5. 反向代理没有覆盖 ETag、Cache-Control 和 Cloudflare-CDN-Cache-Control；
 6. 公网域名实际指向了当前 Node 服务和当前 `LIVE_MAP_DATA_DIR`。
 
 ## 项目结构

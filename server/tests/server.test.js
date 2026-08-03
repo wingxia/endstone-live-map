@@ -366,7 +366,10 @@ describe("local live map server", () => {
     const existing = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/0/0.png`);
     expect(existing.status).toBe(200);
     expect(existing.headers.get("content-type")).toContain("image/png");
-    expect(existing.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+    expect(existing.headers.get("cache-control")).toBe("public, no-cache");
+    expect(existing.headers.get("cloudflare-cdn-cache-control")).toBe(
+      "public, max-age=60, stale-while-revalidate=86400, stale-if-error=86400",
+    );
     expect(existing.headers.get("content-length")).toBe("3");
     expect(existing.headers.get("etag")).toBeTruthy();
     expect(Buffer.from(await existing.arrayBuffer())).toEqual(Buffer.from([1, 2, 3]));
@@ -375,10 +378,14 @@ describe("local live map server", () => {
       headers: { "If-None-Match": existing.headers.get("etag") },
     });
     expect(revalidated.status).toBe(304);
+    expect(revalidated.headers.get("cloudflare-cdn-cache-control")).toBe(
+      "public, max-age=60, stale-while-revalidate=86400, stale-if-error=86400",
+    );
 
     const versioned = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/0/0.png?_=123`);
     expect(versioned.status).toBe(200);
     expect(versioned.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(versioned.headers.get("cloudflare-cdn-cache-control")).toBe("public, max-age=31536000, immutable");
     expect(versioned.headers.get("etag")).toBeTruthy();
 
     const legacyPath = await fetch(`${baseUrl}/api/map-tiles/Bedrock_level/Overworld/z4/0/0.png`);
@@ -387,10 +394,12 @@ describe("local live map server", () => {
     const missing = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/9/9.png`);
     expect(missing.status).toBe(200);
     expect(missing.headers.get("cache-control")).toBe("no-store");
+    expect(missing.headers.get("cloudflare-cdn-cache-control")).toBe("no-store");
 
     const versionedMissing = await fetch(`${baseUrl}/api/local-map-tiles/Bedrock_level/Overworld/z4/9/9.png?_=123`);
     expect(versionedMissing.status).toBe(200);
     expect(versionedMissing.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(versionedMissing.headers.get("cloudflare-cdn-cache-control")).toBe("public, max-age=31536000, immutable");
   });
 
   it("serves versioned PNG tiles at every configured zoom from -8 through 4", async () => {
