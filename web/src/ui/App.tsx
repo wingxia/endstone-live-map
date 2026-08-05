@@ -1,4 +1,14 @@
-import { Flame, LandPlot, LocateFixed, Orbit, RadioTower, TreePine } from "lucide-react";
+import {
+  Flame,
+  LandPlot,
+  LocateFixed,
+  Map as MapIcon,
+  Orbit,
+  RadioTower,
+  TreePine,
+  Users,
+  X,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { fetchLands, listWorlds, segmentKey, type LandClaim, type WorldMeta } from "../api";
@@ -22,6 +32,8 @@ interface MapFocusTarget {
   nonce: number;
 }
 
+type MobilePanel = "dimensions" | "players" | "lands";
+
 export function App() {
   const live = useLivePlayers();
   const [worlds, setWorlds] = useState<WorldMeta[]>([]);
@@ -30,6 +42,7 @@ export function App() {
   const [error, setError] = useState("");
   const [landError, setLandError] = useState("");
   const [focusTarget, setFocusTarget] = useState<MapFocusTarget | null>(null);
+  const [mobilePanel, setMobilePanel] = useState<MobilePanel | null>(null);
   const selectedWorldMeta = useMemo(
     () => selectWorldMeta(worlds, selectedDimension, DEFAULT_WORLD),
     [selectedDimension, worlds],
@@ -109,7 +122,42 @@ export function App() {
       player.dimension === selectedDimension && segmentKey(player.world) === segmentKey(selectedWorld),
   );
   const selectedDimensionLabel = DIMENSIONS.find(({ id }) => id === selectedDimension)?.label ?? selectedDimension;
-  const publicLands = useMemo(() => lands.filter((land) => land.publicTeleport === true), [lands]);
+  const selectedLands = useMemo(
+    () =>
+      lands.filter(
+        (land) =>
+          land.dimension === selectedDimension && segmentKey(land.world) === segmentKey(selectedWorld),
+      ),
+    [lands, selectedDimension, selectedWorld],
+  );
+  const birthplace = useMemo(() => selectBirthplace(selectedLands), [selectedLands]);
+  const publicLands = useMemo(
+    () => selectedLands.filter((land) => land.publicTeleport === true),
+    [selectedLands],
+  );
+  const SelectedDimensionIcon = DIMENSIONS.find(({ id }) => id === selectedDimension)?.Icon ?? TreePine;
+  const mobilePanelTitle =
+    mobilePanel === "dimensions" ? "切换维度" : mobilePanel === "players" ? "在线玩家" : mobilePanel === "lands" ? "公开领地" : "";
+  const mobilePanelMeta =
+    mobilePanel === "dimensions"
+      ? selectedDimensionLabel
+      : mobilePanel === "players"
+        ? `${selectedPlayers.length} 人在线`
+        : mobilePanel === "lands"
+          ? `${publicLands.length} 个可传送`
+          : "";
+
+  const selectDimension = (dimension: string) => {
+    setSelectedDimension(dimension);
+    setMobilePanel(null);
+  };
+  const focusMap = (x: number, z: number) => {
+    setFocusTarget({ x, z, nonce: Date.now() });
+    setMobilePanel(null);
+  };
+  const toggleMobilePanel = (panel: MobilePanel) => {
+    setMobilePanel((current) => (current === panel ? null : panel));
+  };
 
   return (
     <main className="app-shell">
@@ -119,6 +167,7 @@ export function App() {
           dimension={selectedDimension}
           players={selectedPlayers}
           lands={publicLands}
+          birthplace={birthplace}
           worldMeta={selectedWorldMeta}
           tilesReady={live.tilesReady}
           focusTarget={focusTarget}
@@ -143,7 +192,22 @@ export function App() {
         </div>
       </section>
 
-      <aside className="side-panel" aria-label="地图信息面板">
+      <aside
+        id="map-info-panel"
+        className={mobilePanel ? "side-panel mobile-panel-open" : "side-panel"}
+        data-mobile-panel={mobilePanel ?? "closed"}
+        data-testid="mobile-panel"
+        aria-label="地图信息面板"
+      >
+        <div className="mobile-panel-heading">
+          <div>
+            <strong>{mobilePanelTitle}</strong>
+            <span>{mobilePanelMeta}</span>
+          </div>
+          <button type="button" aria-label="关闭信息面板" title="关闭" onClick={() => setMobilePanel(null)}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
         <header className="panel-header">
           <div className="panel-title-row">
             <div>
@@ -163,7 +227,7 @@ export function App() {
                 aria-selected={selectedDimension === id}
                 aria-label={`${label}（${id}）`}
                 className={selectedDimension === id ? "active" : ""}
-                onClick={() => setSelectedDimension(id)}
+                onClick={() => selectDimension(id)}
               >
                 <Icon size={15} aria-hidden="true" strokeWidth={1.8} />
                 {label}
@@ -172,20 +236,20 @@ export function App() {
           </div>
         </header>
 
-        {error ? <p className="error-banner">{error}</p> : null}
+        {error ? <p className="error-banner world-error-banner">{error}</p> : null}
 
-        <section aria-labelledby="players-title">
+        <section className="players-panel" aria-labelledby="players-title">
           <h2 id="players-title">
             <LocateFixed size={17} aria-hidden="true" />
             在线玩家
           </h2>
           <PlayerList
             players={selectedPlayers}
-            onSelectPlayer={(player) => setFocusTarget({ x: player.x, z: player.z, nonce: Date.now() })}
+            onSelectPlayer={(player) => focusMap(player.x, player.z)}
           />
         </section>
 
-        <section aria-labelledby="lands-title">
+        <section className="lands-panel" aria-labelledby="lands-title">
           <h2 id="lands-title">
             <LandPlot size={17} aria-hidden="true" />
             领地标注
@@ -193,10 +257,58 @@ export function App() {
           {landError ? <p className="error-banner">{landError}</p> : null}
           <LandList
             lands={publicLands}
-            onSelectLand={(land) => setFocusTarget({ x: land.teleport.x, z: land.teleport.z, nonce: Date.now() })}
+            onSelectLand={(land) => focusMap(land.teleport.x, land.teleport.z)}
           />
         </section>
       </aside>
+
+      <nav className="mobile-navigation" aria-label="移动端地图导航" data-testid="mobile-navigation">
+        <button
+          type="button"
+          className={mobilePanel === null ? "active" : ""}
+          aria-current={mobilePanel === null ? "page" : undefined}
+          aria-label="查看地图"
+          onClick={() => setMobilePanel(null)}
+        >
+          <MapIcon size={20} aria-hidden="true" />
+          <span>地图</span>
+        </button>
+        <button
+          type="button"
+          className={mobilePanel === "dimensions" ? "active" : ""}
+          aria-controls="map-info-panel"
+          aria-expanded={mobilePanel === "dimensions"}
+          aria-label={`切换维度，当前${selectedDimensionLabel}`}
+          onClick={() => toggleMobilePanel("dimensions")}
+        >
+          <SelectedDimensionIcon size={20} aria-hidden="true" />
+          <span>{selectedDimensionLabel}</span>
+        </button>
+        <button
+          type="button"
+          className={mobilePanel === "players" ? "active" : ""}
+          aria-controls="map-info-panel"
+          aria-expanded={mobilePanel === "players"}
+          aria-label={`在线玩家，${selectedPlayers.length} 人`}
+          onClick={() => toggleMobilePanel("players")}
+        >
+          <Users size={20} aria-hidden="true" />
+          <span>玩家</span>
+          <small aria-hidden="true">{selectedPlayers.length}</small>
+        </button>
+        <button
+          type="button"
+          className={mobilePanel === "lands" ? "active" : ""}
+          aria-controls="map-info-panel"
+          aria-expanded={mobilePanel === "lands"}
+          aria-label={`公开领地，${publicLands.length} 个`}
+          onClick={() => toggleMobilePanel("lands")}
+        >
+          <LandPlot size={20} aria-hidden="true" />
+          <span>领地</span>
+          <small aria-hidden="true">{publicLands.length}</small>
+        </button>
+      </nav>
     </main>
   );
 }
@@ -214,4 +326,59 @@ export function selectWorldMeta(
       null,
     )
   );
+}
+
+const BIRTHPLACE_LABELS = new Set([
+  "spawn",
+  "worldspawn",
+  "birthplace",
+  "出生地",
+  "出生点",
+  "世界出生地",
+  "世界出生点",
+  "重生点",
+]);
+const BIRTHPLACE_FALLBACK_LABELS = new Set(["主城", "主城区"]);
+
+export function selectBirthplace(lands: LandClaim[]): { x: number; z: number } | null {
+  let selected: LandClaim | null = null;
+  let selectedPriority = Number.POSITIVE_INFINITY;
+
+  for (const land of lands) {
+    if (!Number.isFinite(land.teleport.x) || !Number.isFinite(land.teleport.z)) {
+      continue;
+    }
+    const priority = birthplacePriority(land);
+    if (priority < selectedPriority) {
+      selected = land;
+      selectedPriority = priority;
+    }
+  }
+
+  return selected ? { x: selected.teleport.x, z: selected.teleport.z } : null;
+}
+
+function birthplacePriority(land: LandClaim) {
+  const name = normalizeLocationLabel(land.name);
+  const idParts = land.id.split(":").map(normalizeLocationLabel);
+  if (BIRTHPLACE_LABELS.has(name)) {
+    return 0;
+  }
+  if (idParts.some((part) => BIRTHPLACE_LABELS.has(part))) {
+    return 1;
+  }
+  if (name.includes("出生") || name.includes("spawn") || name.includes("birthplace")) {
+    return 2;
+  }
+  if (BIRTHPLACE_FALLBACK_LABELS.has(name)) {
+    return 3;
+  }
+  if (idParts.some((part) => BIRTHPLACE_FALLBACK_LABELS.has(part))) {
+    return 4;
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+function normalizeLocationLabel(value: string) {
+  return String(value).trim().toLocaleLowerCase().replace(/[\s_.\-/]+/g, "");
 }

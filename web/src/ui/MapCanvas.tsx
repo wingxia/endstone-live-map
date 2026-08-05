@@ -31,12 +31,13 @@ interface MapCanvasProps {
   dimension: string;
   players: PlayerState[];
   lands: LandClaim[];
+  birthplace: { x: number; z: number } | null;
   worldMeta: WorldMeta | null;
   tilesReady: TilesReadyMessage | null;
   focusTarget: { x: number; z: number; nonce: number } | null;
 }
 
-export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesReady, focusTarget }: MapCanvasProps) {
+export function MapCanvas({ world, dimension, players, lands, birthplace, worldMeta, tilesReady, focusTarget }: MapCanvasProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const stateRef = useRef<{
     map: L.Map;
@@ -185,28 +186,39 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
     const playerBounds = players.length > 0 ? boundsForPlayers(players) : null;
     const meta = isWorldMetaForMap(worldMeta, world, dimension) ? worldMeta : null;
     const selectionKey = mapViewKey(world, dimension);
-    const candidateNavigationBounds = mergeMapBounds(meta?.bounds || null, playerBounds);
+    const candidateNavigationBounds = mergeMapBounds(
+      mergeMapBounds(meta?.bounds || null, playerBounds),
+      birthplace ? boundsForPoint(birthplace) : null,
+    );
     const previousNavigation = navigationBoundsRef.current;
     const navigationBounds =
       previousNavigation.key === selectionKey
         ? mergeMapBounds(previousNavigation.bounds, candidateNavigationBounds)
         : candidateNavigationBounds;
-    const autoFitKey = autoFitKeyFor(world, dimension, meta, playerBounds);
-    if (
+    const autoFitKey = autoFitKeyFor(world, dimension, meta, playerBounds, birthplace);
+    const navigationBoundsChanged =
       previousNavigation.key !== selectionKey ||
-      !sameMapBounds(previousNavigation.bounds, navigationBounds)
-    ) {
+      !sameMapBounds(previousNavigation.bounds, navigationBounds);
+    if (navigationBoundsChanged) {
+      state.map.setMaxBounds(null as unknown as L.LatLngBoundsExpression);
+    }
+    const applyNavigationBounds = () => {
+      if (!navigationBoundsChanged) {
+        return;
+      }
       state.map.setMaxBounds(
         navigationBounds
           ? leafletMaxBoundsFor(navigationBounds)
           : (null as unknown as L.LatLngBoundsExpression),
       );
       navigationBoundsRef.current = { key: selectionKey, bounds: navigationBounds };
-    }
+    };
     if (!meta) {
       state.chunkLayer.setActive(false);
       if (autoFitKeyRef.current !== autoFitKey) {
-        if (playerBounds) {
+        if (birthplace) {
+          state.map.setView(minecraftToLeaflet(birthplace.x, birthplace.z), INITIAL_MAP_ZOOM, { animate: false });
+        } else if (playerBounds) {
           state.map.fitBounds(
             [
               minecraftToLeaflet(playerBounds.minBlockX, playerBounds.maxBlockZ),
@@ -220,11 +232,14 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
         saveHomeView(homeViewsRef.current, world, dimension, state.map);
         autoFitKeyRef.current = autoFitKey;
       }
+      applyNavigationBounds();
       return;
     }
     state.chunkLayer.setKnownBounds(meta.bounds, meta.updatedAt);
     if (autoFitKeyRef.current !== autoFitKey) {
-      if (playerBounds) {
+      if (birthplace) {
+        state.map.setView(minecraftToLeaflet(birthplace.x, birthplace.z), INITIAL_MAP_ZOOM, { animate: false });
+      } else if (playerBounds) {
         state.map.fitBounds(
           [
             minecraftToLeaflet(playerBounds.minBlockX, playerBounds.maxBlockZ),
@@ -239,8 +254,9 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
       saveHomeView(homeViewsRef.current, world, dimension, state.map);
       autoFitKeyRef.current = autoFitKey;
     }
+    applyNavigationBounds();
     state.chunkLayer.setActive(true);
-  }, [dimension, mapReady, players, world, worldMeta]);
+  }, [birthplace, dimension, mapReady, players, world, worldMeta]);
 
   useEffect(() => {
     if (tilesReady) {
@@ -390,6 +406,7 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
     }
     stateRef.current.map.setView(homeView.center, homeView.zoom, { animate: true });
   };
+  const homeControlLabel = birthplace ? "定位到出生地" : "返回初始视角";
 
   return (
     <>
@@ -397,8 +414,8 @@ export function MapCanvas({ world, dimension, players, lands, worldMeta, tilesRe
       <button
         type="button"
         className="map-home-control leaflet-bar"
-        aria-label="返回初始视角"
-        title="返回初始视角"
+        aria-label={homeControlLabel}
+        title={homeControlLabel}
         data-testid="map-home-control"
         disabled={!mapReady}
         onClick={handleResetView}
@@ -511,8 +528,15 @@ function nearestSampleChunk(chunks: Array<{ chunkX: number; chunkZ: number }>, t
   return best;
 }
 
-function autoFitKeyFor(world: string, dimension: string, meta: WorldMeta | null, playerBounds: ReturnType<typeof boundsForPlayers> | null) {
+function autoFitKeyFor(
+  world: string,
+  dimension: string,
+  meta: WorldMeta | null,
+  playerBounds: ReturnType<typeof boundsForPlayers> | null,
+  birthplace: { x: number; z: number } | null,
+) {
   const prefix = `${segmentKey(world)}/${segmentKey(dimension)}`;
+  const birthplaceKey = birthplace ? `/birthplace/${birthplace.x}/${birthplace.z}` : "";
   if (meta) {
     const bounds = meta.bounds;
     return [
@@ -526,12 +550,31 @@ function autoFitKeyFor(world: string, dimension: string, meta: WorldMeta | null,
       bounds.maxBlockX,
       bounds.minBlockZ,
       bounds.maxBlockZ,
-    ].join("/");
+    ].join("/") + birthplaceKey;
   }
   if (playerBounds) {
-    return `${prefix}/live`;
+    return `${prefix}/live${birthplaceKey}`;
   }
-  return `${prefix}/empty`;
+  return `${prefix}/empty${birthplaceKey}`;
+}
+
+function boundsForPoint(point: { x: number; z: number }): WorldMeta["bounds"] {
+  const minBlockX = Math.floor(point.x - LIVE_PLAYER_PADDING_BLOCKS);
+  const maxBlockX = Math.ceil(point.x + LIVE_PLAYER_PADDING_BLOCKS);
+  const minBlockZ = Math.floor(point.z - LIVE_PLAYER_PADDING_BLOCKS);
+  const maxBlockZ = Math.ceil(point.z + LIVE_PLAYER_PADDING_BLOCKS);
+  const minChunk = blockToChunk(minBlockX, minBlockZ);
+  const maxChunk = blockToChunk(maxBlockX, maxBlockZ);
+  return {
+    minChunkX: minChunk.chunkX,
+    maxChunkX: maxChunk.chunkX,
+    minChunkZ: minChunk.chunkZ,
+    maxChunkZ: maxChunk.chunkZ,
+    minBlockX,
+    maxBlockX,
+    minBlockZ,
+    maxBlockZ,
+  };
 }
 
 function boundsForPlayers(players: PlayerState[]): WorldMeta["bounds"] {

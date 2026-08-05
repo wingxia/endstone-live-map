@@ -9,6 +9,7 @@ const AVATAR_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4AWP4DwQACfsD/c8LaHIAAAAASUVORK5CYII=",
   "base64",
 );
+const MAP_CENTER_TOLERANCE = 0.05;
 
 test("renders the operational map shell from local PNG tiles only", async ({ page }) => {
   const requests = await mockLiveMap(page, { players: false });
@@ -195,13 +196,17 @@ test("uses opaque map overlays without backdrop-filter recomposition", async ({ 
   expect(overlayStyles.every(({ backgroundColor }) => /rgba?\(/.test(backgroundColor))).toBe(true);
 });
 
-test("constrains navigation to explored bounds and restores the initial view", async ({ page }) => {
-  await mockLiveMap(page, { players: false });
+test("opens at the birthplace, constrains navigation, and returns home", async ({ page }) => {
+  await mockLiveMap(page, {
+    players: false,
+    birthplace: { x: -352, y: 70, z: -479 },
+  });
   await page.goto("/");
   await expect(page.getByTestId("map-canvas")).toBeVisible();
 
   await expect.poll(() => leafletView(page).then(({ zoom }) => zoom)).toBe(4);
-  const initial = await leafletView(page);
+  await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat - 479))).toBeLessThan(MAP_CENTER_TOLERANCE);
+  await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng + 352))).toBeLessThan(MAP_CENTER_TOLERANCE);
 
   await page.evaluate(() => {
     const map = (window as unknown as {
@@ -209,7 +214,7 @@ test("constrains navigation to explored bounds and restores the initial view", a
     }).__endstoneLiveMapLeaflet;
     map?.setView?.([50_000, 50_000], 4, { animate: false });
   });
-  await expect.poll(() => leafletView(page).then(({ lat, lng }) => Math.max(Math.abs(lat), Math.abs(lng)))).toBeLessThan(500);
+  await expect.poll(() => leafletView(page).then(({ lat, lng }) => Math.max(Math.abs(lat), Math.abs(lng)))).toBeLessThan(1_000);
 
   await page.evaluate(() => {
     const map = (window as unknown as {
@@ -218,10 +223,10 @@ test("constrains navigation to explored bounds and restores the initial view", a
     map?.setView?.([32, 32], 2, { animate: false });
   });
   await expect.poll(() => leafletView(page).then(({ zoom }) => zoom)).toBe(2);
-  await page.getByRole("button", { name: "返回初始视角" }).click();
-  await expect.poll(() => leafletView(page).then(({ zoom }) => zoom)).toBe(initial.zoom);
-  await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat - initial.lat))).toBeLessThan(0.01);
-  await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng - initial.lng))).toBeLessThan(0.01);
+  await page.getByRole("button", { name: "定位到出生地" }).click();
+  await expect.poll(() => leafletView(page).then(({ zoom }) => zoom)).toBe(4);
+  await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat - 479))).toBeLessThan(MAP_CENTER_TOLERANCE);
+  await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng + 352))).toBeLessThan(MAP_CENTER_TOLERANCE);
 });
 
 test("uses generated PNG tiles for every zoom level from z4 through z-8", async ({ page }) => {
@@ -362,10 +367,16 @@ test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
   expect(await page.locator(".coordinate-block").count()).toBe(0);
   await expect(page.locator(".player-marker-frame")).toBeVisible();
   expect(await elementsOverlap(page, ".map-hud", ".coordinate-hud")).toBe(false);
+  expect(await elementsOverlap(page, ".map-home-control", ".coordinate-hud")).toBe(false);
   const mapHud = await page.locator(".map-hud").boundingBox();
   const coordinateHud = await page.getByTestId("coordinate-hud").boundingBox();
+  const mapHome = await page.getByTestId("map-home-control").boundingBox();
+  const mapCanvas = await page.getByTestId("map-canvas").boundingBox();
   expect(mapHud).not.toBeNull();
   expect(coordinateHud).not.toBeNull();
+  expect(mapHome).not.toBeNull();
+  expect(mapCanvas).not.toBeNull();
+  expect(mapHome!.x).toBeLessThan(mapCanvas!.x + mapCanvas!.width / 2);
   expect(mapHud!.width).toBeLessThanOrEqual(260);
   expect(mapHud!.height).toBeLessThanOrEqual(52);
   expect(coordinateHud!.width).toBeLessThanOrEqual(270);
@@ -374,9 +385,79 @@ test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
   expect(await hudMapCoverage(page)).toBeLessThan(0.13);
 });
 
+test("keeps the map primary and makes mobile panels and locations easy to reach", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockLiveMap(page);
+  await page.goto("/");
+
+  const mapCanvas = page.getByTestId("map-canvas");
+  const navigation = page.getByTestId("mobile-navigation");
+  await expect(mapCanvas).toBeVisible();
+  await expect(navigation).toBeVisible();
+
+  const mapBounds = await mapCanvas.boundingBox();
+  const navigationBounds = await navigation.boundingBox();
+  expect(mapBounds).not.toBeNull();
+  expect(navigationBounds).not.toBeNull();
+  expect(mapBounds!.height).toBeGreaterThanOrEqual(844 * 0.85);
+  expect(mapBounds!.y + mapBounds!.height).toBeLessThanOrEqual(navigationBounds!.y + 1);
+  expect(
+    await navigation.locator("button").evaluateAll((buttons) =>
+      buttons.every((button) => {
+        const bounds = button.getBoundingClientRect();
+        return bounds.width >= 44 && bounds.height >= 44;
+      }),
+    ),
+  ).toBe(true);
+  expect(
+    await page.evaluate(() => ({
+      horizontalOverflow: document.documentElement.scrollWidth > window.innerWidth,
+      verticalOverflow: document.documentElement.scrollHeight > window.innerHeight,
+    })),
+  ).toEqual({ horizontalOverflow: false, verticalOverflow: false });
+
+  await page.evaluate(() => {
+    const map = (window as unknown as {
+      __endstoneLiveMapLeaflet?: { setView?: (center: [number, number], zoom: number, options?: { animate?: boolean }) => void };
+    }).__endstoneLiveMapLeaflet;
+    map?.setView?.([32, 32], 4, { animate: false });
+  });
+  await page.getByRole("button", { name: "公开领地，1 个" }).click();
+  await expect(page.getByTestId("mobile-panel")).toBeVisible();
+  await expect(page.getByPlaceholder("搜索领地或主人")).toBeVisible();
+  await page.getByRole("button", { name: /主城区/ }).click();
+  await expect(page.getByTestId("mobile-panel")).toBeHidden();
+  await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat - 16))).toBeLessThan(MAP_CENTER_TOLERANCE);
+  await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng - 8))).toBeLessThan(MAP_CENTER_TOLERANCE);
+
+  await page.evaluate(() => {
+    const map = (window as unknown as {
+      __endstoneLiveMapLeaflet?: { setView?: (center: [number, number], zoom: number, options?: { animate?: boolean }) => void };
+    }).__endstoneLiveMapLeaflet;
+    map?.setView?.([0, 0], 4, { animate: false });
+  });
+  await page.getByRole("button", { name: "在线玩家，1 人" }).click();
+  await page.getByRole("button", { name: /Wing/ }).click();
+  await expect(page.getByTestId("mobile-panel")).toBeHidden();
+  await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat - 22))).toBeLessThan(MAP_CENTER_TOLERANCE);
+  await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng - 18))).toBeLessThan(MAP_CENTER_TOLERANCE);
+
+  await page.getByRole("button", { name: "切换维度，当前主世界" }).click();
+  await expect(page.getByRole("tab", { name: "下界（Nether）" })).toBeVisible();
+  await page.getByRole("tab", { name: "下界（Nether）" }).click();
+  await expect(page.getByTestId("mobile-panel")).toBeHidden();
+  await expect(page.getByLabel("地图状态")).toContainText("下界");
+});
+
 async function mockLiveMap(
   page: Page,
-  options: { players?: boolean; world?: string; holdWorlds?: boolean; tileDelayMs?: number } = {},
+  options: {
+    players?: boolean;
+    world?: string;
+    holdWorlds?: boolean;
+    tileDelayMs?: number;
+    birthplace?: { x: number; y: number; z: number };
+  } = {},
 ) {
   const includePlayers = options.players !== false;
   const worldName = options.world ?? "Bedrock level";
@@ -454,7 +535,7 @@ async function mockLiveMap(
             maxY: 160,
             minZ: -64,
             maxZ: 32,
-            teleport: { x: 8, y: 72, z: -16 },
+            teleport: options.birthplace ?? { x: 8, y: 72, z: -16 },
             members: [],
             parent: "",
             children: [],

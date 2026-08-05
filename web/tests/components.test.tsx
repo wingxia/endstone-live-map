@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { PlayerList } from "../src/ui/PlayerList";
 import { LandList } from "../src/ui/LandList";
 import { coordinateCopyText, mergeMapBounds } from "../src/ui/MapCanvas";
-import { selectWorldMeta } from "../src/ui/App";
+import { selectBirthplace, selectWorldMeta } from "../src/ui/App";
 import type { LandClaim, WorldMeta } from "../src/api";
 
 describe("App world selection", () => {
@@ -16,6 +16,19 @@ describe("App world selection", () => {
     ];
 
     expect(selectWorldMeta(worlds, "Overworld", "Bedrock level")?.world).toBe("ExchangeTest");
+  });
+
+  it("uses an explicit spawn land as the birthplace before the main-city fallback", () => {
+    expect(
+      selectBirthplace([
+        createLand({ id: "main", name: "主城区", teleport: { x: -352, y: 70, z: -479 } }),
+        createLand({ id: "spawn", name: "出生地", teleport: { x: 8, y: 72, z: -16 } }),
+      ]),
+    ).toEqual({ x: 8, z: -16 });
+  });
+
+  it("uses the existing main-city teleport as the birthplace fallback", () => {
+    expect(selectBirthplace([createLand()])).toEqual({ x: -352, z: -479 });
   });
 });
 
