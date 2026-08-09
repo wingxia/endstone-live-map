@@ -501,6 +501,56 @@ describe("local live map server", () => {
     expect(Buffer.from(await avatar.arrayBuffer())).toEqual(bytes);
   });
 
+  it("uses the Minecraft profile head for persona skins and caches it by skin key", async () => {
+    const avatarPngBase64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4AWP4DwQACfsD/c8LaHIAAAAASUVORK5CYII=";
+    const bytes = Buffer.from(avatarPngBase64, "base64");
+    const avatarHash = createHash("sha256").update(bytes).digest("hex");
+    const avatarProfileKey = "a".repeat(64);
+    const requests = [];
+    serverState.profileAvatarFetch = async (url, options) => {
+      requests.push({ url, options });
+      return new Response(bytes, {
+        status: 200,
+        headers: { "Content-Type": "image/png", "Content-Length": String(bytes.length) },
+      });
+    };
+    const body = JSON.stringify({
+      players: [{
+        id: "persona-player",
+        name: "Persona Player",
+        xuid: "2535446414685408",
+        world: "Bedrock level",
+        dimension: "Overworld",
+        avatarProfileKey,
+      }],
+    });
+
+    for (let index = 0; index < 2; index += 1) {
+      const response = await fetch(`${baseUrl}/api/plugin/live`, {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body,
+      });
+      expect(response.status).toBe(200);
+    }
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe(
+      "https://persona-secondary.franchise.minecraft-services.net/api/v1.0/profile/xuid/2535446414685408/image/head",
+    );
+    expect(requests[0].options.headers.Accept).toBe("image/png");
+    const players = await (await fetch(`${baseUrl}/api/players`)).json();
+    expect(players.players[0]).toMatchObject({
+      id: "persona-player",
+      avatarHash,
+      avatarUrl: `/api/players/persona-player/avatar.png?_=${avatarHash}`,
+    });
+    expect(players.players[0].avatarProfileKey).toBeUndefined();
+    const avatar = await fetch(`${baseUrl}${players.players[0].avatarUrl}`);
+    expect(Buffer.from(await avatar.arrayBuffer())).toEqual(bytes);
+  });
+
   it("expires a player snapshot when the plugin stops refreshing it", async () => {
     const created = createLiveMapServer({
       dataDir: tmp,

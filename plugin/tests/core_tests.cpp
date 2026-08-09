@@ -4,6 +4,7 @@
 #include "livemap/land.hpp"
 #include "livemap/map_blocks.hpp"
 #include "livemap/png.hpp"
+#include "livemap/player_avatar.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/r2_signing.hpp"
 #include "livemap/settings.hpp"
@@ -327,6 +328,7 @@ void testProtocol()
         0.0,
         "avatarhash",
         "iVBORw0KGgo=",
+        "profilehash",
         42,
     }};
     const auto json = livemap::serializePlayerSnapshot(players);
@@ -335,6 +337,7 @@ void testProtocol()
     assert(json.find("\"xuid\":\"xuid-1\"") != std::string::npos);
     assert(json.find("\"avatarHash\":\"avatarhash\"") != std::string::npos);
     assert(json.find("\"avatarPngBase64\":\"iVBORw0KGgo=\"") != std::string::npos);
+    assert(json.find("\"avatarProfileKey\":\"profilehash\"") != std::string::npos);
     assert(json.find("\"z\":-8.25") != std::string::npos);
     assert(livemap::serializePlayerSnapshot({}) == "{\"type\":\"player_snapshot\",\"players\":[]}");
 
@@ -417,6 +420,18 @@ void testPngEncoding()
 
 void testSkinAvatarRendering()
 {
+    assert(livemap::hasClassicSkinLayout(64, 32));
+    assert(livemap::hasClassicSkinLayout(64, 64));
+    assert(livemap::hasClassicSkinLayout(128, 64));
+    assert(livemap::hasClassicSkinLayout(128, 128));
+    assert(!livemap::hasClassicSkinLayout(128, 96));
+    assert(!livemap::hasClassicSkinLayout(32, 32));
+    assert(!livemap::shouldFetchProfileAvatar("CustomImportedSkin", 64, 64));
+    assert(!livemap::shouldFetchProfileAvatar("CustomImportedSkin", 128, 128));
+    assert(livemap::shouldFetchProfileAvatar("avatar-v3:persona-c25ee79952562f39-5", 64, 64));
+    assert(livemap::shouldFetchProfileAvatar("PersonaSkin", 64, 64));
+    assert(livemap::shouldFetchProfileAvatar("CustomImportedSkin", 96, 96));
+
     for (const int texture_scale : {1, 2, 4}) {
         auto skin = livemap::makeRgbaImage(64 * texture_scale, 64 * texture_scale);
         for (int y = 8 * texture_scale; y < 16 * texture_scale; ++y) {

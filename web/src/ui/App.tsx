@@ -8,11 +8,11 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { fetchLands, listWorlds, segmentKey, type LandClaim, type WorldMeta } from "../api";
 import { useLivePlayers } from "../hooks/useLivePlayers";
-import { LandList } from "./LandList";
+import { LandList, LandSearch } from "./LandList";
 import { MapCanvas } from "./MapCanvas";
 import { PlayerList } from "./PlayerList";
 
@@ -42,6 +42,10 @@ export function App() {
   const [landError, setLandError] = useState("");
   const [focusTarget, setFocusTarget] = useState<MapFocusTarget | null>(null);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel | null>(null);
+  const [landQuery, setLandQuery] = useState("");
+  const [landSearchProgress, setLandSearchProgress] = useState(0);
+  const mobilePanelRef = useRef<HTMLElement>(null);
+  const isMobileLayout = useMediaQuery("(max-width: 900px)");
   const selectedWorldMeta = useMemo(
     () => selectWorldMeta(worlds, selectedDimension, DEFAULT_WORLD),
     [selectedDimension, worlds],
@@ -116,6 +120,13 @@ export function App() {
     };
   }, [live.landsUpdated, selectedDimension, selectedWorld]);
 
+  useEffect(() => {
+    setLandSearchProgress(0);
+    if (mobilePanelRef.current) {
+      mobilePanelRef.current.scrollTop = 0;
+    }
+  }, [mobilePanel]);
+
   const selectedPlayers = live.players.filter(
     (player) =>
       player.dimension === selectedDimension && segmentKey(player.world) === segmentKey(selectedWorld),
@@ -157,6 +168,17 @@ export function App() {
   const toggleMobilePanel = (panel: MobilePanel) => {
     setMobilePanel((current) => (current === panel ? null : panel));
   };
+  const mobileHeadingStyle = mobilePanel === "lands"
+    ? ({
+        "--land-search-progress": landSearchProgress,
+        "--land-search-collapse": `${50 * landSearchProgress}px`,
+        "--land-search-rise": `${48 * landSearchProgress}px`,
+        "--land-search-right-shift": `${48 * landSearchProgress}px`,
+        "--land-search-left-shift": `${72 * landSearchProgress}px`,
+        "--land-search-height-loss": `${6 * landSearchProgress}px`,
+        "--land-search-meta-rise": `${4 * landSearchProgress}px`,
+      } as CSSProperties)
+    : undefined;
 
   return (
     <main className="app-shell">
@@ -192,18 +214,33 @@ export function App() {
       </section>
 
       <aside
+        ref={mobilePanelRef}
         id="map-info-panel"
         className={mobilePanel ? "side-panel mobile-panel-open" : "side-panel"}
         data-mobile-panel={mobilePanel ?? "closed"}
         data-testid="mobile-panel"
         aria-label="地图信息面板"
+        onScroll={(event) => {
+          if (mobilePanel !== "lands") {
+            return;
+          }
+          const nextProgress = Math.min(1, Math.max(0, event.currentTarget.scrollTop / 56));
+          setLandSearchProgress(nextProgress);
+        }}
       >
-        <div className="mobile-panel-heading">
-          <div>
+        <div
+          className={mobilePanel === "lands" ? "mobile-panel-heading mobile-land-panel-heading" : "mobile-panel-heading"}
+          style={mobileHeadingStyle}
+          data-land-search-position={landSearchProgress >= 0.85 ? "inline" : "stacked"}
+        >
+          <div className="mobile-panel-copy">
             <strong>{mobilePanelTitle}</strong>
             <span>{mobilePanelMeta}</span>
           </div>
-          <button type="button" aria-label="关闭信息面板" title="关闭" onClick={() => setMobilePanel(null)}>
+          {mobilePanel === "lands" && isMobileLayout && publicLands.length > 0 ? (
+            <LandSearch value={landQuery} onChange={setLandQuery} className="mobile-land-search" />
+          ) : null}
+          <button className="mobile-panel-close" type="button" aria-label="关闭信息面板" title="关闭" onClick={() => setMobilePanel(null)}>
             <X size={18} aria-hidden="true" />
           </button>
         </div>
@@ -257,6 +294,9 @@ export function App() {
           <LandList
             lands={publicLands}
             onSelectLand={(land) => focusMap(land.teleport.x, land.teleport.z)}
+            query={landQuery}
+            onQueryChange={setLandQuery}
+            showSearch={!isMobileLayout}
           />
         </section>
       </aside>
@@ -300,6 +340,26 @@ export function App() {
       </nav>
     </main>
   );
+}
+
+function useMediaQuery(query: string) {
+  const getMatches = () => typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia(query).matches
+    : false;
+  const [matches, setMatches] = useState(getMatches);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") {
+      return;
+    }
+    const media = window.matchMedia(query);
+    const update = () => setMatches(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, [query]);
+
+  return matches;
 }
 
 export function selectWorldMeta(

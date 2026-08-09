@@ -6,10 +6,31 @@ import type { LandClaim } from "../api";
 interface LandListProps {
   lands: LandClaim[];
   onSelectLand?: (land: LandClaim) => void;
+  query?: string;
+  onQueryChange?: (query: string) => void;
+  showSearch?: boolean;
 }
 
-export function LandList({ lands, onSelectLand }: LandListProps) {
-  const [query, setQuery] = useState("");
+interface LandSearchProps {
+  value: string;
+  onChange: (query: string) => void;
+  className?: string;
+}
+
+export function LandSearch({ value, onChange, className = "" }: LandSearchProps) {
+  return (
+    <label className={`land-search ${className}`.trim()}>
+      <Search size={15} aria-hidden="true" />
+      <span className="visually-hidden">搜索领地</span>
+      <input value={value} onChange={(event) => onChange(event.target.value)} placeholder="搜索领地或主人" />
+    </label>
+  );
+}
+
+export function LandList({ lands, onSelectLand, query: controlledQuery, onQueryChange, showSearch = true }: LandListProps) {
+  const [internalQuery, setInternalQuery] = useState("");
+  const query = controlledQuery ?? internalQuery;
+  const setQuery = onQueryChange ?? setInternalQuery;
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filteredLands = useMemo(() => {
     if (!normalizedQuery) {
@@ -24,11 +45,7 @@ export function LandList({ lands, onSelectLand }: LandListProps) {
 
   return (
     <div className="land-list-panel">
-      <label className="land-search">
-        <Search size={15} aria-hidden="true" />
-        <span className="visually-hidden">搜索领地</span>
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索领地或主人" />
-      </label>
+      {showSearch ? <LandSearch value={query} onChange={setQuery} /> : null}
       {filteredLands.length === 0 ? (
         <p className="empty-state">没有匹配的公开传送领地</p>
       ) : (

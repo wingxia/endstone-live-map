@@ -387,7 +387,7 @@ test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
 
 test("keeps the map primary and makes mobile panels and locations easy to reach", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await mockLiveMap(page);
+  await mockLiveMap(page, { landCount: 14 });
   await page.goto("/");
 
   const mapCanvas = page.getByTestId("map-canvas");
@@ -418,23 +418,49 @@ test("keeps the map primary and makes mobile panels and locations easy to reach"
     })),
   ).toEqual({ horizontalOverflow: false, verticalOverflow: false });
 
+  for (const height of [700, 844]) {
+    await page.setViewportSize({ width: 390, height });
+    await expect.poll(async () => {
+      const bounds = await navigation.boundingBox();
+      return bounds ? Math.abs(bounds.y + bounds.height - height) : Number.POSITIVE_INFINITY;
+    }).toBeLessThanOrEqual(1);
+  }
+
   await page.evaluate(() => {
     const map = (window as unknown as {
       __endstoneLiveMapLeaflet?: { setView?: (center: [number, number], zoom: number, options?: { animate?: boolean }) => void };
     }).__endstoneLiveMapLeaflet;
     map?.setView?.([32, 32], 4, { animate: false });
   });
-  await page.getByRole("button", { name: "公开领地，1 个" }).click();
+  await page.getByRole("button", { name: "公开领地，14 个" }).click();
   await expect(page.getByTestId("mobile-panel")).toBeVisible();
-  await expect(page.getByPlaceholder("搜索领地或主人")).toBeVisible();
-  await page.getByTestId("mobile-panel").evaluate((panel) => {
-    panel.scrollTop = panel.scrollHeight;
-  });
+  const landSearch = page.locator(".mobile-land-search");
+  const landTitle = page.locator(".mobile-panel-copy strong");
+  const landMeta = page.locator(".mobile-panel-copy span");
+  await expect(landSearch).toBeVisible();
+  await expect(page.locator(".mobile-land-panel-heading")).toHaveAttribute("data-land-search-position", "stacked");
+  const stackedSearch = await landSearch.boundingBox();
+  const stackedTitle = await landTitle.boundingBox();
+  const stackedMeta = await landMeta.boundingBox();
+  expect(stackedSearch).not.toBeNull();
+  expect(stackedTitle).not.toBeNull();
+  expect(stackedMeta).not.toBeNull();
+  expect(stackedSearch!.y).toBeGreaterThan(stackedTitle!.y + stackedTitle!.height);
+  expect(stackedSearch!.y).toBeGreaterThan(stackedMeta!.y + stackedMeta!.height);
+  await page.getByTestId("mobile-panel").hover();
+  await page.mouse.wheel(0, 420);
+  await expect(page.locator(".mobile-land-panel-heading")).toHaveAttribute("data-land-search-position", "inline");
+  const inlineSearch = await landSearch.boundingBox();
+  const inlineTitle = await landTitle.boundingBox();
+  expect(inlineSearch).not.toBeNull();
+  expect(inlineTitle).not.toBeNull();
+  expect(inlineSearch!.x).toBeGreaterThan(inlineTitle!.x + inlineTitle!.width);
+  expect(Math.abs(inlineSearch!.y - inlineTitle!.y)).toBeLessThanOrEqual(12);
   await expect(page.getByRole("button", { name: "关闭信息面板" })).toBeVisible();
-  await mapCanvas.click({ position: { x: 200, y: 300 } });
+  await mapCanvas.click({ position: { x: 200, y: 150 } });
   await expect(page.getByTestId("mobile-panel")).toBeHidden();
 
-  await page.getByRole("button", { name: "公开领地，1 个" }).click();
+  await page.getByRole("button", { name: "公开领地，14 个" }).click();
   await page.getByRole("button", { name: /主城区/ }).click();
   await expect(page.getByTestId("mobile-panel")).toBeHidden();
   await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat - 16))).toBeLessThan(MAP_CENTER_TOLERANCE);
@@ -467,6 +493,7 @@ async function mockLiveMap(
     holdWorlds?: boolean;
     tileDelayMs?: number;
     birthplace?: { x: number; y: number; z: number };
+    landCount?: number;
   } = {},
 ) {
   const includePlayers = options.players !== false;
@@ -532,28 +559,28 @@ async function mockLiveMap(
         world: worldName,
         dimension: "Overworld",
         updatedAt: 10,
-        claims: [
+        claims: Array.from({ length: options.landCount ?? 1 }, (_, index) => (
           {
-            id: "spawn",
+            id: index === 0 ? "spawn" : `public-${index}`,
             owner: "GieZi8670",
-            name: "主城区",
+            name: index === 0 ? "主城区" : `公开领地${index}`,
             world: worldName,
             dimension: "Overworld",
-            minX: -32,
-            maxX: 48,
+            minX: -32 + index * 96,
+            maxX: 48 + index * 96,
             minY: 60,
             maxY: 160,
-            minZ: -64,
-            maxZ: 32,
-            teleport: options.birthplace ?? { x: 8, y: 72, z: -16 },
+            minZ: -64 + index * 96,
+            maxZ: 32 + index * 96,
+            teleport: index === 0 ? (options.birthplace ?? { x: 8, y: 72, z: -16 }) : { x: index * 96, y: 72, z: index * 96 },
             members: [],
             parent: "",
             children: [],
             nested: false,
             publicTeleport: true,
             updatedAt: 10,
-          },
-        ],
+          }
+        )),
       }),
     });
   });

@@ -17,6 +17,7 @@ add_library(livemap_core
     src/chunk.cpp
     src/land.cpp
     src/map_blocks.cpp
+    src/player_avatar.cpp
     src/png.cpp
     src/protocol.cpp
     src/r2_signing.cpp

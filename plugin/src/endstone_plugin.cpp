@@ -3,6 +3,7 @@
 #include "livemap/chunk.hpp"
 #include "livemap/land.hpp"
 #include "livemap/map_blocks.hpp"
+#include "livemap/player_avatar.hpp"
 #include "livemap/png.hpp"
 #include "livemap/protocol.hpp"
 #include "livemap/r2_client.hpp"
@@ -166,27 +167,21 @@ livemap::BlockStateMap blockStatesForBlock(const endstone::Block &block)
     return blockStateMapFromEndstone(data->getBlockStates());
 }
 
-std::optional<EncodedAvatar> encodePlayerAvatar(const endstone::Player &player)
+std::optional<EncodedAvatar> encodePlayerAvatar(const endstone::Skin &skin)
 {
     try {
-        const auto skin = player.getSkin();
         const auto &skin_image = skin.getImage();
-        if (skin_image.getWidth() < 64 || skin_image.getWidth() % 64 != 0 ||
-            skin_image.getHeight() < skin_image.getWidth() / 2) {
+        if (!livemap::hasClassicSkinLayout(skin_image.getWidth(), skin_image.getHeight())) {
             return std::nullopt;
         }
         auto skin_rgba = livemap::makeRgbaImage(skin_image.getWidth(), skin_image.getHeight());
-        for (int y = 0; y < skin_rgba.height; ++y) {
-            for (int x = 0; x < skin_rgba.width; ++x) {
-                const auto color = skin_image.getColor(x, y);
-                const auto offset = (static_cast<std::size_t>(y) * static_cast<std::size_t>(skin_rgba.width) +
-                                     static_cast<std::size_t>(x)) * 4;
-                skin_rgba.pixels[offset] = static_cast<std::uint8_t>(color.getRed());
-                skin_rgba.pixels[offset + 1] = static_cast<std::uint8_t>(color.getGreen());
-                skin_rgba.pixels[offset + 2] = static_cast<std::uint8_t>(color.getBlue());
-                skin_rgba.pixels[offset + 3] = static_cast<std::uint8_t>(color.getAlpha());
-            }
+        const auto pixels = skin_image.getData();
+        if (pixels.size() != skin_rgba.pixels.size()) {
+            return std::nullopt;
         }
+        std::transform(pixels.begin(), pixels.end(), skin_rgba.pixels.begin(), [](char value) {
+            return static_cast<std::uint8_t>(static_cast<unsigned char>(value));
+        });
         const auto avatar = livemap::renderSkinAvatar(skin_rgba);
         const auto png = livemap::encodePngRgba(avatar);
         return EncodedAvatar{livemap::hexLower(livemap::sha256(png)),
@@ -195,6 +190,22 @@ std::optional<EncodedAvatar> encodePlayerAvatar(const endstone::Player &player)
     catch (...) {
         return std::nullopt;
     }
+}
+
+std::string profileAvatarKey(const endstone::Skin &skin)
+{
+    const auto &image = skin.getImage();
+    const auto pixels = image.getData();
+    std::string source;
+    source.reserve(skin.getId().size() + pixels.size() + 32);
+    source.append(skin.getId());
+    source.push_back('\0');
+    source.append(std::to_string(image.getWidth()));
+    source.push_back('x');
+    source.append(std::to_string(image.getHeight()));
+    source.push_back('\0');
+    source.append(pixels);
+    return livemap::hexLower(livemap::sha256(source));
 }
 
 struct UploadJob {
@@ -1269,7 +1280,24 @@ private:
             auto &dimension = location.getDimension();
             const auto player_id = player->getUniqueId().str();
             online_player_ids.insert(player_id);
-            auto avatar = encodePlayerAvatar(*player);
+            std::optional<EncodedAvatar> avatar;
+            std::string avatar_profile_key;
+            try {
+                const auto skin = player->getSkin();
+                const auto &skin_image = skin.getImage();
+                if (livemap::shouldFetchProfileAvatar(skin.getId(), skin_image.getWidth(), skin_image.getHeight())) {
+                    avatar_profile_key = profileAvatarKey(skin);
+                }
+                else {
+                    avatar = encodePlayerAvatar(skin);
+                    if (!avatar.has_value()) {
+                        avatar_profile_key = profileAvatarKey(skin);
+                    }
+                }
+            }
+            catch (...) {
+                avatar.reset();
+            }
             std::string avatar_hash;
             std::string avatar_png_base64;
             if (avatar.has_value()) {
@@ -1286,6 +1314,10 @@ private:
                     player_avatar_acks.push_back({player_id, avatar_hash});
                 }
             }
+            else if (!avatar_profile_key.empty()) {
+                std::scoped_lock lock(state_mutex_);
+                acknowledged_player_avatar_hashes_.erase(player_id);
+            }
             players.push_back({
                 player_id,
                 player->getName(),
@@ -1299,6 +1331,7 @@ private:
                 location.getPitch(),
                 std::move(avatar_hash),
                 std::move(avatar_png_base64),
+                std::move(avatar_profile_key),
                 nowMs(),
             });
         }

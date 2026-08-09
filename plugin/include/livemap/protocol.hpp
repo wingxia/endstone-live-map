@@ -19,6 +19,7 @@ struct PlayerState {
     double pitch{};
     std::string avatar_hash;
     std::string avatar_png_base64;
+    std::string avatar_profile_key;
     std::int64_t updated_at_ms{};
 };
 

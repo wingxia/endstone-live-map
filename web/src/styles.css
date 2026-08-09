@@ -758,7 +758,8 @@ h2 svg {
   body,
   #root {
     width: 100%;
-    height: 100%;
+    height: var(--app-viewport-height, 100dvh);
+    min-height: 0;
     overflow: hidden;
   }
 
@@ -767,11 +768,14 @@ h2 svg {
   }
 
   .app-shell {
+    position: fixed;
+    top: 0;
+    right: 0;
+    left: 0;
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) var(--mobile-navigation-height);
     width: 100%;
-    height: 100vh;
-    height: 100dvh;
+    height: var(--app-viewport-height, 100dvh);
     min-height: 0;
     overflow: hidden;
   }
@@ -858,7 +862,7 @@ h2 svg {
     left: 8px;
     z-index: 1100;
     gap: 12px;
-    max-height: min(58dvh, 520px);
+    max-height: var(--mobile-panel-max-height, min(58dvh, 520px));
     overflow: auto;
     overscroll-behavior: contain;
     padding: 10px 12px 12px;
@@ -888,36 +892,37 @@ h2 svg {
     position: sticky;
     top: -10px;
     z-index: 2;
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 40px;
     align-items: center;
-    justify-content: space-between;
     gap: 12px;
     min-height: 40px;
     padding: 10px 2px 8px;
     background: rgba(17, 26, 34, 0.98);
   }
 
-  .mobile-panel-heading > div {
+  .mobile-panel-copy {
     display: grid;
     gap: 2px;
     min-width: 0;
   }
 
   .mobile-panel-heading strong {
+    justify-self: start;
     color: var(--text);
     font-size: 14px;
     line-height: 1.2;
   }
 
   .mobile-panel-heading span {
+    justify-self: start;
     color: var(--text-muted);
     font-size: 11px;
     line-height: 1.2;
   }
 
-  .mobile-panel-heading button {
+  .mobile-panel-close {
     display: grid;
-    flex: 0 0 40px;
     place-items: center;
     width: 40px;
     height: 40px;
@@ -927,6 +932,46 @@ h2 svg {
     background: rgba(255, 255, 255, 0.035);
     color: var(--text-muted);
     cursor: pointer;
+  }
+
+  .mobile-land-panel-heading {
+    --land-search-progress: 0;
+    --land-search-collapse: 0px;
+    --land-search-rise: 0px;
+    --land-search-right-shift: 0px;
+    --land-search-left-shift: 0px;
+    --land-search-height-loss: 0px;
+    --land-search-meta-rise: 0px;
+    align-items: start;
+    min-height: calc(108px - var(--land-search-collapse));
+    transition: min-height 80ms linear;
+  }
+
+  .mobile-land-panel-heading .mobile-panel-copy span {
+    opacity: calc(1 - var(--land-search-progress));
+    transform: translateY(calc(0px - var(--land-search-meta-rise)));
+    transition:
+      opacity 80ms linear,
+      transform 80ms linear;
+  }
+
+  .mobile-panel-heading .mobile-land-search {
+    position: absolute;
+    top: calc(58px - var(--land-search-rise));
+    right: calc(2px + var(--land-search-right-shift));
+    left: calc(2px + var(--land-search-left-shift));
+    z-index: 1;
+    width: auto;
+    height: calc(44px - var(--land-search-height-loss));
+    min-height: 0;
+    transition:
+      top 80ms linear,
+      right 80ms linear,
+      left 80ms linear,
+      height 80ms linear,
+      background-color 180ms ease,
+      border-color 180ms ease,
+      box-shadow 180ms ease;
   }
 
   .side-panel .panel-header,
@@ -1039,7 +1084,7 @@ h2 svg {
 
 @media (max-width: 900px) and (orientation: landscape), (max-height: 520px) and (max-width: 1100px) {
   .side-panel {
-    max-height: calc(100dvh - var(--mobile-navigation-height) - 16px);
+    max-height: calc(var(--app-viewport-height, 100dvh) - var(--mobile-navigation-height) - 16px);
   }
 
   .map-hud {

@@ -24,6 +24,10 @@ const DEFAULT_STATIC_CACHE_MAX_BYTES = 16 * 1024 * 1024;
 const DEFAULT_STATIC_CACHE_MAX_ENTRIES = 128;
 const DEFAULT_MAX_JSON_BODY_BYTES = 8 * 1024 * 1024;
 const DEFAULT_WEBSOCKET_MAX_BUFFERED_BYTES = 1024 * 1024;
+const DEFAULT_PROFILE_AVATAR_TIMEOUT_MS = 5_000;
+const DEFAULT_PROFILE_AVATAR_RETRY_MS = 30_000;
+const MAX_AVATAR_PNG_BYTES = 128 * 1024;
+const PROFILE_AVATAR_ENDPOINT = "https://persona-secondary.franchise.minecraft-services.net/api/v1.0/profile/xuid";
 const MIN_STATIC_COMPRESSION_BYTES = 1_024;
 const WEB_BOOTSTRAP_PLACEHOLDER = "__ENDSTONE_LIVE_MAP_BOOTSTRAP__";
 const brotliCompressAsync = promisify(brotliCompress);
@@ -41,6 +45,16 @@ export function createLiveMapServer(options = {}) {
   const state = {
     players: [],
     playersReceivedAt: 0,
+    profileAvatarFetch: options.profileAvatarFetch ?? globalThis.fetch.bind(globalThis),
+    profileAvatarFailures: new Map(),
+    profileAvatarTimeoutMs: Math.max(
+      1_000,
+      numberOr(options.profileAvatarTimeoutMs, DEFAULT_PROFILE_AVATAR_TIMEOUT_MS),
+    ),
+    profileAvatarRetryMs: Math.max(
+      1_000,
+      numberOr(options.profileAvatarRetryMs, DEFAULT_PROFILE_AVATAR_RETRY_MS),
+    ),
     playerStaleAfterMs: Math.max(
       1_000,
       numberOr(options.playerStaleAfterMs ?? process.env.LIVE_MAP_PLAYER_STALE_AFTER_MS, DEFAULT_PLAYER_STALE_AFTER_MS),
@@ -193,7 +207,7 @@ export async function handleRequest(state, request, response) {
       return;
     }
     const body = await readJsonBody(request, state.maxJsonBodyBytes);
-    state.players = await normalizePlayers(state.dataDir, Array.isArray(body.players) ? body.players : []);
+    state.players = await normalizePlayers(state, Array.isArray(body.players) ? body.players : []);
     state.playersReceivedAt = Date.now();
     broadcast(state, JSON.stringify({ type: "player_snapshot", players: state.players }));
     json(response, 200, { ok: true, players: state.players.length });
@@ -305,11 +319,10 @@ export function playerAvatarUrl(player) {
   return `/api/players/${encodeURIComponent(String(player.id))}/avatar.png?${params.toString()}`;
 }
 
-async function normalizePlayers(dataDir, players) {
-  const normalized = [];
-  for (const rawPlayer of players) {
+async function normalizePlayers(state, players) {
+  const normalized = await Promise.all(players.map(async (rawPlayer) => {
     if (!rawPlayer || typeof rawPlayer !== "object") {
-      continue;
+      return null;
     }
     const player = {
       id: String(rawPlayer.id || rawPlayer.name || "player"),
@@ -328,11 +341,23 @@ async function normalizePlayers(dataDir, players) {
     if (avatarHash) {
       player.avatarHash = avatarHash;
       player.avatarUrl = playerAvatarUrl(player);
-      await maybeWriteAvatar(dataDir, player.id, avatarHash, rawPlayer.avatarPngBase64);
+      await maybeWriteAvatar(state.dataDir, player.id, avatarHash, rawPlayer.avatarPngBase64);
+      await fs.rm(profileAvatarKeyFile(state.dataDir, player.id), { force: true });
+    } else {
+      const avatarProfileKey = validHash(rawPlayer.avatarProfileKey)
+        ? String(rawPlayer.avatarProfileKey).toLowerCase()
+        : "";
+      if (avatarProfileKey && validXuid(player.xuid)) {
+        const profileHash = await resolveProfileAvatar(state, player, avatarProfileKey);
+        if (profileHash) {
+          player.avatarHash = profileHash;
+          player.avatarUrl = playerAvatarUrl(player);
+        }
+      }
     }
-    normalized.push(player);
-  }
-  return normalized;
+    return player;
+  }));
+  return normalized.filter(Boolean);
 }
 
 function numberOr(value, fallback) {
@@ -349,12 +374,82 @@ function validHash(value) {
   return /^[a-fA-F0-9]{16,128}$/.test(String(value || ""));
 }
 
+function validXuid(value) {
+  return /^\d{1,24}$/.test(String(value || ""));
+}
+
+async function resolveProfileAvatar(state, player, avatarProfileKey) {
+  const keyFile = profileAvatarKeyFile(state.dataDir, player.id);
+  try {
+    const [savedKey, savedHash] = await Promise.all([
+      fs.readFile(keyFile, "utf8"),
+      existingAvatarHash(state.dataDir, player.id),
+    ]);
+    if (savedKey.trim() === avatarProfileKey && savedHash) {
+      return savedHash;
+    }
+  } catch {
+    // Missing or stale profile metadata is refreshed below.
+  }
+
+  const failure = state.profileAvatarFailures.get(player.id);
+  if (failure?.key === avatarProfileKey && failure.retryAt > Date.now()) {
+    return failure.avatarHash;
+  }
+
+  try {
+    const url = `${PROFILE_AVATAR_ENDPOINT}/${encodeURIComponent(player.xuid)}/image/head`;
+    const response = await state.profileAvatarFetch(url, {
+      headers: { Accept: "image/png" },
+      redirect: "follow",
+      signal: AbortSignal.timeout(state.profileAvatarTimeoutMs),
+    });
+    if (!response?.ok) {
+      throw new Error(`profile avatar request failed with status ${response?.status ?? "unknown"}`);
+    }
+    const contentLength = Number(response.headers?.get?.("content-length") || 0);
+    if (contentLength > MAX_AVATAR_PNG_BYTES) {
+      throw new Error("profile avatar response is too large");
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (!isPng(bytes) || bytes.length > MAX_AVATAR_PNG_BYTES) {
+      throw new Error("profile avatar response is not a supported PNG");
+    }
+    const avatarHash = createHash("sha256").update(bytes).digest("hex");
+    await maybeWriteAvatar(state.dataDir, player.id, avatarHash, bytes.toString("base64"));
+    await writeFileAtomic(keyFile, `${avatarProfileKey}\n`);
+    state.profileAvatarFailures.delete(player.id);
+    return avatarHash;
+  } catch {
+    const avatarHash = await existingAvatarHash(state.dataDir, player.id);
+    state.profileAvatarFailures.set(player.id, {
+      key: avatarProfileKey,
+      retryAt: Date.now() + state.profileAvatarRetryMs,
+      avatarHash,
+    });
+    return avatarHash;
+  }
+}
+
+async function existingAvatarHash(dataDir, playerId) {
+  try {
+    const hash = (await fs.readFile(`${avatarFile(dataDir, playerId)}.sha256`, "utf8")).trim().toLowerCase();
+    if (!validHash(hash)) {
+      return "";
+    }
+    await fs.access(avatarFile(dataDir, playerId));
+    return hash;
+  } catch {
+    return "";
+  }
+}
+
 async function maybeWriteAvatar(dataDir, playerId, avatarHash, avatarPngBase64) {
   if (!avatarPngBase64 || typeof avatarPngBase64 !== "string") {
     return;
   }
   const bytes = Buffer.from(avatarPngBase64, "base64");
-  if (!isPng(bytes) || bytes.length > 128 * 1024) {
+  if (!isPng(bytes) || bytes.length > MAX_AVATAR_PNG_BYTES) {
     return;
   }
   const digest = createHash("sha256").update(bytes).digest("hex");
@@ -397,6 +492,10 @@ async function servePlayerAvatar(state, pathname, response) {
 
 function avatarFile(dataDir, playerId) {
   return path.join(dataDir, "avatars", `${cleanSegment(playerId)}.png`);
+}
+
+function profileAvatarKeyFile(dataDir, playerId) {
+  return `${avatarFile(dataDir, playerId)}.profile-key`;
 }
 
 async function readWorlds(serverState) {

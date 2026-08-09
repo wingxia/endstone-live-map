@@ -65,6 +65,9 @@ std::string serializePlayerSnapshot(const std::vector<PlayerState> &players)
         if (!p.avatar_png_base64.empty()) {
             out << ",\"avatarPngBase64\":\"" << jsonEscape(p.avatar_png_base64) << '"';
         }
+        if (!p.avatar_profile_key.empty()) {
+            out << ",\"avatarProfileKey\":\"" << jsonEscape(p.avatar_profile_key) << '"';
+        }
         out << ",\"updatedAt\":" << p.updated_at_ms << '}';
     }
     out << "]}";
