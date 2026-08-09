@@ -885,12 +885,16 @@ h2 svg {
   }
 
   .mobile-panel-heading {
+    position: sticky;
+    top: -10px;
+    z-index: 2;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
     min-height: 40px;
-    padding-left: 2px;
+    padding: 10px 2px 8px;
+    background: rgba(17, 26, 34, 0.98);
   }
 
   .mobile-panel-heading > div {
@@ -968,7 +972,7 @@ h2 svg {
     z-index: 1200;
     display: grid;
     grid-row: 2;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 2px;
     height: var(--mobile-navigation-height);
     padding: 5px max(6px, env(safe-area-inset-right)) calc(5px + env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));

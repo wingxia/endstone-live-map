@@ -2,7 +2,6 @@ import {
   Flame,
   LandPlot,
   LocateFixed,
-  Map as MapIcon,
   Orbit,
   RadioTower,
   TreePine,
@@ -161,7 +160,7 @@ export function App() {
 
   return (
     <main className="app-shell">
-      <section className="map-surface" aria-label="服务器地图">
+      <section className="map-surface" aria-label="服务器地图" onPointerDownCapture={() => setMobilePanel(null)}>
         <MapCanvas
           world={selectedWorld}
           dimension={selectedDimension}
@@ -263,16 +262,6 @@ export function App() {
       </aside>
 
       <nav className="mobile-navigation" aria-label="移动端地图导航" data-testid="mobile-navigation">
-        <button
-          type="button"
-          className={mobilePanel === null ? "active" : ""}
-          aria-current={mobilePanel === null ? "page" : undefined}
-          aria-label="查看地图"
-          onClick={() => setMobilePanel(null)}
-        >
-          <MapIcon size={20} aria-hidden="true" />
-          <span>地图</span>
-        </button>
         <button
           type="button"
           className={mobilePanel === "dimensions" ? "active" : ""}

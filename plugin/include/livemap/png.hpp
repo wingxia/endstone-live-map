@@ -14,6 +14,7 @@ struct RgbaImage {
 };
 
 [[nodiscard]] RgbaImage makeRgbaImage(int width, int height);
+[[nodiscard]] RgbaImage renderSkinAvatar(const RgbaImage &skin, int avatar_size = 32);
 [[nodiscard]] std::vector<std::uint8_t> encodePngRgba(const RgbaImage &image);
 bool writePngRgba(const std::filesystem::path &path, const RgbaImage &image, std::string *error = nullptr);
 bool writeRawRgba(const std::filesystem::path &path, const RgbaImage &image, std::string *error = nullptr);

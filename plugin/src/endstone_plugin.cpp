@@ -171,45 +171,23 @@ std::optional<EncodedAvatar> encodePlayerAvatar(const endstone::Player &player)
     try {
         const auto skin = player.getSkin();
         const auto &skin_image = skin.getImage();
-        if (skin_image.getWidth() < 16 || skin_image.getHeight() < 16) {
+        if (skin_image.getWidth() < 64 || skin_image.getWidth() % 64 != 0 ||
+            skin_image.getHeight() < skin_image.getWidth() / 2) {
             return std::nullopt;
         }
-
-        constexpr int kHeadSourceX = 8;
-        constexpr int kHeadSourceY = 8;
-        constexpr int kHatSourceX = 40;
-        constexpr int kHatSourceY = 8;
-        constexpr int kFaceSize = 8;
-        constexpr int kAvatarSize = 32;
-        constexpr int kScale = kAvatarSize / kFaceSize;
-
-        auto avatar = livemap::makeRgbaImage(kAvatarSize, kAvatarSize);
-        for (int y = 0; y < kAvatarSize; ++y) {
-            for (int x = 0; x < kAvatarSize; ++x) {
-                const int source_x = kHeadSourceX + x / kScale;
-                const int source_y = kHeadSourceY + y / kScale;
-                auto color = skin_image.getColor(source_x, source_y);
-
-                const bool has_hat_layer = skin_image.getWidth() >= kHatSourceX + kFaceSize &&
-                                           skin_image.getHeight() >= kHatSourceY + kFaceSize;
-                if (has_hat_layer) {
-                    const auto hat = skin_image.getColor(kHatSourceX + x / kScale, kHatSourceY + y / kScale);
-                    const auto alpha = hat.getAlpha();
-                    if (alpha > 0) {
-                        color = hat;
-                    }
-                }
-
-                const auto offset = (static_cast<std::size_t>(y) * static_cast<std::size_t>(kAvatarSize) +
-                                     static_cast<std::size_t>(x)) *
-                                    4;
-                avatar.pixels[offset] = static_cast<std::uint8_t>(color.getRed());
-                avatar.pixels[offset + 1] = static_cast<std::uint8_t>(color.getGreen());
-                avatar.pixels[offset + 2] = static_cast<std::uint8_t>(color.getBlue());
-                avatar.pixels[offset + 3] = static_cast<std::uint8_t>(color.getAlpha());
+        auto skin_rgba = livemap::makeRgbaImage(skin_image.getWidth(), skin_image.getHeight());
+        for (int y = 0; y < skin_rgba.height; ++y) {
+            for (int x = 0; x < skin_rgba.width; ++x) {
+                const auto color = skin_image.getColor(x, y);
+                const auto offset = (static_cast<std::size_t>(y) * static_cast<std::size_t>(skin_rgba.width) +
+                                     static_cast<std::size_t>(x)) * 4;
+                skin_rgba.pixels[offset] = static_cast<std::uint8_t>(color.getRed());
+                skin_rgba.pixels[offset + 1] = static_cast<std::uint8_t>(color.getGreen());
+                skin_rgba.pixels[offset + 2] = static_cast<std::uint8_t>(color.getBlue());
+                skin_rgba.pixels[offset + 3] = static_cast<std::uint8_t>(color.getAlpha());
             }
         }
-
+        const auto avatar = livemap::renderSkinAvatar(skin_rgba);
         const auto png = livemap::encodePngRgba(avatar);
         return EncodedAvatar{livemap::hexLower(livemap::sha256(png)),
                              livemap::base64Encode(std::span<const std::uint8_t>(png.data(), png.size()))};

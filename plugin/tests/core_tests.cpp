@@ -415,6 +415,40 @@ void testPngEncoding()
     assert(compressed_detail.size() < detailed_tile.pixels.size());
 }
 
+void testSkinAvatarRendering()
+{
+    for (const int texture_scale : {1, 2, 4}) {
+        auto skin = livemap::makeRgbaImage(64 * texture_scale, 64 * texture_scale);
+        for (int y = 8 * texture_scale; y < 16 * texture_scale; ++y) {
+            for (int x = 8 * texture_scale; x < 16 * texture_scale; ++x) {
+                const auto offset = (static_cast<std::size_t>(y) * skin.width + x) * 4;
+                skin.pixels[offset] = 20;
+                skin.pixels[offset + 1] = 40;
+                skin.pixels[offset + 2] = 60;
+                skin.pixels[offset + 3] = 255;
+            }
+        }
+        const auto hat = (static_cast<std::size_t>(8 * texture_scale) * skin.width + 40 * texture_scale) * 4;
+        skin.pixels[hat] = 220;
+        skin.pixels[hat + 1] = 40;
+        skin.pixels[hat + 2] = 60;
+        skin.pixels[hat + 3] = 128;
+
+        const auto avatar = livemap::renderSkinAvatar(skin);
+        assert(avatar.width == 32 && avatar.height == 32);
+        assert(avatar.pixels[0] >= 119 && avatar.pixels[0] <= 121);
+        assert(avatar.pixels[1] == 40);
+        assert(avatar.pixels[2] == 60);
+        assert(avatar.pixels[3] == 255);
+        const auto untouched = (static_cast<std::size_t>(31) * 32 + 31) * 4;
+        assert(avatar.pixels[untouched] == 20);
+        assert(avatar.pixels[untouched + 3] == 255);
+    }
+
+    auto legacy_skin = livemap::makeRgbaImage(64, 32);
+    assert(livemap::renderSkinAvatar(legacy_skin).width == 32);
+}
+
 void testSha256AndHmac()
 {
     assert(livemap::hexLower(livemap::sha256("abc")) ==
@@ -1002,6 +1036,7 @@ int main()
     testProtocol();
     testBase64();
     testPngEncoding();
+    testSkinAvatarRendering();
     testSha256AndHmac();
     testR2SigningAndRateLimit();
     testChunkSnapshotFingerprint();

@@ -176,6 +176,58 @@ RgbaImage makeRgbaImage(int width, int height)
     return image;
 }
 
+RgbaImage renderSkinAvatar(const RgbaImage &skin, int avatar_size)
+{
+    if (skin.width < 64 || skin.width % 64 != 0 || skin.height < skin.width / 2 || avatar_size <= 0 ||
+        skin.pixels.size() != static_cast<std::size_t>(skin.width) * static_cast<std::size_t>(skin.height) * 4) {
+        throw std::invalid_argument("unsupported minecraft skin image");
+    }
+
+    const int texture_scale = skin.width / 64;
+    const int face_x = 8 * texture_scale;
+    const int face_y = 8 * texture_scale;
+    const int hat_x = 40 * texture_scale;
+    const int face_size = 8 * texture_scale;
+    const bool has_hat_layer = skin.width >= hat_x + face_size && skin.height >= face_y + face_size;
+    auto avatar = makeRgbaImage(avatar_size, avatar_size);
+
+    const auto pixel = [&skin](int x, int y) {
+        return (static_cast<std::size_t>(y) * static_cast<std::size_t>(skin.width) + static_cast<std::size_t>(x)) * 4;
+    };
+    for (int y = 0; y < avatar_size; ++y) {
+        for (int x = 0; x < avatar_size; ++x) {
+            const int source_x = face_x + x * face_size / avatar_size;
+            const int source_y = face_y + y * face_size / avatar_size;
+            const auto base = pixel(source_x, source_y);
+            const auto target = (static_cast<std::size_t>(y) * static_cast<std::size_t>(avatar_size) +
+                                 static_cast<std::size_t>(x)) * 4;
+            for (std::size_t channel = 0; channel < 4; ++channel) {
+                avatar.pixels[target + channel] = skin.pixels[base + channel];
+            }
+
+            if (!has_hat_layer) {
+                continue;
+            }
+            const auto overlay = pixel(hat_x + x * face_size / avatar_size, source_y);
+            const auto overlay_alpha = static_cast<unsigned int>(skin.pixels[overlay + 3]);
+            if (overlay_alpha == 0) {
+                continue;
+            }
+            const auto base_alpha = static_cast<unsigned int>(avatar.pixels[target + 3]);
+            const auto out_alpha = overlay_alpha + (base_alpha * (255U - overlay_alpha) + 127U) / 255U;
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                const auto overlay_premultiplied = static_cast<unsigned int>(skin.pixels[overlay + channel]) * overlay_alpha;
+                const auto base_premultiplied = static_cast<unsigned int>(avatar.pixels[target + channel]) * base_alpha;
+                const auto numerator = overlay_premultiplied +
+                    (base_premultiplied * (255U - overlay_alpha) + 127U) / 255U;
+                avatar.pixels[target + channel] = out_alpha == 0 ? 0 : static_cast<std::uint8_t>((numerator + out_alpha / 2U) / out_alpha);
+            }
+            avatar.pixels[target + 3] = static_cast<std::uint8_t>(out_alpha);
+        }
+    }
+    return avatar;
+}
+
 std::vector<std::uint8_t> encodePngRgba(const RgbaImage &image)
 {
     if (image.width <= 0 || image.height <= 0 ||

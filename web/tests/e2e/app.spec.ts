@@ -394,6 +394,8 @@ test("keeps the map primary and makes mobile panels and locations easy to reach"
   const navigation = page.getByTestId("mobile-navigation");
   await expect(mapCanvas).toBeVisible();
   await expect(navigation).toBeVisible();
+  await expect(navigation.locator("button")).toHaveCount(3);
+  await expect(navigation.getByText("地图", { exact: true })).toHaveCount(0);
 
   const mapBounds = await mapCanvas.boundingBox();
   const navigationBounds = await navigation.boundingBox();
@@ -425,6 +427,14 @@ test("keeps the map primary and makes mobile panels and locations easy to reach"
   await page.getByRole("button", { name: "公开领地，1 个" }).click();
   await expect(page.getByTestId("mobile-panel")).toBeVisible();
   await expect(page.getByPlaceholder("搜索领地或主人")).toBeVisible();
+  await page.getByTestId("mobile-panel").evaluate((panel) => {
+    panel.scrollTop = panel.scrollHeight;
+  });
+  await expect(page.getByRole("button", { name: "关闭信息面板" })).toBeVisible();
+  await mapCanvas.click({ position: { x: 200, y: 300 } });
+  await expect(page.getByTestId("mobile-panel")).toBeHidden();
+
+  await page.getByRole("button", { name: "公开领地，1 个" }).click();
   await page.getByRole("button", { name: /主城区/ }).click();
   await expect(page.getByTestId("mobile-panel")).toBeHidden();
   await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat - 16))).toBeLessThan(MAP_CENTER_TOLERANCE);
