@@ -4,9 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish or rebuild
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   release:
@@ -17,6 +26,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: actions/setup-node@v5
         with:
@@ -28,8 +38,8 @@ jobs:
         run: |
           set -euo pipefail
           expected_tag="v$(node -p "require('./package.json').version")"
-          test "$GITHUB_REF_NAME" = "$expected_tag"
-          test -f ".github/release-notes/$GITHUB_REF_NAME.md"
+          test "$RELEASE_TAG" = "$expected_tag"
+          test -f ".github/release-notes/$RELEASE_TAG.md"
 
       - name: Build web app and services
         run: |
@@ -68,10 +78,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bundle_name="endstone-live-map-$GITHUB_REF_NAME-linux-x86_64"
+          bundle_name="endstone-live-map-$RELEASE_TAG-linux-x86_64"
           bundle_root="$RUNNER_TEMP/$bundle_name"
           asset_dir="$RUNNER_TEMP/release-assets"
-          plugin_path="$(find plugin/build-endstone -type f -name 'endstone_live_map.so' -print -quit)"
+          plugin_path="$(find plugin/build-endstone -maxdepth 1 -type f -name '*endstone_live_map.so' -print -quit)"
           test -n "$plugin_path"
 
           mkdir -p "$asset_dir" "$bundle_root/plugin" "$bundle_root/server" "$bundle_root/web" "$bundle_root/scripts"
@@ -83,7 +93,7 @@ jobs:
           cp server/package.json "$bundle_root/server/package.json"
           cp -R web/dist "$bundle_root/web/dist"
           cp README.md CHANGELOG.md LICENSE package.json "$bundle_root/"
-          printf '%s\n' "$GITHUB_REF_NAME" > "$bundle_root/VERSION"
+          printf '%s\n' "$RELEASE_TAG" > "$bundle_root/VERSION"
 
           tar -C "$RUNNER_TEMP" -czf "$asset_dir/$bundle_name.tar.gz" "$bundle_name"
           (
@@ -94,7 +104,7 @@ jobs:
       - name: Retain release assets
         uses: actions/upload-artifact@v7
         with:
-          name: endstone-live-map-${{ github.ref_name }}-linux-x86_64
+          name: endstone-live-map-${{ env.RELEASE_TAG }}-linux-x86_64
           path: ${{ runner.temp }}/release-assets/*
           if-no-files-found: error
 
@@ -104,13 +114,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          title="Endstone Live Map $GITHUB_REF_NAME"
-          notes_file=".github/release-notes/$GITHUB_REF_NAME.md"
+          title="Endstone Live Map $RELEASE_TAG"
+          notes_file=".github/release-notes/$RELEASE_TAG.md"
           assets=("$RUNNER_TEMP"/release-assets/*)
 
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
-            gh release edit "$GITHUB_REF_NAME" --latest --title "$title" --notes-file "$notes_file" --repo "$GITHUB_REPOSITORY"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$RELEASE_TAG" --latest --title "$title" --notes-file "$notes_file" --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$GITHUB_REF_NAME" "${assets[@]}" --verify-tag --latest --title "$title" --notes-file "$notes_file" --repo "$GITHUB_REPOSITORY"
+            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --latest --title "$title" --notes-file "$notes_file" --repo "$GITHUB_REPOSITORY"
           fi
