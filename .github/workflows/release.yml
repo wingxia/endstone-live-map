@@ -1,0 +1,116 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    if: github.repository == 'wingxia/endstone-live-map'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Validate release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_tag="v$(node -p "require('./package.json').version")"
+          test "$GITHUB_REF_NAME" = "$expected_tag"
+          test -f ".github/release-notes/$GITHUB_REF_NAME.md"
+
+      - name: Build web app and services
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install LLVM 20 and C++ dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl gnupg
+
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /tmp/llvm-snapshot.gpg.key
+          key_fingerprint="$(gpg --show-keys --with-colons /tmp/llvm-snapshot.gpg.key | awk -F: '$1 == "fpr" { print $10; exit }')"
+          test "$key_fingerprint" = "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421"
+          gpg --batch --yes --dearmor --output /tmp/apt.llvm.org.gpg /tmp/llvm-snapshot.gpg.key
+          sudo install -m 0644 /tmp/apt.llvm.org.gpg /usr/share/keyrings/apt.llvm.org.gpg
+          echo "deb [signed-by=/usr/share/keyrings/apt.llvm.org.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" |
+            sudo tee /etc/apt/sources.list.d/apt.llvm.org.list >/dev/null
+
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang-20 libc++-20-dev libc++abi-20-dev libcurl4-openssl-dev zlib1g-dev
+
+      - name: Build Endstone plugin
+        run: |
+          cmake -S plugin -B plugin/build-endstone -GNinja \
+            -DCMAKE_C_COMPILER=clang-20 \
+            -DCMAKE_CXX_COMPILER=clang++-20 \
+            -DCMAKE_CXX_FLAGS=-stdlib=libc++ \
+            -DLIVE_MAP_WITH_ENDSTONE=ON \
+            -DENDSTONE_API_VERSION=0.11.6
+          cmake --build plugin/build-endstone --target endstone_live_map
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_name="endstone-live-map-$GITHUB_REF_NAME-linux-x86_64"
+          bundle_root="$RUNNER_TEMP/$bundle_name"
+          asset_dir="$RUNNER_TEMP/release-assets"
+          plugin_path="$(find plugin/build-endstone -type f -name 'endstone_live_map.so' -print -quit)"
+          test -n "$plugin_path"
+
+          mkdir -p "$asset_dir" "$bundle_root/plugin" "$bundle_root/server" "$bundle_root/web" "$bundle_root/scripts"
+          install -m 0755 "$plugin_path" "$asset_dir/endstone_live_map-linux-x86_64.so"
+          install -m 0755 "$plugin_path" "$bundle_root/plugin/endstone_live_map.so"
+          install -m 0644 plugin/config/live_map.json.example "$bundle_root/plugin/live_map.json.example"
+          install -m 0755 scripts/nas-install.sh "$bundle_root/scripts/nas-install.sh"
+          cp -R server/src "$bundle_root/server/src"
+          cp server/package.json "$bundle_root/server/package.json"
+          cp -R web/dist "$bundle_root/web/dist"
+          cp README.md CHANGELOG.md LICENSE package.json "$bundle_root/"
+          printf '%s\n' "$GITHUB_REF_NAME" > "$bundle_root/VERSION"
+
+          tar -C "$RUNNER_TEMP" -czf "$asset_dir/$bundle_name.tar.gz" "$bundle_name"
+          (
+            cd "$asset_dir"
+            sha256sum endstone_live_map-linux-x86_64.so "$bundle_name.tar.gz" > SHA256SUMS.txt
+          )
+
+      - name: Retain release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: endstone-live-map-${{ github.ref_name }}-linux-x86_64
+          path: ${{ runner.temp }}/release-assets/*
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="Endstone Live Map $GITHUB_REF_NAME"
+          notes_file=".github/release-notes/$GITHUB_REF_NAME.md"
+          assets=("$RUNNER_TEMP"/release-assets/*)
+
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$GITHUB_REF_NAME" --latest --title "$title" --notes-file "$notes_file" --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" --verify-tag --latest --title "$title" --notes-file "$notes_file" --repo "$GITHUB_REPOSITORY"
+          fi
