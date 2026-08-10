@@ -9,8 +9,13 @@ export function applyAppViewportMetrics(
   targetWindow: Pick<Window, "innerHeight" | "visualViewport"> = window,
   root: HTMLElement = document.documentElement,
 ): number {
-  const height = measuredViewportHeight(targetWindow.visualViewport?.height, targetWindow.innerHeight);
+  const visualViewport = targetWindow.visualViewport;
+  const height = measuredViewportHeight(visualViewport?.height, targetWindow.innerHeight);
+  const offsetTop = Number.isFinite(visualViewport?.offsetTop)
+    ? Math.max(0, Math.round(Number(visualViewport?.offsetTop)))
+    : 0;
   root.style.setProperty("--app-viewport-height", `${height}px`);
+  root.style.setProperty("--app-viewport-top", `${offsetTop}px`);
   root.style.setProperty("--mobile-panel-max-height", `${Math.min(Math.round(height * 0.58), 520)}px`);
   return height;
 }

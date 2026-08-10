@@ -485,6 +485,64 @@ test("keeps the map primary and makes mobile panels and locations easy to reach"
   await expect(page.getByLabel("地图状态")).toContainText("下界");
 });
 
+test("keeps the land search panel attached above navigation while the mobile keyboard is open", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => {
+    const viewport = Object.assign(new EventTarget(), {
+      width: 390,
+      height: 844,
+      offsetLeft: 0,
+      offsetTop: 0,
+      pageLeft: 0,
+      pageTop: 0,
+      scale: 1,
+    });
+    Object.defineProperty(window, "visualViewport", {
+      configurable: true,
+      value: viewport,
+    });
+    (window as unknown as {
+      __setTestVisualViewport: (height: number, offsetTop: number) => void;
+    }).__setTestVisualViewport = (height, offsetTop) => {
+      viewport.height = height;
+      viewport.offsetTop = offsetTop;
+      viewport.dispatchEvent(new Event("resize"));
+      viewport.dispatchEvent(new Event("scroll"));
+    };
+  });
+  await mockLiveMap(page, { landCount: 14 });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "公开领地，14 个" }).click();
+  const searchInput = page.getByPlaceholder("搜索领地或主人");
+  await searchInput.fill("公开领地1");
+  await page.evaluate(() => {
+    (window as unknown as {
+      __setTestVisualViewport: (height: number, offsetTop: number) => void;
+    }).__setTestVisualViewport(430, 414);
+  });
+
+  await expect.poll(() => page.locator(".app-shell").evaluate((element) => element.getBoundingClientRect().top)).toBe(414);
+  const appBounds = await page.locator(".app-shell").boundingBox();
+  const navigationBounds = await page.getByTestId("mobile-navigation").boundingBox();
+  const panelBounds = await page.getByTestId("mobile-panel").boundingBox();
+  expect(appBounds).not.toBeNull();
+  expect(navigationBounds).not.toBeNull();
+  expect(panelBounds).not.toBeNull();
+  expect(appBounds!.y + appBounds!.height).toBe(844);
+  expect(navigationBounds!.y + navigationBounds!.height).toBe(844);
+  expect(panelBounds!.y).toBeGreaterThanOrEqual(414);
+  expect(panelBounds!.y + panelBounds!.height).toBeLessThanOrEqual(navigationBounds!.y);
+
+  const typography = await page.evaluate(() => ({
+    input: Number.parseFloat(getComputedStyle(document.querySelector(".mobile-land-search input")!).fontSize),
+    title: Number.parseFloat(getComputedStyle(document.querySelector(".mobile-panel-copy strong")!).fontSize),
+  }));
+  expect(typography.input).toBeGreaterThanOrEqual(16);
+  expect(typography.input).toBe(typography.title);
+  await expect(page.getByRole("button", { name: "公开领地10" })).toBeVisible();
+});
+
 async function mockLiveMap(
   page: Page,
   options: {

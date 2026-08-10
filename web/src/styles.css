@@ -769,7 +769,7 @@ h2 svg {
 
   .app-shell {
     position: fixed;
-    top: 0;
+    top: var(--app-viewport-top, 0px);
     right: 0;
     left: 0;
     grid-template-columns: 1fr;
@@ -856,7 +856,7 @@ h2 svg {
   }
 
   .side-panel {
-    position: fixed;
+    position: absolute;
     right: 8px;
     bottom: calc(var(--mobile-navigation-height) + 8px);
     left: 8px;
@@ -910,7 +910,7 @@ h2 svg {
   .mobile-panel-heading strong {
     justify-self: start;
     color: var(--text);
-    font-size: 14px;
+    font-size: 16px;
     line-height: 1.2;
   }
 
@@ -972,6 +972,11 @@ h2 svg {
       background-color 180ms ease,
       border-color 180ms ease,
       box-shadow 180ms ease;
+  }
+
+  .mobile-panel-heading .mobile-land-search input {
+    font-size: 16px;
+    line-height: 1.25;
   }
 
   .side-panel .panel-header,

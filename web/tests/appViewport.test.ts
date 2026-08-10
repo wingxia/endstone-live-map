@@ -11,12 +11,16 @@ describe("mobile visual viewport sizing", () => {
   it("updates the app and panel CSS metrics together", () => {
     const root = document.createElement("div");
     const height = applyAppViewportMetrics(
-      { innerHeight: 760, visualViewport: { height: 932.4 } as VisualViewport },
+      {
+        innerHeight: 760,
+        visualViewport: { height: 932.4, offsetTop: 18.6 } as VisualViewport,
+      },
       root,
     );
 
     expect(height).toBe(932);
     expect(root.style.getPropertyValue("--app-viewport-height")).toBe("932px");
+    expect(root.style.getPropertyValue("--app-viewport-top")).toBe("19px");
     expect(root.style.getPropertyValue("--mobile-panel-max-height")).toBe("520px");
   });
 });
