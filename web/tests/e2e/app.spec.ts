@@ -525,6 +525,15 @@ test("keeps the land search panel attached above navigation while the mobile key
   });
 
   await expect.poll(() => page.locator(".app-shell").evaluate((element) => element.getBoundingClientRect().top)).toBe(414);
+  await expect.poll(async () => {
+    const [navigationBounds, panelBounds] = await Promise.all([
+      page.getByTestId("mobile-navigation").boundingBox(),
+      page.getByTestId("mobile-panel").boundingBox(),
+    ]);
+    return navigationBounds && panelBounds
+      ? navigationBounds.y - panelBounds.y - panelBounds.height
+      : Number.NEGATIVE_INFINITY;
+  }).toBeGreaterThanOrEqual(0);
   const appBounds = await page.locator(".app-shell").boundingBox();
   const navigationBounds = await page.getByTestId("mobile-navigation").boundingBox();
   const panelBounds = await page.getByTestId("mobile-panel").boundingBox();
