@@ -450,12 +450,14 @@ test("keeps the map primary and makes mobile panels and locations easy to reach"
   await page.getByTestId("mobile-panel").hover();
   await page.mouse.wheel(0, 420);
   await expect(page.locator(".mobile-land-panel-heading")).toHaveAttribute("data-land-search-position", "inline");
-  const inlineSearch = await landSearch.boundingBox();
-  const inlineTitle = await landTitle.boundingBox();
-  expect(inlineSearch).not.toBeNull();
-  expect(inlineTitle).not.toBeNull();
-  expect(inlineSearch!.x).toBeGreaterThan(inlineTitle!.x + inlineTitle!.width);
-  expect(Math.abs(inlineSearch!.y - inlineTitle!.y)).toBeLessThanOrEqual(12);
+  await expect.poll(async () => {
+    const [inlineSearch, inlineTitle] = await Promise.all([landSearch.boundingBox(), landTitle.boundingBox()]);
+    return inlineSearch && inlineTitle ? inlineSearch.x - inlineTitle.x - inlineTitle.width : Number.NEGATIVE_INFINITY;
+  }).toBeGreaterThan(0);
+  await expect.poll(async () => {
+    const [inlineSearch, inlineTitle] = await Promise.all([landSearch.boundingBox(), landTitle.boundingBox()]);
+    return inlineSearch && inlineTitle ? Math.abs(inlineSearch.y - inlineTitle.y) : Number.POSITIVE_INFINITY;
+  }).toBeLessThanOrEqual(12);
   await expect(page.getByRole("button", { name: "关闭信息面板" })).toBeVisible();
   await mapCanvas.click({ position: { x: 200, y: 150 } });
   await expect(page.getByTestId("mobile-panel")).toBeHidden();

@@ -10,11 +10,11 @@ Endstone Bedrock 服务器的实时网页地图。插件在游戏进程内采样
 
 ## 最新版本
 
-当前稳定版是 [`v0.1.0`](https://github.com/wingxia/endstone-live-map/releases/tag/v0.1.0)，面向 Endstone `0.11.6`、Linux x86_64 和 Node.js 22+。
+当前稳定版是 [`v0.1.1`](https://github.com/wingxia/endstone-live-map/releases/tag/v0.1.1)，面向 Endstone `0.11.6`、Linux x86_64 和 Node.js 22+。
 
-- [完整 Linux x86_64 发布包](https://github.com/wingxia/endstone-live-map/releases/download/v0.1.0/endstone-live-map-v0.1.0-linux-x86_64.tar.gz)：包含插件、已构建 Web 页面、Node 服务、示例配置和安装脚本。
-- [独立 Endstone 插件](https://github.com/wingxia/endstone-live-map/releases/download/v0.1.0/endstone_live_map-linux-x86_64.so)：适合已有代码部署的服务器。
-- [SHA-256 校验文件](https://github.com/wingxia/endstone-live-map/releases/download/v0.1.0/SHA256SUMS.txt)：用于核对下载文件完整性。
+- [完整 Linux x86_64 发布包](https://github.com/wingxia/endstone-live-map/releases/download/v0.1.1/endstone-live-map-v0.1.1-linux-x86_64.tar.gz)：包含插件、已构建 Web 页面、Node 服务、示例配置和安装脚本。
+- [独立 Endstone 插件](https://github.com/wingxia/endstone-live-map/releases/download/v0.1.1/endstone_live_map-linux-x86_64.so)：适合已有代码部署的服务器。
+- [SHA-256 校验文件](https://github.com/wingxia/endstone-live-map/releases/download/v0.1.1/SHA256SUMS.txt)：用于核对下载文件完整性。
 
 版本变化见 [CHANGELOG](CHANGELOG.md)，所有正式版本见 [GitHub Releases](https://github.com/wingxia/endstone-live-map/releases/latest)。
 
