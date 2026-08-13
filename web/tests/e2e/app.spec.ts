@@ -10,6 +10,7 @@ const AVATAR_PNG = Buffer.from(
   "base64",
 );
 const MAP_CENTER_TOLERANCE = 0.05;
+const TRACKING_BOUNDS_CENTER_TOLERANCE = 0.2;
 
 test("renders the operational map shell from local PNG tiles only", async ({ page }) => {
   const requests = await mockLiveMap(page, { players: false });
@@ -354,6 +355,46 @@ test("moves an unchanged player marker without rebuilding its DOM", async ({ pag
 
   await expect.poll(() => marker.getAttribute("style")).not.toBe(initialTransform);
   await expect(marker).toHaveAttribute("data-marker-instance", "preserved");
+});
+
+test("toggles persistent multi-player tracking without clearing the remaining selection", async ({ page }) => {
+  await installMockLiveSocket(page);
+  await mockLiveMap(page);
+  await page.goto("/");
+
+  const wingButton = page.getByRole("button", { name: "追踪玩家 Wing" });
+  await wingButton.click();
+  await expect(page.getByRole("button", { name: "取消追踪玩家 Wing" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".player-marker-tracked")).toHaveCount(1);
+  await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat - 22))).toBeLessThan(MAP_CENTER_TOLERANCE);
+  await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng - 18))).toBeLessThan(MAP_CENTER_TOLERANCE);
+
+  await publishPlayerSnapshot(page, [
+    mockPlayer({ id: "player-wing", name: "Wing", x: 46, z: -35 }),
+    mockPlayer({ id: "player-alex", name: "Alex", x: -82, z: 50, avatarHash: "def456" }),
+  ]);
+
+  await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat - 35))).toBeLessThan(MAP_CENTER_TOLERANCE);
+  await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng - 46))).toBeLessThan(MAP_CENTER_TOLERANCE);
+
+  await page.getByRole("button", { name: "追踪玩家 Alex" }).click();
+  await expect(page.locator(".player-marker-tracked")).toHaveCount(2);
+  await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat + 7.5))).toBeLessThan(TRACKING_BOUNDS_CENTER_TOLERANCE);
+  await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng + 18))).toBeLessThan(TRACKING_BOUNDS_CENTER_TOLERANCE);
+
+  await page.getByRole("button", { name: "取消追踪玩家 Wing" }).click();
+  await expect(page.getByRole("button", { name: "追踪玩家 Wing" })).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByRole("button", { name: "取消追踪玩家 Alex" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".player-marker-tracked")).toHaveCount(1);
+  await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat + 50))).toBeLessThan(MAP_CENTER_TOLERANCE);
+  await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng + 82))).toBeLessThan(MAP_CENTER_TOLERANCE);
+
+  await publishPlayerSnapshot(page, [
+    mockPlayer({ id: "player-wing", name: "Wing", x: 46, z: -35 }),
+    mockPlayer({ id: "player-alex", name: "Alex", x: -60, z: 72, avatarHash: "def456" }),
+  ]);
+  await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat + 72))).toBeLessThan(MAP_CENTER_TOLERANCE);
+  await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng + 60))).toBeLessThan(MAP_CENTER_TOLERANCE);
 });
 
 test("keeps mobile map HUDs compact and non-overlapping", async ({ page }) => {
@@ -793,6 +834,41 @@ async function leafletView(page: Page) {
     const center = map?.getCenter?.() || { lat: Number.NaN, lng: Number.NaN };
     return { lat: center.lat, lng: center.lng, zoom: map?.getZoom?.() ?? Number.NaN };
   });
+}
+
+function mockPlayer(overrides: Partial<{
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  z: number;
+  avatarHash: string;
+}> = {}) {
+  const id = overrides.id ?? "player-wing";
+  const avatarHash = overrides.avatarHash ?? "abc123";
+  return {
+    id,
+    name: overrides.name ?? "Wing",
+    xuid: `xuid-${id}`,
+    world: "Bedrock level",
+    dimension: "Overworld",
+    x: overrides.x ?? 18,
+    y: overrides.y ?? 72,
+    z: overrides.z ?? -22,
+    yaw: 120,
+    pitch: 0,
+    avatarHash,
+    avatarUrl: `/api/players/${id}/avatar.png?_=${avatarHash}`,
+    updatedAt: Date.now(),
+  };
+}
+
+async function publishPlayerSnapshot(page: Page, players: ReturnType<typeof mockPlayer>[]) {
+  await page.evaluate((nextPlayers) => {
+    (window as unknown as { __liveMapSocketSend: (data: string) => void }).__liveMapSocketSend(
+      JSON.stringify({ type: "player_snapshot", players: nextPlayers }),
+    );
+  }, players);
 }
 
 async function hudMapCoverage(page: Page) {

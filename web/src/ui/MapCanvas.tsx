@@ -30,6 +30,7 @@ interface MapCanvasProps {
   world: string;
   dimension: string;
   players: PlayerState[];
+  trackedPlayerIds: ReadonlySet<string>;
   lands: LandClaim[];
   birthplace: { x: number; z: number } | null;
   worldMeta: WorldMeta | null;
@@ -37,7 +38,7 @@ interface MapCanvasProps {
   focusTarget: { x: number; z: number; nonce: number } | null;
 }
 
-export function MapCanvas({ world, dimension, players, lands, birthplace, worldMeta, tilesReady, focusTarget }: MapCanvasProps) {
+export function MapCanvas({ world, dimension, players, trackedPlayerIds, lands, birthplace, worldMeta, tilesReady, focusTarget }: MapCanvasProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const stateRef = useRef<{
     map: L.Map;
@@ -51,6 +52,7 @@ export function MapCanvas({ world, dimension, players, lands, birthplace, worldM
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const lockedRef = useRef(false);
   const autoFitKeyRef = useRef("");
+  const trackingViewRef = useRef({ key: "", maxZoom: INITIAL_MAP_ZOOM });
   const homeViewsRef = useRef(new Map<string, { center: [number, number]; zoom: number }>());
   const navigationBoundsRef = useRef<{ key: string; bounds: WorldMeta["bounds"] | null }>({
     key: "",
@@ -273,6 +275,48 @@ export function MapCanvas({ world, dimension, players, lands, birthplace, worldM
   }, [focusTarget, mapReady]);
 
   useEffect(() => {
+    const state = stateRef.current;
+    if (!state || !mapReady) {
+      return;
+    }
+
+    const trackedPlayers = players.filter((player) => trackedPlayerIds.has(String(player.id)));
+    if (trackedPlayers.length === 0) {
+      trackingViewRef.current = { key: "", maxZoom: INITIAL_MAP_ZOOM };
+      return;
+    }
+
+    const trackingKey = `${mapViewKey(world, dimension)}/${trackedPlayers
+      .map((player) => String(player.id))
+      .sort()
+      .join(",")}`;
+    const selectionChanged = trackingViewRef.current.key !== trackingKey;
+    if (selectionChanged) {
+      trackingViewRef.current = {
+        key: trackingKey,
+        maxZoom: trackingViewRef.current.key ? trackingViewRef.current.maxZoom : state.map.getZoom(),
+      };
+    }
+
+    if (trackedPlayers.length === 1) {
+      const player = trackedPlayers[0];
+      state.map.setView(minecraftToLeaflet(player.x, player.z), selectionChanged ? trackingViewRef.current.maxZoom : state.map.getZoom(), {
+        animate: false,
+      });
+      return;
+    }
+
+    state.map.fitBounds(
+      L.latLngBounds(trackedPlayers.map((player) => minecraftToLeaflet(player.x, player.z))),
+      {
+        animate: false,
+        padding: [64, 64],
+        maxZoom: trackingViewRef.current.maxZoom,
+      },
+    );
+  }, [dimension, focusTarget, mapReady, players, trackedPlayerIds, world]);
+
+  useEffect(() => {
     let cancelled = false;
 
     function refreshLandOverlay() {
@@ -336,15 +380,16 @@ export function MapCanvas({ world, dimension, players, lands, birthplace, worldM
       const onlinePlayerIds = new Set<string>();
       for (const player of players) {
         const playerId = String(player.id);
+        const tracked = trackedPlayerIds.has(playerId);
         const nextPosition = minecraftToLeaflet(player.x, player.z);
-        const visualSignature = playerMarkerVisualSignature(player);
+        const visualSignature = playerMarkerVisualSignature(player, tracked);
         const tooltip = playerMarkerTooltip(player);
         onlinePlayerIds.add(playerId);
 
         const existing = state.playerMarkers.get(playerId);
         if (!existing) {
           const marker = L.marker(nextPosition, {
-            icon: playerMarkerIcon(player),
+            icon: playerMarkerIcon(player, tracked),
             keyboard: false,
           })
             .bindTooltip(tooltip, { permanent: false })
@@ -358,7 +403,7 @@ export function MapCanvas({ world, dimension, players, lands, birthplace, worldM
           existing.marker.setLatLng(nextPosition);
         }
         if (existing.visualSignature !== visualSignature) {
-          existing.marker.setIcon(playerMarkerIcon(player));
+          existing.marker.setIcon(playerMarkerIcon(player, tracked));
           existing.visualSignature = visualSignature;
         }
         if (existing.tooltipSignature !== tooltip) {
@@ -377,7 +422,7 @@ export function MapCanvas({ world, dimension, players, lands, birthplace, worldM
     }
 
     refreshOverlay();
-  }, [mapReady, players]);
+  }, [mapReady, players, trackedPlayerIds]);
 
   useEffect(() => {
     if (copyState === "idle") {
@@ -659,17 +704,17 @@ function playerMarkerHtml(player: PlayerState) {
   return `<span class="player-marker-frame">${avatarHtml}</span><span class="player-marker-name">${name}</span>`;
 }
 
-function playerMarkerIcon(player: PlayerState) {
+function playerMarkerIcon(player: PlayerState, tracked: boolean) {
   return L.divIcon({
-    className: "player-marker",
+    className: tracked ? "player-marker player-marker-tracked" : "player-marker",
     html: playerMarkerHtml(player),
     iconSize: [36, 48],
     iconAnchor: [18, 42],
   });
 }
 
-function playerMarkerVisualSignature(player: PlayerState) {
-  return `${player.name}\u0000${playerAvatarUrl(player)}`;
+function playerMarkerVisualSignature(player: PlayerState, tracked: boolean) {
+  return `${player.name}\u0000${playerAvatarUrl(player)}\u0000${tracked}`;
 }
 
 function playerMarkerTooltip(player: PlayerState) {

@@ -116,6 +116,31 @@ describe("PlayerList", () => {
 
     expect(selected).toBe("1");
   });
+
+  it("shows tracked players as toggle buttons", () => {
+    render(
+      <PlayerList
+        players={[
+          {
+            id: "1",
+            name: "Wing",
+            world: "world",
+            dimension: "Overworld",
+            x: 12,
+            y: 64,
+            z: -9,
+            yaw: 0,
+            pitch: 0,
+            updatedAt: 1,
+          },
+        ]}
+        trackedPlayerIds={new Set(["1"])}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "取消追踪玩家 Wing" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("追踪中")).toBeInTheDocument();
+  });
 });
 
 describe("LandList", () => {

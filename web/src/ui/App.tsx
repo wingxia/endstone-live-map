@@ -41,6 +41,7 @@ export function App() {
   const [error, setError] = useState("");
   const [landError, setLandError] = useState("");
   const [focusTarget, setFocusTarget] = useState<MapFocusTarget | null>(null);
+  const [trackedPlayerIds, setTrackedPlayerIds] = useState<Set<string>>(() => new Set());
   const [mobilePanel, setMobilePanel] = useState<MobilePanel | null>(null);
   const [landQuery, setLandQuery] = useState("");
   const [landSearchProgress, setLandSearchProgress] = useState(0);
@@ -127,11 +128,23 @@ export function App() {
     }
   }, [mobilePanel]);
 
+  useEffect(() => {
+    const onlinePlayerIds = new Set(live.players.map((player) => String(player.id)));
+    setTrackedPlayerIds((current) => {
+      const next = new Set([...current].filter((playerId) => onlinePlayerIds.has(playerId)));
+      return next.size === current.size ? current : next;
+    });
+  }, [live.players]);
+
   const selectedPlayers = live.players.filter(
     (player) =>
       player.dimension === selectedDimension && segmentKey(player.world) === segmentKey(selectedWorld),
   );
   const selectedDimensionLabel = DIMENSIONS.find(({ id }) => id === selectedDimension)?.label ?? selectedDimension;
+  const selectedTrackedPlayerCount = selectedPlayers.reduce(
+    (count, player) => count + (trackedPlayerIds.has(String(player.id)) ? 1 : 0),
+    0,
+  );
   const selectedLands = useMemo(
     () =>
       lands.filter(
@@ -152,7 +165,7 @@ export function App() {
     mobilePanel === "dimensions"
       ? selectedDimensionLabel
       : mobilePanel === "players"
-        ? `${selectedPlayers.length} 人在线`
+        ? `${selectedPlayers.length} 人在线${selectedTrackedPlayerCount > 0 ? ` · 追踪 ${selectedTrackedPlayerCount} 人` : ""}`
         : mobilePanel === "lands"
           ? `${publicLands.length} 个可传送`
           : "";
@@ -163,6 +176,18 @@ export function App() {
   };
   const focusMap = (x: number, z: number) => {
     setFocusTarget({ x, z, nonce: Date.now() });
+    setMobilePanel(null);
+  };
+  const togglePlayerTracking = (playerId: string) => {
+    setTrackedPlayerIds((current) => {
+      const next = new Set(current);
+      if (next.has(playerId)) {
+        next.delete(playerId);
+      } else {
+        next.add(playerId);
+      }
+      return next;
+    });
     setMobilePanel(null);
   };
   const toggleMobilePanel = (panel: MobilePanel) => {
@@ -187,6 +212,7 @@ export function App() {
           world={selectedWorld}
           dimension={selectedDimension}
           players={selectedPlayers}
+          trackedPlayerIds={trackedPlayerIds}
           lands={publicLands}
           birthplace={birthplace}
           worldMeta={selectedWorldMeta}
@@ -281,7 +307,8 @@ export function App() {
           </h2>
           <PlayerList
             players={selectedPlayers}
-            onSelectPlayer={(player) => focusMap(player.x, player.z)}
+            trackedPlayerIds={trackedPlayerIds}
+            onSelectPlayer={(player) => togglePlayerTracking(String(player.id))}
           />
         </section>
 
