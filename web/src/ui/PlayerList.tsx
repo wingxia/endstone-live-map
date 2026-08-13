@@ -19,7 +19,7 @@ export function PlayerList({ players, trackedPlayerIds = new Set(), onSelectPlay
           <li key={player.id}>
             <button
               type="button"
-              className="item-action"
+              className={tracked ? "item-action player-item-action is-tracked" : "item-action player-item-action"}
               aria-label={`${tracked ? "取消追踪" : "追踪"}玩家 ${player.name}`}
               aria-pressed={tracked}
               onClick={() => onSelectPlayer?.(player)}
