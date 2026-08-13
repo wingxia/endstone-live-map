@@ -141,10 +141,6 @@ export function App() {
       player.dimension === selectedDimension && segmentKey(player.world) === segmentKey(selectedWorld),
   );
   const selectedDimensionLabel = DIMENSIONS.find(({ id }) => id === selectedDimension)?.label ?? selectedDimension;
-  const selectedTrackedPlayerCount = selectedPlayers.reduce(
-    (count, player) => count + (trackedPlayerIds.has(String(player.id)) ? 1 : 0),
-    0,
-  );
   const selectedLands = useMemo(
     () =>
       lands.filter(
@@ -165,7 +161,7 @@ export function App() {
     mobilePanel === "dimensions"
       ? selectedDimensionLabel
       : mobilePanel === "players"
-        ? `${selectedPlayers.length} 人在线${selectedTrackedPlayerCount > 0 ? ` · 追踪 ${selectedTrackedPlayerCount} 人` : ""}`
+        ? `${selectedPlayers.length} 人在线`
         : mobilePanel === "lands"
           ? `${publicLands.length} 个可传送`
           : "";

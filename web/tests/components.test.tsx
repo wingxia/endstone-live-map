@@ -117,8 +117,8 @@ describe("PlayerList", () => {
     expect(selected).toBe("1");
   });
 
-  it("shows tracked players as toggle buttons", () => {
-    render(
+  it("keeps tracked players visually unchanged while exposing toggle state", () => {
+    const { container } = render(
       <PlayerList
         players={[
           {
@@ -139,7 +139,8 @@ describe("PlayerList", () => {
     );
 
     expect(screen.getByRole("button", { name: "取消追踪玩家 Wing" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByText("追踪中")).toBeInTheDocument();
+    expect(screen.queryByText("追踪中")).not.toBeInTheDocument();
+    expect(container.querySelector(".is-tracked")).not.toBeInTheDocument();
   });
 });
 

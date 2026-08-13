@@ -380,16 +380,15 @@ export function MapCanvas({ world, dimension, players, trackedPlayerIds, lands, 
       const onlinePlayerIds = new Set<string>();
       for (const player of players) {
         const playerId = String(player.id);
-        const tracked = trackedPlayerIds.has(playerId);
         const nextPosition = minecraftToLeaflet(player.x, player.z);
-        const visualSignature = playerMarkerVisualSignature(player, tracked);
+        const visualSignature = playerMarkerVisualSignature(player);
         const tooltip = playerMarkerTooltip(player);
         onlinePlayerIds.add(playerId);
 
         const existing = state.playerMarkers.get(playerId);
         if (!existing) {
           const marker = L.marker(nextPosition, {
-            icon: playerMarkerIcon(player, tracked),
+            icon: playerMarkerIcon(player),
             keyboard: false,
           })
             .bindTooltip(tooltip, { permanent: false })
@@ -403,7 +402,7 @@ export function MapCanvas({ world, dimension, players, trackedPlayerIds, lands, 
           existing.marker.setLatLng(nextPosition);
         }
         if (existing.visualSignature !== visualSignature) {
-          existing.marker.setIcon(playerMarkerIcon(player, tracked));
+          existing.marker.setIcon(playerMarkerIcon(player));
           existing.visualSignature = visualSignature;
         }
         if (existing.tooltipSignature !== tooltip) {
@@ -422,7 +421,7 @@ export function MapCanvas({ world, dimension, players, trackedPlayerIds, lands, 
     }
 
     refreshOverlay();
-  }, [mapReady, players, trackedPlayerIds]);
+  }, [mapReady, players]);
 
   useEffect(() => {
     if (copyState === "idle") {
@@ -704,17 +703,17 @@ function playerMarkerHtml(player: PlayerState) {
   return `<span class="player-marker-frame">${avatarHtml}</span><span class="player-marker-name">${name}</span>`;
 }
 
-function playerMarkerIcon(player: PlayerState, tracked: boolean) {
+function playerMarkerIcon(player: PlayerState) {
   return L.divIcon({
-    className: tracked ? "player-marker player-marker-tracked" : "player-marker",
+    className: "player-marker",
     html: playerMarkerHtml(player),
     iconSize: [36, 48],
     iconAnchor: [18, 42],
   });
 }
 
-function playerMarkerVisualSignature(player: PlayerState, tracked: boolean) {
-  return `${player.name}\u0000${playerAvatarUrl(player)}\u0000${tracked}`;
+function playerMarkerVisualSignature(player: PlayerState) {
+  return `${player.name}\u0000${playerAvatarUrl(player)}`;
 }
 
 function playerMarkerTooltip(player: PlayerState) {

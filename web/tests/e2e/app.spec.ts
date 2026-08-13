@@ -365,7 +365,8 @@ test("toggles persistent multi-player tracking without clearing the remaining se
   const wingButton = page.getByRole("button", { name: "追踪玩家 Wing" });
   await wingButton.click();
   await expect(page.getByRole("button", { name: "取消追踪玩家 Wing" })).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator(".player-marker-tracked")).toHaveCount(1);
+  await expect(page.getByText("追踪中")).toHaveCount(0);
+  await expect(page.locator(".is-tracked, .player-marker-tracked")).toHaveCount(0);
   await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat - 22))).toBeLessThan(MAP_CENTER_TOLERANCE);
   await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng - 18))).toBeLessThan(MAP_CENTER_TOLERANCE);
 
@@ -378,14 +379,14 @@ test("toggles persistent multi-player tracking without clearing the remaining se
   await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng - 46))).toBeLessThan(MAP_CENTER_TOLERANCE);
 
   await page.getByRole("button", { name: "追踪玩家 Alex" }).click();
-  await expect(page.locator(".player-marker-tracked")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "取消追踪玩家 Alex" })).toHaveAttribute("aria-pressed", "true");
   await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat + 7.5))).toBeLessThan(TRACKING_BOUNDS_CENTER_TOLERANCE);
   await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng + 18))).toBeLessThan(TRACKING_BOUNDS_CENTER_TOLERANCE);
 
   await page.getByRole("button", { name: "取消追踪玩家 Wing" }).click();
   await expect(page.getByRole("button", { name: "追踪玩家 Wing" })).toHaveAttribute("aria-pressed", "false");
   await expect(page.getByRole("button", { name: "取消追踪玩家 Alex" })).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator(".player-marker-tracked")).toHaveCount(1);
+  await expect(page.locator(".is-tracked, .player-marker-tracked")).toHaveCount(0);
   await expect.poll(() => leafletView(page).then(({ lat }) => Math.abs(lat + 50))).toBeLessThan(MAP_CENTER_TOLERANCE);
   await expect.poll(() => leafletView(page).then(({ lng }) => Math.abs(lng + 82))).toBeLessThan(MAP_CENTER_TOLERANCE);
 
